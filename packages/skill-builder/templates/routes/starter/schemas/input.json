@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sylo.local/templates/routes/starter/schemas/input.json",
+  "title": "RouteTemplateInput",
+  "type": "object",
+  "additionalProperties": true,
+  "description": "Optional structured input for the route UI; hosts may expose route context separately (window.__ROUTE_CONTEXT__)."
+}

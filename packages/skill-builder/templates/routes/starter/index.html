@@ -1,0 +1,57 @@
+<p class="sylo-surface-lead">Starter route iframe</p>
+<p class="sylo-surface-muted">
+  Route context skill: <code class="sylo-surface-code" id="skill"></code> · route id:
+  <code class="sylo-surface-code" id="route"></code>
+</p>
+<div class="sylo-surface-row">
+  <button type="button" class="sylo-surface-btn" id="starter-send">sendToAgent ({ ping })</button>
+</div>
+<pre id="out" class="sylo-surface-pre"></pre>
+<script>
+  ;(function () {
+    var ctx = window.__ROUTE_CONTEXT__
+    var sk = document.getElementById('skill')
+    var rt = document.getElementById('route')
+    if (sk) sk.textContent = ctx && ctx.skillId != null ? String(ctx.skillId) : '?'
+    if (rt) rt.textContent = ctx && ctx.routeId != null ? String(ctx.routeId) : '?'
+    var out = document.getElementById('out')
+    function log(msg) {
+      if (out) out.textContent = typeof msg === 'string' ? msg : JSON.stringify(msg, null, 2)
+    }
+    function rpc(op, payload) {
+      return new Promise(function (resolve, reject) {
+        var reqId = 'r-' + Math.random().toString(36).slice(2) + Date.now().toString(36)
+        function onMsg(ev) {
+          var d = ev.data
+          if (!d || d.kind !== 'sylo-skill-bridge-reply' || d.reqId !== reqId) return
+          window.removeEventListener('message', onMsg)
+          if (d.ok) resolve(d.result)
+          else reject(new Error(d.error || 'bridge_error'))
+        }
+        window.addEventListener('message', onMsg)
+        window.parent.postMessage(
+          {
+            v: 1,
+            kind: 'sylo-skill-bridge',
+            nonce: window.__SYLO_NONCE__,
+            reqId: reqId,
+            op: op,
+            payload: payload === undefined ? {} : payload,
+          },
+          '*',
+        )
+      })
+    }
+    var btn = document.getElementById('starter-send')
+    if (btn)
+      btn.addEventListener('click', function () {
+        rpc('sendToAgent', { ping: 'starter-route-template' })
+          .then(function () {
+            log('sendToAgent queued')
+          })
+          .catch(function (e) {
+            log(String(e))
+          })
+      })
+  })()
+</script>

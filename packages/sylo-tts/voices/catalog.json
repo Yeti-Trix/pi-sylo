@@ -1,0 +1,250 @@
+{
+  "default_voice_id": "kokoro-am_michael",
+  "disabled_backends": [],
+  "voices": [
+    {
+      "id": "kokoro-am_michael",
+      "label": "Michael — deep US male (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "am_michael",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-am_adam",
+      "label": "Adam — calm US male (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "am_adam",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-am_eric",
+      "label": "Eric — US male (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "am_eric",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-am_liam",
+      "label": "Liam — US male (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "am_liam",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-am_echo",
+      "label": "Echo — US male (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "am_echo",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-am_fenrir",
+      "label": "Fenrir — US male (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "am_fenrir",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-am_onyx",
+      "label": "Onyx — US male (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "am_onyx",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-am_puck",
+      "label": "Puck — US male (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "am_puck",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-am_santa",
+      "label": "Santa — US male (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "am_santa",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-af_heart",
+      "label": "Heart — warm US female (Kokoro, A grade)",
+      "backend": "kokoro",
+      "kokoro_voice": "af_heart",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-af_bella",
+      "label": "Bella — US female (Kokoro, A− grade)",
+      "backend": "kokoro",
+      "kokoro_voice": "af_bella",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-af_sarah",
+      "label": "Sarah — US female (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "af_sarah",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-af_sky",
+      "label": "Sky — bright US female (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "af_sky",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-af_alloy",
+      "label": "Alloy — US female (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "af_alloy",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-af_aoede",
+      "label": "Aoede — US female (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "af_aoede",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-af_jessica",
+      "label": "Jessica — US female (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "af_jessica",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-af_kore",
+      "label": "Kore — US female (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "af_kore",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-af_nicole",
+      "label": "Nicole — US female, headphone mix (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "af_nicole",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-af_nova",
+      "label": "Nova — US female (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "af_nova",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-af_river",
+      "label": "River — US female (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "af_river",
+      "kokoro_lang": "a"
+    },
+    {
+      "id": "kokoro-bm_george",
+      "label": "George — British male (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "bm_george",
+      "kokoro_lang": "b"
+    },
+    {
+      "id": "kokoro-bm_lewis",
+      "label": "Lewis — British male (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "bm_lewis",
+      "kokoro_lang": "b"
+    },
+    {
+      "id": "kokoro-bm_daniel",
+      "label": "Daniel — British male (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "bm_daniel",
+      "kokoro_lang": "b"
+    },
+    {
+      "id": "kokoro-bm_fable",
+      "label": "Fable — British male (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "bm_fable",
+      "kokoro_lang": "b"
+    },
+    {
+      "id": "kokoro-bf_emma",
+      "label": "Emma — British female (Kokoro, B− grade)",
+      "backend": "kokoro",
+      "kokoro_voice": "bf_emma",
+      "kokoro_lang": "b"
+    },
+    {
+      "id": "kokoro-bf_isabella",
+      "label": "Isabella — British female (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "bf_isabella",
+      "kokoro_lang": "b"
+    },
+    {
+      "id": "kokoro-bf_alice",
+      "label": "Alice — British female (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "bf_alice",
+      "kokoro_lang": "b"
+    },
+    {
+      "id": "kokoro-bf_lily",
+      "label": "Lily — British female (Kokoro)",
+      "backend": "kokoro",
+      "kokoro_voice": "bf_lily",
+      "kokoro_lang": "b"
+    },
+    {
+      "id": "orpheus-leo",
+      "label": "Leo — deep, authoritative (Orpheus)",
+      "backend": "orpheus",
+      "orpheus_voice": "leo"
+    },
+    {
+      "id": "orpheus-dan",
+      "label": "Dan — friendly, casual (Orpheus)",
+      "backend": "orpheus",
+      "orpheus_voice": "dan"
+    },
+    {
+      "id": "orpheus-tara",
+      "label": "Tara — conversational (Orpheus)",
+      "backend": "orpheus",
+      "orpheus_voice": "tara"
+    },
+    {
+      "id": "orpheus-leah",
+      "label": "Leah — warm, gentle (Orpheus)",
+      "backend": "orpheus",
+      "orpheus_voice": "leah"
+    },
+    {
+      "id": "orpheus-jess",
+      "label": "Jess — energetic (Orpheus)",
+      "backend": "orpheus",
+      "orpheus_voice": "jess"
+    },
+    {
+      "id": "orpheus-mia",
+      "label": "Mia — professional (Orpheus)",
+      "backend": "orpheus",
+      "orpheus_voice": "mia"
+    },
+    {
+      "id": "orpheus-zac",
+      "label": "Zac — dynamic (Orpheus)",
+      "backend": "orpheus",
+      "orpheus_voice": "zac"
+    },
+    {
+      "id": "orpheus-zoe",
+      "label": "Zoe — calm (Orpheus)",
+      "backend": "orpheus",
+      "orpheus_voice": "zoe"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+# sylo-tts core Python inference (Kokoro).
+# GPU torch recommended for Kokoro on RTX 50-series:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+# Orpheus (optional): pip install -r requirements-orpheus.txt
+# Install: pip install -r requirements.txt
+
+kokoro>=0.9.4
+misaki[en]>=0.9.4
+soundfile>=0.12.0
+numpy>=1.26.0,<2.0

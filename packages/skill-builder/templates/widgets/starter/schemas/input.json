@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sylo.local/templates/widgets/starter/schemas/input.json",
+  "title": "WidgetTemplateInput",
+  "type": "object",
+  "additionalProperties": true,
+  "description": "Passthrough payload from show_widget(html|path, data); available as window.__WIDGET_DATA__."
+}

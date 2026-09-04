@@ -1,0 +1,22 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": true,
+    "jsx": "react-jsx",
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "src/main/**/*",
+    "src/preload/**/*",
+    "src/generated/**/*",
+    "src/broker/**/*",
+    "src/shared/**/*",
+    "../../packages/sylo-health/shared/**/*",
+    "../../packages/sylo-workflows/extensions/**/*",
+    "../../packages/sylo-tasks/shared/**/*",
+    "../../packages/sylo-tasks/extensions/**/*",
+    "../../packages/sylo-subagents/extensions/**/*",
+    "../../packages/sylo-think-tank/extensions/**/*"
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "name": "sylo-workflows",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Sylo workflows — a database of operator prompt playbooks loaded into chat on demand.",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "extensions",
+    "skills",
+    "shared",
+    "scripts",
+    "ui",
+    "README.md"
+  ],
+  "scripts": {
+    "build:ui": "node scripts/build-ui.mjs"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ],
+    "skills": [
+      "./skills/sylo-workflows"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2"
+  },
+  "dependencies": {
+    "typebox": "^1.1.24"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.18",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwindcss": "^4.1.18",
+    "typescript": "^5.7.3",
+    "vite": "^6.4.3"
+  }
+}

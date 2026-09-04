@@ -1,0 +1,16 @@
+{
+  "name": "@sylo/skill-builder",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Authoring payloads for Pi skills — meta-skill and starter templates for Sylo widgets + routes (.prd SKILL_AND_EXTENSION_MANAGEMENT, section 13).",
+  "keywords": [
+    "pi-package",
+    "sylo",
+    "skill-templates"
+  ],
+  "files": [
+    "skills",
+    "templates"
+  ]
+}

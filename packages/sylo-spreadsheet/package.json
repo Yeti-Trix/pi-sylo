@@ -1,0 +1,30 @@
+{
+  "name": "sylo-spreadsheet",
+  "version": "0.2.0",
+  "description": "Read .xlsx/.ods as JSON and create .xlsx workbooks with data and native Excel charts for the agent",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "extensions",
+    "skills",
+    "scripts",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ],
+    "skills": [
+      "./skills/spreadsheet"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2"
+  },
+  "dependencies": {
+    "typebox": "^1.1.24"
+  },
+  "license": "MIT"
+}

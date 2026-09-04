@@ -1,0 +1,44 @@
+{
+  "name": "sylo-tasks",
+  "version": "0.1.0",
+  "description": "Per-workspace task lists for agent + operator — tools, store, and (Phase 2/3) live Canvas board + sidebar dashboard.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "extensions",
+    "shared",
+    "skills",
+    "README.md"
+  ],
+  "scripts": {
+    "build:ui": "vite build --config ui/vite.config.ts && node scripts/postbuild-ui.mjs"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ],
+    "skills": [
+      "./skills/tasks"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2"
+  },
+  "dependencies": {
+    "typebox": "^1.1.24"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "esbuild": "^0.25.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.4.3"
+  }
+}

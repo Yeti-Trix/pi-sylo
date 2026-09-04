@@ -1,0 +1,30 @@
+{
+  "name": "@sylo/sylo-scheduler",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Sylo workspace-scoped scheduled prompts (host scheduler + agent CRUD tools)",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "extensions",
+    "skills",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ],
+    "skills": [
+      "./skills/sylo-scheduler"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2"
+  },
+  "dependencies": {
+    "typebox": "^1.1.24"
+  }
+}

@@ -1,0 +1,385 @@
+<p class="sylo-surface-lead">Web access — audit and settings</p>
+<p class="sylo-surface-muted">Privacy-first search and fetch. Rank/rewrite models are toolless (no injection via tools).</p>
+
+<nav class="sylo-surface-row" id="tabs" aria-label="Sections">
+  <button type="button" class="sylo-surface-btn sylo-tab active" data-tab="history">History</button>
+  <button type="button" class="sylo-surface-btn sylo-tab" data-tab="stats">Stats</button>
+  <button type="button" class="sylo-surface-btn sylo-tab" data-tab="settings">Settings</button>
+</nav>
+
+<section id="panel-history" class="sylo-panel">
+  <p class="sylo-surface-muted" id="history-hint">Loading…</p>
+  <div id="history-list"></div>
+</section>
+
+<section id="panel-stats" class="sylo-panel" hidden>
+  <pre id="stats-out" class="sylo-surface-pre"></pre>
+</section>
+
+<section id="panel-settings" class="sylo-panel" hidden>
+  <p class="sylo-surface-muted">Rank/rewrite models are toolless Ollama calls. Empty selection uses your main chat model. Pick a smaller model for <strong>rewrite</strong> to speed up search. Restart broker after saving.</p>
+  <p class="sylo-surface-muted" id="models-hint">Loading models from Settings Ollama server…</p>
+  <form id="settings-form" class="sylo-form">
+    <label>Ollama host override (optional)<br /><input name="ollamaHost" type="text" class="sylo-input" placeholder="empty = from main model / Settings" /></label>
+    <label>Rank model<br /><select name="rank_model" class="sylo-input sylo-model-select"></select></label>
+    <label>Rewrite model<br /><select name="rewrite_model" class="sylo-input sylo-model-select"></select></label>
+    <label>Relevancy threshold<br /><input name="relevancy_threshold" type="number" step="0.05" min="0" max="1" class="sylo-input" /></label>
+    <label>Max pages per search<br /><input name="max_pages_per_search" type="number" min="1" max="10" class="sylo-input" /></label>
+    <label>Max search calls / turn<br /><input name="max_search_calls_per_turn" type="number" min="1" max="10" class="sylo-input" /></label>
+    <label>Max fetch calls / turn<br /><input name="max_fetch_calls_per_turn" type="number" min="1" max="20" class="sylo-input" /></label>
+    <label><input name="heavy_tiers_enabled" type="checkbox" /> Enable heavy tiers (S2 ddgs search + F2 Crawl4AI headless on block/JS pages)</label>
+    <label><input name="preview_images_enabled" type="checkbox" /> Attach F1 preview images for vision models (og:image / hero)</label>
+        <label>Max preview images / page<br /><input name="max_preview_images_per_page" type="number" min="0" max="4" class="sylo-input" /></label>
+    <label>Brave Search API key (optional — enables the keyed S2 Brave fallback)<br /><input name="brave_api_key" type="password" class="sylo-input" placeholder="paste Brave API key" autocomplete="off" /></label>
+    <p class="sylo-surface-muted" id="brave-quota" style="margin: 0.25rem 0 0.5rem;">Brave quota: loading…</p>
+    <fieldset>
+      <legend class="sylo-surface-muted">S2 search backends (order = rotation on DDG block)</legend>
+      <div id="backends-privacy"></div>
+      <details class="sylo-surface-muted">
+        <summary>Opt-in tracking engines</summary>
+        <div id="backends-tracking"></div>
+      </details>
+    </fieldset>
+    <button type="submit" class="sylo-surface-btn">Save settings</button>
+    <span id="save-msg" class="sylo-surface-muted"></span>
+  </form>
+</section>
+
+<style>
+  .sylo-tab.active { font-weight: 600; text-decoration: underline; }
+  .sylo-panel { margin-top: 0.75rem; }
+  .sylo-form label { display: block; margin: 0.5rem 0; }
+  .sylo-input { width: 100%; max-width: 28rem; padding: 0.35rem 0.5rem; margin-top: 0.2rem; }
+  .sylo-run { border: 1px solid var(--sylo-border, #333); border-radius: 6px; padding: 0.6rem; margin: 0.5rem 0; }
+  .sylo-run h4 { margin: 0 0 0.35rem; font-size: 0.95rem; }
+  .sylo-badge { font-size: 0.75rem; opacity: 0.85; margin-right: 0.35rem; }
+</style>
+
+<script>
+  ;(function () {
+        var PRIVACY = ['duckduckgo', 'brave_api']
+    var TRACKING = ['google', 'bing', 'yahoo', 'yandex']
+
+    function rpc(op, payload) {
+      return new Promise(function (resolve, reject) {
+        var reqId = 'r-' + Math.random().toString(36).slice(2) + Date.now().toString(36)
+        function onMsg(ev) {
+          var d = ev.data
+          if (!d || d.kind !== 'sylo-skill-bridge-reply' || d.reqId !== reqId) return
+          window.removeEventListener('message', onMsg)
+          if (d.ok) resolve(d.result)
+          else reject(new Error(d.error || 'bridge_error'))
+        }
+        window.addEventListener('message', onMsg)
+        window.parent.postMessage(
+          {
+            v: 1,
+            kind: 'sylo-skill-bridge',
+            nonce: window.__SYLO_NONCE__,
+            reqId: reqId,
+            op: op,
+            payload: payload === undefined ? {} : payload,
+          },
+          '*',
+        )
+      })
+    }
+
+    function showTab(name) {
+      document.querySelectorAll('.sylo-tab').forEach(function (b) {
+        b.classList.toggle('active', b.getAttribute('data-tab') === name)
+      })
+      document.querySelectorAll('.sylo-panel').forEach(function (p) {
+        p.hidden = p.id !== 'panel-' + name
+      })
+      if (name === 'history') loadHistory()
+      if (name === 'stats') loadStats()
+      if (name === 'settings') loadSettings()
+    }
+
+    document.getElementById('tabs').addEventListener('click', function (e) {
+      var t = e.target
+      if (t && t.getAttribute && t.getAttribute('data-tab')) showTab(t.getAttribute('data-tab'))
+    })
+
+    function fmtTime(ms) {
+      if (!ms) return '—'
+      try {
+        return new Date(ms).toLocaleString()
+      } catch (e) {
+        return String(ms)
+      }
+    }
+
+    function loadHistory() {
+      var hint = document.getElementById('history-hint')
+      var list = document.getElementById('history-list')
+      hint.textContent = 'Loading…'
+      list.innerHTML = ''
+      rpc('webAccessListRuns', { limit: 80 })
+        .then(function (rows) {
+          if (!rows || !rows.length) {
+            hint.textContent = 'No runs recorded yet. Use sylo_web_search or sylo_web_fetch in chat.'
+            return
+          }
+          hint.textContent = rows.length + ' recent run(s)'
+          rows.forEach(function (r) {
+            var div = document.createElement('div')
+            div.className = 'sylo-run'
+            var title = r.tool === 'search' ? r.query || '(search)' : r.url || '(fetch)'
+            var scores = ''
+            if (r.rank_scores_json) {
+              try {
+                var sc = JSON.parse(r.rank_scores_json)
+                if (Array.isArray(sc) && sc.length)
+                  scores =
+                    '<p class="sylo-surface-muted">Rank scores: ' +
+                    sc
+                      .slice(0, 6)
+                      .map(function (s) {
+                        return (s.score != null ? s.score.toFixed(2) : '?') + ' ' + (s.url || '').slice(0, 48)
+                      })
+                      .join('; ') +
+                    '</p>'
+              } catch (e) {}
+            }
+            var fetches = ''
+            if (r.fetches_json) {
+              try {
+                var fx = JSON.parse(r.fetches_json)
+                if (Array.isArray(fx) && fx.length)
+                  fetches =
+                    '<p class="sylo-surface-muted">Fetches: ' +
+                    fx
+                      .map(function (f) {
+                        return (f.tier || '?') + ' ' + (f.url || '').slice(0, 40) + (f.relevant === false ? ' [irrelevant]' : '')
+                      })
+                      .join('; ') +
+                    '</p>'
+              } catch (e) {}
+            }
+            div.innerHTML =
+              '<h4><span class="sylo-badge">' +
+              r.status +
+              '</span><span class="sylo-badge">' +
+              r.tool +
+              '</span> ' +
+              escapeHtml(title) +
+              '</h4>' +
+              '<p class="sylo-surface-muted">' +
+              fmtTime(r.started_at) +
+              (r.search_tier ? ' · search ' + escapeHtml(r.search_tier) : '') +
+              (r.rank_kept != null ? ' · kept ' + r.rank_kept + '/' + (r.rank_kept + r.rank_dropped) : '') +
+              '</p>' +
+              scores +
+              fetches +
+              (r.error_message ? '<p class="sylo-surface-muted">Error: ' + escapeHtml(r.error_message) + '</p>' : '')
+            list.appendChild(div)
+          })
+        })
+        .catch(function (e) {
+          hint.textContent = String(e)
+        })
+    }
+
+    function loadStats() {
+      rpc('webAccessStats', {})
+        .then(function (s) {
+          document.getElementById('stats-out').textContent = JSON.stringify(s, null, 2)
+        })
+        .catch(function (e) {
+          document.getElementById('stats-out').textContent = String(e)
+        })
+    }
+
+    function backendRow(id, label, checked, order, container) {
+      var row = document.createElement('label')
+      row.style.display = 'flex'
+      row.style.gap = '0.5rem'
+      row.style.alignItems = 'center'
+      row.innerHTML =
+        '<input type="checkbox" data-backend="' +
+        id +
+        '" ' +
+        (checked ? 'checked' : '') +
+        ' />' +
+        '<span>' +
+        label +
+        '</span>' +
+        '<button type="button" class="sylo-surface-btn sylo-up" data-id="' +
+        id +
+        '">↑</button>' +
+        '<button type="button" class="sylo-surface-btn sylo-down" data-id="' +
+        id +
+        '">↓</button>'
+      container.appendChild(row)
+    }
+
+    function readBackendOrder() {
+      var out = []
+      document.querySelectorAll('#backends-privacy [data-backend], #backends-tracking [data-backend]').forEach(
+        function (inp) {
+          if (inp.checked) out.push(inp.getAttribute('data-backend'))
+        },
+      )
+      return out
+    }
+
+    function renderBackends(selected) {
+      var priv = document.getElementById('backends-privacy')
+      var track = document.getElementById('backends-tracking')
+      priv.innerHTML = ''
+      track.innerHTML = ''
+      var sel = selected && selected.length ? selected : PRIVACY.slice()
+      PRIVACY.forEach(function (id) {
+        backendRow(id, id, sel.indexOf(id) >= 0, 0, priv)
+      })
+      TRACKING.forEach(function (id) {
+        backendRow(id, id + ' (tracking)', sel.indexOf(id) >= 0, 0, track)
+      })
+      priv.querySelectorAll('.sylo-up, .sylo-down').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var id = btn.getAttribute('data-id')
+          var order = readBackendOrder()
+          var i = order.indexOf(id)
+          if (i < 0) return
+          var j = btn.classList.contains('sylo-up') ? i - 1 : i + 1
+          if (j < 0 || j >= order.length) return
+          var t = order[i]
+          order[i] = order[j]
+          order[j] = t
+          renderBackends(order)
+        })
+      })
+    }
+
+    function fillModelSelect(sel, models, selected) {
+      var picked = selected != null ? String(selected) : ''
+      sel.innerHTML = ''
+      var optMain = document.createElement('option')
+      optMain.value = ''
+      optMain.textContent = 'Main chat model (default)'
+      sel.appendChild(optMain)
+      if (picked && models.indexOf(picked) < 0) {
+        var optUn = document.createElement('option')
+        optUn.value = picked
+        optUn.textContent = picked + ' (not in current /api/tags list)'
+        sel.appendChild(optUn)
+      }
+      models
+        .slice()
+        .sort(function (a, b) {
+          return a.localeCompare(b)
+        })
+        .forEach(function (name) {
+          var o = document.createElement('option')
+          o.value = name
+          o.textContent = name
+          sel.appendChild(o)
+        })
+      sel.value = picked
+    }
+
+    function loadOllamaModels(rankSelected, rewriteSelected) {
+      var hint = document.getElementById('models-hint')
+      hint.textContent = 'Loading models from Settings Ollama server…'
+      return rpc('settingsOllamaListTags', {})
+        .then(function (r) {
+          var models = Array.isArray(r.models) ? r.models : []
+          hint.textContent =
+            'Models from ' +
+            (r.baseUrl || 'Ollama') +
+            ' (same server as Settings → Model). Use a smaller/faster model for rewrite.'
+          var form = document.getElementById('settings-form')
+          fillModelSelect(form.rank_model, models, rankSelected)
+          fillModelSelect(form.rewrite_model, models, rewriteSelected)
+        })
+        .catch(function (e) {
+          hint.textContent = 'Could not load Ollama models: ' + String(e)
+        })
+    }
+
+        function loadBraveQuota() {
+      var el = document.getElementById('brave-quota')
+      rpc('webAccessBraveQuota', {})
+        .then(function (q) {
+          if (!q || q.remaining == null) {
+            el.textContent = 'Brave quota: not yet reported (run a search that hits the Brave backend).'
+            return
+          }
+          var rem = q.remaining
+          var lim = q.limit != null ? q.limit : '?'
+          var reset = ''
+          if (q.reset_seconds != null && q.reset_seconds > 0) {
+            var days = Math.ceil(q.reset_seconds / 86400)
+            reset = ' · resets in ~' + days + 'd'
+          }
+          el.textContent = 'Brave quota: ' + rem + ' / ' + lim + ' queries left this month' + reset
+        })
+        .catch(function (e) {
+          el.textContent = 'Brave quota: ' + String(e)
+        })
+    }
+
+    function loadSettings() {
+      rpc('webAccessConfigGet', {})
+        .then(function (cfg) {
+          var form = document.getElementById('settings-form')
+          if (form.ollamaHost) form.ollamaHost.value = cfg.ollamaHost != null ? String(cfg.ollamaHost) : ''
+          if (form.brave_api_key) form.brave_api_key.value = cfg.brave_api_key != null ? String(cfg.brave_api_key) : ''
+          var rankSel = cfg.rank_model != null ? String(cfg.rank_model) : ''
+          var rewriteSel = cfg.rewrite_model != null ? String(cfg.rewrite_model) : ''
+          ;['relevancy_threshold', 'max_pages_per_search', 'max_search_calls_per_turn', 'max_fetch_calls_per_turn', 'max_preview_images_per_page'].forEach(
+            function (k) {
+              if (form[k] && cfg[k] != null) form[k].value = String(cfg[k])
+            },
+          )
+          if (form.heavy_tiers_enabled) form.heavy_tiers_enabled.checked = cfg.heavy_tiers_enabled !== false
+          if (form.preview_images_enabled) form.preview_images_enabled.checked = cfg.preview_images_enabled === true
+          renderBackends(Array.isArray(cfg.searchBackends) ? cfg.searchBackends : PRIVACY)
+          loadBraveQuota()
+          return loadOllamaModels(rankSel, rewriteSel)
+        })
+        .catch(function (e) {
+          document.getElementById('save-msg').textContent = String(e)
+        })
+    }
+
+    document.getElementById('settings-form').addEventListener('submit', function (e) {
+      e.preventDefault()
+      var form = e.target
+      var values = {
+        ollamaHost: form.ollamaHost.value.trim(),
+        rank_model: form.rank_model.value.trim(),
+        rewrite_model: form.rewrite_model.value.trim(),
+        relevancy_threshold: Number(form.relevancy_threshold.value),
+        max_pages_per_search: Number(form.max_pages_per_search.value),
+        max_search_calls_per_turn: Number(form.max_search_calls_per_turn.value),
+        max_fetch_calls_per_turn: Number(form.max_fetch_calls_per_turn.value),
+        heavy_tiers_enabled: !!form.heavy_tiers_enabled?.checked,
+        preview_images_enabled: !!form.preview_images_enabled?.checked,
+        max_preview_images_per_page: Number(form.max_preview_images_per_page?.value || 2),
+                brave_api_key: form.brave_api_key.value.trim(),
+        searchBackends: readBackendOrder(),
+        ranking_enabled: true,
+      }
+      rpc('webAccessConfigSave', { values: values })
+        .then(function (r) {
+          document.getElementById('save-msg').textContent = r.restartNote || 'Saved.'
+          loadBraveQuota()
+        })
+        .catch(function (err) {
+          document.getElementById('save-msg').textContent = String(err)
+        })
+    })
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+    }
+
+    loadHistory()
+  })()
+</script>

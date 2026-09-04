@@ -1,0 +1,8 @@
+# Optional Orpheus backend (install when you want Orpheus voices in Speech / sylo_tts_speak).
+# Requires numpy 2.x — do NOT combine with requirements.txt on the same env if you
+# need numpy<2 for other tools (pandas, sklearn, etc.). Use a separate venv instead.
+#
+# Windows may also need llama-cpp-python CUDA wheel (see README).
+
+orpheus-cpp>=0.0.3
+numpy>=2.0

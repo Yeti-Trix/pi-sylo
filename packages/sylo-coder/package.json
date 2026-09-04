@@ -1,0 +1,36 @@
+{
+  "name": "@sylo/sylo-coder",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Sylo coding-quality package — fuzzy/whitespace-tolerant smart_edit, codebase semantic search (Phase 2), and a coding-tuned skill with a subagent chain wrapper",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "extensions",
+    "skills",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "tsx test/run.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ],
+    "skills": [
+      "./skills/sylo-coder"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2"
+  },
+  "dependencies": {
+    "typebox": "^1.1.24"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.0"
+  }
+}
