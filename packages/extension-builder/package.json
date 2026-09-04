@@ -1,0 +1,9 @@
+{
+  "name": "@sylo/extension-builder",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ]
+}

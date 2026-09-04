@@ -1,0 +1,32 @@
+{
+  "name": "@sylo/sylo-subagents",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Sylo first-party subagent delegation (Pi official example port + host lifecycle hooks)",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "extensions",
+    "agents",
+    "prompts",
+    "skills",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ],
+    "skills": [
+      "./skills/sylo-subagents"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2"
+  },
+  "dependencies": {
+    "typebox": "^1.1.24"
+  }
+}

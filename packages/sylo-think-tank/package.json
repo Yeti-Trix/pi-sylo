@@ -1,0 +1,58 @@
+{
+  "name": "sylo-think-tank",
+  "version": "0.1.0",
+  "description": "Multi-model think tank — sylo_think_tank_* tools + think-tank skill",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "extensions",
+    "agents",
+    "skills",
+    "README.md"
+  ],
+  "scripts": {
+    "build:ui": "vite build --config ui/vite.config.ts && node scripts/postbuild-ui.mjs",
+    "test": "npm run test:load && npm run test:stance && npm run test:topic && npm run test:spawn-output && npm run test:fragment && npm run test:task-store && npm run test:workflow && npm run test:seats && npm run test:seat-extensions && npm run test:seat-image-fallback && npm run test:debate-prompts",
+    "test:load": "esbuild extensions/load.test.mjs --bundle --platform=node --format=esm --outfile=out/load.test.mjs --packages=external && node --test out/load.test.mjs",
+    "test:fragment": "esbuild extensions/fragment.test.mjs --bundle --platform=node --format=esm --outfile=out/fragment.test.mjs --packages=external && node --test out/fragment.test.mjs",
+    "test:task-store": "esbuild extensions/task-store.test.mjs --bundle --platform=node --format=esm --outfile=out/task-store.test.mjs --packages=external && node --test out/task-store.test.mjs",
+    "test:workflow": "esbuild extensions/seat-workflow.test.mjs --bundle --platform=node --format=esm --outfile=out/seat-workflow.test.mjs --packages=external && node --test out/seat-workflow.test.mjs",
+    "test:seats": "esbuild extensions/think-tank-seats.test.mjs --bundle --platform=node --format=esm --outfile=out/think-tank-seats.test.mjs --packages=external && node --test out/think-tank-seats.test.mjs",
+    "test:seat-extensions": "esbuild extensions/seat-extensions.test.mjs --bundle --platform=node --format=esm --outfile=out/seat-extensions.test.mjs --packages=external && node --test out/seat-extensions.test.mjs",
+    "test:seat-image-fallback": "esbuild extensions/seat-image-fallback.test.mjs --bundle --platform=node --format=esm --outfile=out/seat-image-fallback.test.mjs --packages=external && node --test out/seat-image-fallback.test.mjs",
+    "test:debate-prompts": "esbuild extensions/debate-prompts.test.mjs --bundle --platform=node --format=esm --outfile=out/debate-prompts.test.mjs --packages=external && node --test out/debate-prompts.test.mjs",
+    "test:spawn-output": "esbuild extensions/spawn-output.test.mjs --bundle --platform=node --format=esm --outfile=out/spawn-output.test.mjs --packages=external && node --test out/spawn-output.test.mjs",
+    "test:stance": "esbuild extensions/stance.test.mjs --bundle --platform=node --format=esm --outfile=out/stance.test.mjs --packages=external && node --test out/stance.test.mjs",
+    "test:topic": "esbuild extensions/topic.test.mjs --bundle --platform=node --format=esm --outfile=out/topic.test.mjs --packages=external && node --test out/topic.test.mjs"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ],
+    "skills": [
+      "./skills/think-tank"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2"
+  },
+  "dependencies": {
+    "typebox": "^1.1.24"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^12.9.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "esbuild": "^0.25.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.4.3"
+  },
+  "license": "MIT"
+}

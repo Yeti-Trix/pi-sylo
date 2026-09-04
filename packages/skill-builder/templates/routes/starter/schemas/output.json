@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sylo.local/templates/routes/starter/schemas/output.json",
+  "title": "RouteTemplateOutput",
+  "type": "object",
+  "properties": {
+    "ping": {
+      "type": "string",
+      "description": "Example ping field for sendToAgent; replace with domain-specific payloads."
+    }
+  },
+  "required": ["ping"],
+  "additionalProperties": true
+}

@@ -1,0 +1,4 @@
+# Pinned for supply-chain hygiene (see tracker: Crawl4AI litellm incident).
+crawl4ai==0.8.6
+ddgs>=9.4.0,<10
+youtube-transcript-api>=1.2.4,<2

@@ -1,0 +1,27 @@
+{
+  "id": "starter",
+  "description": "Replace description and rename id plus parent folder so they match SKILL.md widgets: entries.",
+  "entry": "widget.html",
+  "fallback": "fallback.md",
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": true,
+    "description": "Passthrough payload from show_widget(html|path, data); available as window.__WIDGET_DATA__."
+  },
+  "output_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "ok": {
+        "type": "boolean",
+        "description": "Example acknowledgement; widen or replace to match sendToAgent payloads."
+      }
+    },
+    "required": ["ok"],
+    "additionalProperties": true
+  },
+  "required_capabilities": ["sendToAgent"],
+  "max_input_bytes": 4096,
+  "max_output_bytes": 4096
+}

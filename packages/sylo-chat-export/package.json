@@ -1,0 +1,30 @@
+{
+  "name": "sylo-chat-export",
+  "version": "0.1.0",
+  "description": "Export chat(s) from the on-disk session JSONL to markdown — compaction-proof. Powers chat-recap / journal-entry workflows.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "extensions",
+    "skills",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ],
+    "skills": [
+      "./skills/chat-export"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2"
+  },
+  "dependencies": {
+    "typebox": "^1.1.24"
+  }
+}

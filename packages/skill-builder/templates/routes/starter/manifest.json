@@ -1,0 +1,24 @@
+{
+  "id": "starter",
+  "description": "Optional route manifest — keep id aligned with SKILL.md routes: id field and routes/<id>/ folder.",
+  "entry": "index.html",
+  "fallback": "fallback.md",
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": true,
+    "description": "Shape of optional route input if you negotiate structured context from the host (extend as needed)."
+  },
+  "output_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "ping": { "type": "string", "description": "Example payload for sendToAgent from routes." }
+    },
+    "required": ["ping"],
+    "additionalProperties": true
+  },
+  "required_capabilities": ["sendToAgent"],
+  "max_input_bytes": 8192,
+  "max_output_bytes": 8192
+}

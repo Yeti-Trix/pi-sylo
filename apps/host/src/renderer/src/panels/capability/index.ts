@@ -1,0 +1,1 @@
+export { CapabilityManagerPanel } from './CapabilityManagerPanel'

@@ -1,0 +1,29 @@
+<p class="sylo-surface-lead">
+  Starter widget · Discussion&nbsp;#317 <code class="sylo-surface-code">path</code> template
+</p>
+<p class="sylo-surface-muted">
+  Input: <span id="pill"></span>
+</p>
+<div class="sylo-surface-row">
+  <button type="button" class="sylo-surface-btn" id="starter-send">sendToAgent ({ ok: true })</button>
+</div>
+<script>
+  ;(function () {
+    var pill = document.getElementById('pill')
+    if (pill) pill.textContent = JSON.stringify(window.__WIDGET_DATA__ ?? {})
+    var btn = document.getElementById('starter-send')
+    if (btn)
+      btn.addEventListener('click', function () {
+        window.parent.postMessage(
+          {
+            v: 1,
+            kind: 'sylo-widget-bridge',
+            nonce: window.__SYLO_NONCE__,
+            op: 'sendToAgent',
+            payload: { ok: true },
+          },
+          '*',
+        )
+      })
+  })()
+</script>

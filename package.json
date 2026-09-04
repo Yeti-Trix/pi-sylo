@@ -1,0 +1,49 @@
+{
+  "name": "sylo",
+  "version": "0.3.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Sylo — Pi-native desktop assistant (Electron host)",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "start": "npm run start -w apps/host",
+    "build": "npm run build -w apps/host",
+    "bootstrap-pi": "node ./scripts/bootstrap-pi.mjs",
+    "sync-skill-surfaces": "node ./scripts/sync-smoke-skills.mjs",
+    "boostrap-pi": "npm run bootstrap-pi",
+    "rebuild:native": "npm run rebuild:native -w apps/host",
+    "trackers:audit": "node ./scripts/tracker-audit.mjs",
+    "changelog:release": "node ./scripts/changelog-release.mjs",
+    "changelog:release:dry-run": "node ./scripts/changelog-release.mjs --dry-run",
+    "publish:verify": "node ./scripts/publish-verify.mjs",
+    "publish:scan": "node ./scripts/publish-scan.mjs",
+    "publish:public": "node ./scripts/publish-to-public.mjs",
+    "publish:public:dry-run": "node ./scripts/publish-to-public.mjs --dry-run",
+    "postinstall": "patch-package"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "overrides": {
+    "@babel/core": "^7.29.7",
+    "@earendil-works/pi-coding-agent": {
+      ".": "^0.84.2",
+      "brace-expansion": "^5.0.9",
+      "undici": "^8.9.0"
+    },
+    "brace-expansion": "^5.0.9",
+    "dompurify": "^3.4.13",
+    "nanoid": "^3.3.18",
+    "protobufjs": "^7.6.5",
+    "tar": "^7.5.17",
+    "undici": "^7.28.0",
+    "@tootallnate/once": "^3.0.1"
+  },
+  "devDependencies": {
+    "electron": "^41.10.5",
+    "patch-package": "^8.0.1"
+  }
+}

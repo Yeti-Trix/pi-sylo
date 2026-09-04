@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sylo.local/templates/widgets/starter/schemas/output.json",
+  "title": "WidgetTemplateOutput",
+  "type": "object",
+  "properties": {
+    "ok": {
+      "type": "boolean",
+      "description": "Example acknowledgement; widen or replace to match sendToAgent payloads."
+    }
+  },
+  "required": ["ok"],
+  "additionalProperties": true
+}

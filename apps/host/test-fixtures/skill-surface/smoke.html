@@ -1,0 +1,30 @@
+<p style="margin:0 0 8px">Phase A — skill surface sandbox smoke</p>
+<p class="muted" style="margin:0 0 10px;font-size:12px">
+  Data pill: <span id="pill"></span>
+</p>
+<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+  <button type="button" id="sylo-smoke-send">sendToAgent ({ ok: true })</button>
+  <button type="button" id="sylo-smoke-bad-nonce">send with wrong nonce</button>
+</div>
+<script>
+  (function () {
+    var pill = document.getElementById('pill')
+    if (pill) pill.textContent = JSON.stringify(window.__WIDGET_DATA__ ?? {})
+    var send = document.getElementById('sylo-smoke-send')
+    if (send)
+      send.addEventListener('click', function () {
+        window.parent.postMessage(
+          { v: 1, kind: 'sylo-widget-bridge', nonce: window.__SYLO_NONCE__, op: 'sendToAgent', payload: { ok: true } },
+          '*',
+        )
+      })
+    var bad = document.getElementById('sylo-smoke-bad-nonce')
+    if (bad)
+      bad.addEventListener('click', function () {
+        window.parent.postMessage(
+          { v: 1, kind: 'sylo-widget-bridge', nonce: 'intentionally-wrong', op: 'sendToAgent', payload: {} },
+          '*',
+        )
+      })
+  })()
+</script>

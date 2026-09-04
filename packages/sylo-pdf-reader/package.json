@@ -1,0 +1,30 @@
+{
+  "name": "sylo-pdf-reader",
+  "version": "0.1.0",
+  "description": "Search PDFs by text/OCR, render pages/regions as PNG for vision confirmation",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "extensions",
+    "skills",
+    "scripts",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ],
+    "skills": [
+      "./skills/pdf-reader"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2"
+  },
+  "dependencies": {
+    "typebox": "^1.1.24"
+  },
+  "license": "MIT"
+}
