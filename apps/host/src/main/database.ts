@@ -16,7 +16,11 @@ import {
 } from '../shared/sylo-capability-paths.js'
 import { migrateSubagentTasksSchema } from './subagent-tasks-db.js'
 import { deleteWebAccessRunsForConversation, migrateWebAccessSchema } from './web-access-db.js'
-import { deleteThinkTankSessionsForConversation, migrateThinkTankSchema } from './think-tank-db.js'
+import {
+  deleteThinkTankSessionsForConversation,
+  finalizeOrphanThinkTankSessions,
+  migrateThinkTankSchema,
+} from './think-tank-db.js'
 import { dropLegacyScheduledPromptsFromMainDb } from './workspace-db.js'
 
 export type MessageRole = 'user' | 'assistant' | 'system'
@@ -219,6 +223,7 @@ export function openDatabase(userDataPath: string, syloRepoRoot?: string): Datab
   initOperatorEnv()
   dropLegacyPersonalTablesFromMainDb(d)
   migrateThinkTankSchema()
+  finalizeOrphanThinkTankSessions('Interrupted by app restart')
     dropLegacyScheduledPromptsFromMainDb(d)
   // Dev sylo workspace is no longer auto-created; the operator adds workspaces
   // manually (including the pi-sylo repo when developing Sylo itself).
@@ -923,6 +928,51 @@ export function workspaceDisabledDecoded(row: WorkspaceRow): {
   }
 }
 
+/** Skill paths this workspace pins inline into the agent system prompt. */
+export function workspaceAlwaysApplySkillPaths(row: WorkspaceRow): string[] {
+  let raw: unknown = []
+  try {
+    raw = JSON.parse(row.always_apply_skill_paths_json || '[]') as unknown
+  } catch {
+    raw = []
+  }
+  return normalizeSkillPathListForPolicyJson(raw)
+}
+
+/**
+ * Pin or unpin a skill for a workspace. A pinned skill's full SKILL.md is inlined into
+ * the system prompt on every turn; unpinned skills stay one-line pointers the agent can
+ * read on demand. Pinning also implies enabled, so it clears any local exclusion.
+ */
+export function patchWorkspaceAlwaysApplySkill(opts: {
+  workspaceId: string
+  path: string
+  pinned: boolean
+}): string[] | null {
+  const row = getWorkspace(opts.workspaceId)
+  if (!row) return null
+  const key = normalizeSkillCapabilityPath(opts.path)
+  if (!key) return workspaceAlwaysApplySkillPaths(row)
+
+  const set = new Set(workspaceAlwaysApplySkillPaths(row))
+  if (opts.pinned) set.add(key)
+  else set.delete(key)
+  const paths = Array.from(set).sort((a, b) => a.localeCompare(b))
+  getDb()
+    .prepare('UPDATE workspaces SET always_apply_skill_paths_json = ? WHERE id = ?')
+    .run(JSON.stringify(paths), opts.workspaceId)
+
+  if (opts.pinned) {
+    patchWorkspaceDisabledCapability({
+      workspaceId: opts.workspaceId,
+      kind: 'skill',
+      path: key,
+      excluded: false,
+    })
+  }
+  return paths
+}
+
 export function patchWorkspaceDisabledCapability(
   opts:
     | { workspaceId: string; kind: 'skill'; path: string; excluded: boolean }
@@ -1108,38 +1158,15 @@ export function updateMessageContent(id: string, content: string, status: Messag
   getDb().prepare('UPDATE messages SET content = ?, status = ? WHERE id = ?').run(content, status, id)
 }
 
-/** Persist Pi broker telemetry (stored in tool_calls_json as [{ ts, event }]). */
-export function appendToolCallsJson(id: string, chunk: unknown, ts?: number): void {
-  const row = getDb().prepare('SELECT tool_calls_json FROM messages WHERE id = ?').get(id) as
-    | { tool_calls_json: string | null }
-    | undefined
-  const prev = row?.tool_calls_json ? (JSON.parse(row.tool_calls_json) as unknown[]) : []
-  const stamp = ts ?? Date.now()
-  prev.push({ ts: stamp, event: chunk })
-  getDb()
-    .prepare('UPDATE messages SET tool_calls_json = ? WHERE id = ?')
-    .run(JSON.stringify(prev), id)
-}
-
 /**
- * Batch-append multiple tool telemetry entries in a single SELECT + parse + UPDATE.
- * Avoids the O(n²) cost of calling appendToolCallsJson per event on long agent runs
- * where tool_calls_json grows to multiple MB — each call would re-parse and
- * re-serialize the entire blob.
+ * Persist Pi broker telemetry (stored in tool_calls_json as [{ ts, event }]).
+ *
+ * The caller owns the in-memory entry list and passes the already-serialized blob,
+ * so a streaming turn never re-reads and re-parses its own multi-MB telemetry on
+ * every flush. See tool-telemetry.ts for how the list is condensed.
  */
-export function appendToolCallsJsonBatch(
-  id: string,
-  entries: Array<{ ts: number; event: unknown }>,
-): void {
-  if (entries.length === 0) return
-  const row = getDb().prepare('SELECT tool_calls_json FROM messages WHERE id = ?').get(id) as
-    | { tool_calls_json: string | null }
-    | undefined
-  const prev = row?.tool_calls_json ? (JSON.parse(row.tool_calls_json) as unknown[]) : []
-  for (const entry of entries) prev.push(entry)
-  getDb()
-    .prepare('UPDATE messages SET tool_calls_json = ? WHERE id = ?')
-    .run(JSON.stringify(prev), id)
+export function writeToolCallsJson(id: string, json: string): void {
+  getDb().prepare('UPDATE messages SET tool_calls_json = ? WHERE id = ?').run(json, id)
 }
 
 export function getPref<T>(key: string, fallback: T): T {

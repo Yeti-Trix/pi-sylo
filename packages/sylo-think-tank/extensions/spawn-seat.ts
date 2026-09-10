@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -14,6 +14,7 @@ import {
   validateModeratorDebateTurn,
   type ThinkTankSeatDebug,
 } from './fragment.ts'
+import { freeOllamaVramForSeat } from './ollama-gpu.ts'
 import { resolvePiSpawn } from './pi-cli.ts'
 import { resolveSeatExtensionPaths } from './seat-extensions.ts'
 import { parseDebateTurn } from './stance.ts'
@@ -26,6 +27,48 @@ import {
 
 const DEFAULT_TIMEOUT_MS = 600_000
 const MAX_SEAT_ATTEMPTS = 3
+
+/**
+ * Hard ceiling on what one seat turn may generate, counted across reasoning and text.
+ *
+ * A local model that never emits a stop token keeps generating until its context window
+ * fills. Sized from measurement, not guesswork: a real debate turn on gemma4:12b streamed
+ * 4,780 characters in 21s, while an induced runaway was still going at 60,000. The ceiling
+ * must be a multiple of a legitimate turn yet low enough that tripping it reads as a failure
+ * rather than a hang — at ~73 tok/s, 60k characters took 251s to reach, which is precisely
+ * the multi-minute "Preparing tool call" stall that was reported. 24k characters (~6k tokens)
+ * is 5x the measured turn and trips in roughly 80s.
+ */
+export const MAX_SEAT_OUTPUT_CHARS = 24_000
+
+/**
+ * Kill a seat that has produced no output whatsoever for this long.
+ *
+ * Distinct from the size ceiling: this catches a wedged process rather than a chatty one.
+ * It has to clear prompt processing, during which nothing streams — first output was measured
+ * at ~24s on a loaded model, so this leaves a wide margin.
+ */
+export const SEAT_STALL_MS = 120_000
+
+/**
+ * How long a kill has to take effect before the seat is abandoned.
+ *
+ * Every guard above ends in a kill and then waits for the child's `close`, which only fires
+ * once its stdio pipes drain. A kill that fails, or a grandchild holding the inherited pipes
+ * open, leaves that promise unsettled — the guards report a stop the run never actually makes,
+ * and the turn hangs indefinitely. This is the backstop that makes the guards terminal.
+ */
+export const SEAT_KILL_GRACE_MS = 15_000
+
+/** How long to wait after `exit` for stdio to drain before settling without `close`. */
+export const SEAT_EXIT_FLUSH_MS = 5_000
+
+/** Characters a streamed Pi event contributes to the seat's generated output. */
+export function generatedCharsFromEvent(event: Record<string, unknown>): number {
+  const type = event.type
+  if (type !== 'text_delta' && type !== 'thinking_delta') return 0
+  return typeof event.delta === 'string' ? event.delta.length : 0
+}
 
 /** Minimal Pi `-p` user line — no loaded words (Write, prompt, Task, seat, etc.). */
 export const THINK_TANK_SEAT_USER_DEBATE = '.'
@@ -51,6 +94,16 @@ export type ThinkTankSeatRunContext = {
 
 function isModeratorSeatMode(seatContext?: ThinkTankSeatRunContext): boolean {
   return seatContext?.seatRole === 'moderator'
+}
+
+/** SIGTERM is ignored by many Windows console children; kill the whole tree. */
+function killSeatProcess(child: ChildProcess | null): void {
+  if (!child?.pid) return
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true })
+    return
+  }
+  child.kill('SIGTERM')
 }
 
 function collectAssistantTexts(messages: Message[]): string[] {
@@ -244,6 +297,11 @@ async function runThinkTankSeatPromptOnce(args: {
     let resolvedModel: string | undefined = model
     let earlyExitText: string | null = null
     let child: ChildProcess | null = null
+    let generatedChars = 0
+    let runawayKilled = false
+    let lastOutputAt = Date.now()
+    /** Reassigned once the child is spawned so every guard kills through the same deadline. */
+    let requestSeatKill: () => void = () => killSeatProcess(child)
 
     const extractAssistantText = (msg: Message): string => {
       if (msg.role !== 'assistant') return ''
@@ -267,6 +325,15 @@ async function runThinkTankSeatPromptOnce(args: {
       if (wf) {
         streamedWorkflow.push(wf)
         args.onProgress?.(wf)
+        lastOutputAt = Date.now()
+        generatedChars += generatedCharsFromEvent(wf.event as Record<string, unknown>)
+        if (generatedChars > MAX_SEAT_OUTPUT_CHARS && !runawayKilled) {
+          runawayKilled = true
+          stderr +=
+            `\n[runaway] Think tank seat generated ${generatedChars} characters ` +
+            `without finishing a turn (limit ${MAX_SEAT_OUTPUT_CHARS}).`
+          requestSeatKill()
+        }
       }
 
       if (parsed.type === 'message_end' && parsed.message) {
@@ -279,7 +346,7 @@ async function runThinkTankSeatPromptOnce(args: {
           const text = extractAssistantText(msg)
           if (isCompleteDebateTurn(text, args.seatContext)) {
             earlyExitText = text
-            child?.kill('SIGTERM')
+            requestSeatKill()
           }
         }
       }
@@ -287,6 +354,8 @@ async function runThinkTankSeatPromptOnce(args: {
         messages.push(parsed.message as Message)
       }
     }
+
+    await freeOllamaVramForSeat(model)
 
     const exitCode = await new Promise<number>((resolve) => {
       const invocation = resolvePiSpawn(piArgs)
@@ -310,18 +379,52 @@ async function runThinkTankSeatPromptOnce(args: {
         env: seatEnv,
       })
 
-      let timeout: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
-        stderr += '\n[timeout] Think tank seat exceeded time limit.'
-        child?.kill('SIGTERM')
-        setTimeout(() => {
-          if (child && !child.killed) child.kill('SIGKILL')
-        }, 5000)
-      }, DEFAULT_TIMEOUT_MS)
+      let settled = false
+      let timeout: ReturnType<typeof setTimeout> | undefined
+      let stallTimer: ReturnType<typeof setInterval> | undefined
+      let killDeadline: ReturnType<typeof setTimeout> | undefined
+      let flushDeadline: ReturnType<typeof setTimeout> | undefined
 
       const finish = (code: number) => {
+        if (settled) return
+        settled = true
         if (timeout) clearTimeout(timeout)
+        if (stallTimer) clearInterval(stallTimer)
+        if (killDeadline) clearTimeout(killDeadline)
+        if (flushDeadline) clearTimeout(flushDeadline)
+        // An abandoned child may outlive this turn; stop letting it feed the finished one.
+        child?.stdout?.removeAllListeners('data')
+        child?.stderr?.removeAllListeners('data')
+        child?.unref()
         resolve(code)
       }
+
+      const killSeat = () => {
+        killSeatProcess(child)
+        if (killDeadline) return
+        killDeadline = setTimeout(() => {
+          stderr +=
+            `\n[abandoned] Think tank seat did not exit within ` +
+            `${Math.round(SEAT_KILL_GRACE_MS / 1000)}s of being killed.`
+          finish(1)
+        }, SEAT_KILL_GRACE_MS)
+      }
+      requestSeatKill = killSeat
+
+      timeout = setTimeout(() => {
+        stderr += '\n[timeout] Think tank seat exceeded time limit.'
+        killSeat()
+      }, DEFAULT_TIMEOUT_MS)
+
+      lastOutputAt = Date.now()
+      stallTimer = setInterval(() => {
+        if (runawayKilled) return
+        const idleMs = Date.now() - lastOutputAt
+        if (idleMs < SEAT_STALL_MS) return
+        runawayKilled = true
+        stderr += `\n[stall] Think tank seat produced no output for ${Math.round(idleMs / 1000)}s.`
+        killSeat()
+      }, 5_000)
 
       child.stderr?.on('data', (chunk: Buffer) => {
         stderr += chunk.toString('utf8')
@@ -339,6 +442,17 @@ async function runThinkTankSeatPromptOnce(args: {
         if (buffer.trim()) processJsonLine(buffer)
         finish(code ?? 1)
       })
+      // `close` waits on stdio, which a surviving grandchild can hold open after the seat
+      // itself is gone. `exit` is the process really ending, so give the pipes a moment to
+      // drain and then settle regardless.
+      child.on('exit', (code) => {
+        if (settled || flushDeadline) return
+        flushDeadline = setTimeout(() => {
+          if (buffer.trim()) processJsonLine(buffer)
+          stderr += '\n[abandoned] Think tank seat exited but its output pipes stayed open.'
+          finish(code ?? 1)
+        }, SEAT_EXIT_FLUSH_MS)
+      })
       child.on('error', (err) => {
         stderr += `\n${err.message}`
         finish(1)
@@ -346,9 +460,9 @@ async function runThinkTankSeatPromptOnce(args: {
 
       if (args.signal) {
         if (args.signal.aborted) {
-          child.kill('SIGTERM')
+          killSeat()
         } else {
-          args.signal.addEventListener('abort', () => child?.kill('SIGTERM'), { once: true })
+          args.signal.addEventListener('abort', () => killSeat(), { once: true })
         }
       }
     })
@@ -357,11 +471,21 @@ async function runThinkTankSeatPromptOnce(args: {
     const text = sanitizeThinkTankSeatOutput(picked.text, mode)
     const workflow = mergeWorkflowEntries(streamedWorkflow, workflowFromMessages(messages, runStartedAt))
     const workflowJson = workflow.length > 0 ? JSON.stringify(workflow) : undefined
+    // Name the guard that stopped the seat so the retry reason is legible in the UI rather
+    // than a bare exit code.
+    const guardStop =
+      /\[runaway\]/.test(stderr) ? 'Seat stopped: runaway output'
+      : /\[stall\]/.test(stderr) ? 'Seat stopped: no output'
+      : /\[timeout\]/.test(stderr) ? 'Seat stopped: exceeded time limit'
+      : /\[abandoned\]/.test(stderr) ? 'Seat stopped: did not exit after kill'
+      : null
     if (exitCode !== 0 || !text.trim()) {
       return {
         text: text || stderr || '(no output)',
         model: resolvedModel,
-        error: exitCode !== 0 ? `Seat exited with code ${exitCode}` : 'Empty seat output',
+        error:
+          guardStop ??
+          (exitCode !== 0 ? `Seat exited with code ${exitCode}` : 'Empty seat output'),
         workflowJson,
         assistantMessageCount: collectAssistantTexts(messages).length,
         pickedFrom: picked.pickedFrom,
@@ -424,14 +548,20 @@ export async function runThinkTankSeatPrompt(args: {
           args.seatContext?.seatRole === 'moderator' ? 'moderator' : 'debater',
         )
       : undefined
+    // A seat killed by a guard (runaway, stall, timeout, crash) has no turn to contribute —
+    // without this its diagnostic text would be seated in the debate as the model's argument.
+    // Retrying is what makes a degenerate generation recoverable instead of fatal.
+    const seatFailed = Boolean(result.error)
     const needsRetry =
-      mode === 'debate' ?
+      seatFailed ||
+      (mode === 'debate' ?
         fragmentDetected || (moderatorDebateValidation ? !moderatorDebateValidation.ok : false)
       : reportValidation ? !reportValidation.ok
-      : false
+      : false)
 
     lastReason =
-      mode === 'final_report' && reportValidation ? reportValidation.reason
+      seatFailed ? (result.error ?? 'seat_failed')
+      : mode === 'final_report' && reportValidation ? reportValidation.reason
       : mode === 'debate' && moderatorDebateValidation && !moderatorDebateValidation.ok ?
         moderatorDebateValidation.reason
       : fragmentDetected ? 'fragment_or_refusal'

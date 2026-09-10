@@ -10,6 +10,11 @@ import {
   type ChatTimelineListHandle,
 } from './chat/ChatTimelineList'
 import {
+  chatMessagesMatchConversation,
+  isUserDrivenScrollUp,
+  isUserScrollUpWheel,
+} from './chat/chatScrollIntent'
+import {
   buildConversationMarkdown,
   downloadTextFile,
   sanitizeExportFilename,
@@ -18,7 +23,9 @@ import {
 import { SYLO_DEFAULT_MODEL_ID, SYLO_DEFAULT_MODEL_PROVIDER } from '../../shared/sylo-model-defaults'
 import { SettingsPanel } from './panels/SettingsPanel'
 import { normalizeOllamaOriginUi } from './panels/ollama-ui'
+import { CHATGPT_CODEX_MODELS } from '../../shared/chatgpt-codex'
 import {
+  pushCoalescedTelemetry,
   type WorkflowStampedEntry,
 } from './workflowTimeline'
 import { WorkspaceSelect } from './components/WorkspaceSelect'
@@ -731,6 +738,31 @@ export function App(): React.ReactElement {
   }, [flushLiveDeltas])
   /** Assistant message telemetry rows received mid-stream before messages refresh from DB. */
   const [liveWorkflow, setLiveWorkflow] = useState<Record<string, WorkflowStampedEntry[]>>({})
+  /**
+   * Telemetry perf: chat:tool arrives as fast as text deltas, and thinking deltas
+   * dominate it (one measured turn emitted 50,593). Appending each straight to state
+   * copied the whole growing array and re-rendered per event, so cost climbed
+   * quadratically over a long turn. Buffer into a ref, merge contiguous thinking
+   * deltas, and commit on the same adaptive cadence as text.
+   */
+  const liveWorkflowPendingRef = useRef<Map<string, WorkflowStampedEntry[]>>(new Map())
+  const liveWorkflowFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const flushLiveWorkflow = useCallback(() => {
+    liveWorkflowFlushTimerRef.current = null
+    const pending = liveWorkflowPendingRef.current
+    if (pending.size === 0) return
+    const flushed = [...pending.entries()]
+    pending.clear()
+    setLiveWorkflow((prev) => {
+      const next = { ...prev }
+      for (const [id, rows] of flushed) {
+        const merged = (next[id] ?? []).slice()
+        for (const row of rows) pushCoalescedTelemetry(merged, row)
+        next[id] = merged
+      }
+      return next
+    })
+  }, [])
   // const [workflowModalId, setWorkflowModalId] = useState<string | null>(null)
   /**
    * Per-segment user open/close override keyed by `${messageId}:${segmentId}`.
@@ -924,12 +956,18 @@ export function App(): React.ReactElement {
   const pendingConvScrollRef = useRef(false)
   const prevMessagesLenRef = useRef(0)
   const prevChatTabVisibleRef = useRef(tab === 'chat')
+  const prevActiveIdForScrollRef = useRef(activeId)
+  const prevCanvasOpenForScrollRef = useRef(canvasOpen)
   /** Timestamp until which scrollTop decreases should not clear stick-to-bottom intent. */
   const suppressScrollClearUntilRef = useRef(0)
-  /** Last time the user wheeled up (deltaY < 0) — used to opt out of stick-to-bottom. */
-  const lastUpWheelAtRef = useRef(0)
   /** Last observed scrollTop, used to detect scrollbar-drag opt-outs. */
   const lastChatScrollTopRef = useRef(0)
+  /** Last observed scrollHeight; a matching change means layout, not a user drag. */
+  const lastChatScrollHeightRef = useRef(0)
+  const lastLoadedMessage = messages[messages.length - 1]
+  const lastLoadedMessageKey = lastLoadedMessage ?
+    `${lastLoadedMessage.conversation_id}:${lastLoadedMessage.id}`
+  : ''
 
   const activeWorkspaceForSettings = useMemo(() => {
     const wid = sidebarWorkspaceId.trim()
@@ -1738,20 +1776,14 @@ export function App(): React.ReactElement {
     void refreshMessages()
   }, [activeId, refreshMessages])
 
-  useEffect(() => {
-    pendingConvScrollRef.current = true
-    prevMessagesLenRef.current = 0
-    // Initialize lastChatScrollTopRef to the current scroll position so that
-    // a conversation switch (which may clamp scrollTop on a shorter list)
-    // does not trigger a false "scrollbar-drag" opt-out.
-    suppressScrollClearUntilRef.current = performance.now() + 300
-    lastChatScrollTopRef.current = chatAreaRef.current?.scrollTop ?? 0
-  }, [activeId])
-
   /** Called when the user genuinely scrolls up (wheel up or scrollbar drag). */
   const markUserScrolledUp = useCallback(() => {
     stickToBottomRef.current = false
   }, [])
+
+  const onChatAreaWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (isUserScrollUpWheel(e.deltaY, e.deltaMode)) markUserScrolledUp()
+  }, [markUserScrolledUp])
 
   /** onScroll handler for both chat panes: keeps stick-to-bottom intent true
    * when at the true end, and only clears it on a real user upward scroll.
@@ -1762,15 +1794,23 @@ export function App(): React.ReactElement {
     if (atEnd) {
       stickToBottomRef.current = true
       lastChatScrollTopRef.current = el.scrollTop
+      lastChatScrollHeightRef.current = el.scrollHeight
       return
     }
-    // Only a genuine upward scroll opts out: scrollTop decrease (scrollbar drag)
-    // not caused by programmatic scrolls, or an up-wheel (handled in onWheel).
-    const decreased = el.scrollTop < lastChatScrollTopRef.current - 1
-    if (decreased && performance.now() > suppressScrollClearUntilRef.current) {
+    if (
+      isUserDrivenScrollUp({
+        scrollTop: el.scrollTop,
+        lastScrollTop: lastChatScrollTopRef.current,
+        scrollHeight: el.scrollHeight,
+        lastScrollHeight: lastChatScrollHeightRef.current,
+        now: performance.now(),
+        suppressUntil: suppressScrollClearUntilRef.current,
+      })
+    ) {
       stickToBottomRef.current = false
     }
     lastChatScrollTopRef.current = el.scrollTop
+    lastChatScrollHeightRef.current = el.scrollHeight
   }, [])
 
   const scrollChatToEnd = useCallback(() => {
@@ -1794,22 +1834,33 @@ export function App(): React.ReactElement {
     const chatTabJustOpened = tab === 'chat' && !prevChatTabVisibleRef.current
     prevChatTabVisibleRef.current = tab === 'chat'
 
-    if (tab !== 'chat') return
-    if (chatTimeline.length === 0) return
-
-    // If the last message belongs to a different conversation, the timeline
-    // is still showing the old conversation's content. Do NOT scroll — the
-    // new conversation's messages will arrive shortly and trigger a fresh run.
-    const lastRow = chatTimeline[chatTimeline.length - 1]
-    if (
-      lastRow?.kind === 'message' &&
-      activeId &&
-      (lastRow.message as Msg).conversation_id !== activeId
-    ) {
-      return
+    // Must run in layout, not a later useEffect: the first paint after a
+    // switch still has the previous conversation's messages, and if both
+    // chats have the same row count the length-only deps never fire again.
+    if (prevActiveIdForScrollRef.current !== activeId) {
+      pendingConvScrollRef.current = true
+      prevMessagesLenRef.current = 0
+      stickToBottomRef.current = true
+      suppressScrollClearUntilRef.current = performance.now() + 300
+      lastChatScrollTopRef.current = chatAreaRef.current?.scrollTop ?? 0
+      lastChatScrollHeightRef.current = chatAreaRef.current?.scrollHeight ?? 0
+      prevActiveIdForScrollRef.current = activeId
     }
 
+    const canvasJustToggled = prevCanvasOpenForScrollRef.current !== canvasOpen
+    prevCanvasOpenForScrollRef.current = canvasOpen
+
+    if (tab !== 'chat') return
+
+    const lastConvId = lastLoadedMessage?.conversation_id
+    const messagesReady = chatMessagesMatchConversation(activeId, lastConvId)
+
     if (pendingConvScrollRef.current) {
+      if (chatTimeline.length === 0) {
+        pendingConvScrollRef.current = false
+        return
+      }
+      if (!messagesReady) return
       scrollChatToEnd()
       stickToBottomRef.current = true
       pendingConvScrollRef.current = false
@@ -1817,7 +1868,10 @@ export function App(): React.ReactElement {
       return
     }
 
-    if (chatTabJustOpened && stickToBottomRef.current) {
+    if (chatTimeline.length === 0) return
+    if (!messagesReady) return
+
+    if ((chatTabJustOpened || canvasJustToggled) && stickToBottomRef.current) {
       scrollChatToEnd()
       prevMessagesLenRef.current = chatTimeline.length
       return
@@ -1831,7 +1885,42 @@ export function App(): React.ReactElement {
       scrollChatToEnd()
     }
     prevMessagesLenRef.current = chatTimeline.length
-  }, [chatTimeline.length, activeThinkTankBubbles.length, activeId, scrollChatToEnd, tab])
+  }, [
+    chatTimeline.length,
+    activeThinkTankBubbles.length,
+    activeId,
+    lastLoadedMessageKey,
+    canvasOpen,
+    scrollChatToEnd,
+    tab,
+    lastLoadedMessage?.conversation_id,
+  ])
+
+  // Opening the canvas remounts the scroll pane; images and tool cards also
+  // grow after the settle pump has already stopped. Re-pin while the user
+  // still wants the end, without treating the resulting scrollTop change as
+  // an opt-out.
+  useEffect(() => {
+    const el = chatAreaRef.current
+    if (!el || tab !== 'chat') return
+    const inner = el.firstElementChild
+    if (typeof ResizeObserver === 'undefined') return
+    let ticking = false
+    const ro = new ResizeObserver(() => {
+      if (!stickToBottomRef.current) return
+      if (ticking) return
+      ticking = true
+      requestAnimationFrame(() => {
+        ticking = false
+        if (!stickToBottomRef.current) return
+        suppressScrollClearUntilRef.current = performance.now() + 500
+        chatListRef.current?.scrollToEnd()
+      })
+    })
+    ro.observe(el)
+    if (inner) ro.observe(inner)
+    return () => ro.disconnect()
+  }, [tab, activeId, canvasOpen])
 
   useEffect(() => {
     if (!renameConvModal && !deleteConvModal) return
@@ -1981,10 +2070,13 @@ export function App(): React.ReactElement {
       scheduleLiveDeltaFlush()
     })
     const u5 = window.sylo.chatEvents.onTool((x) => {
-      setLiveWorkflow((prev) => ({
-        ...prev,
-        [x.messageId]: [...(prev[x.messageId] ?? []), { ts: x.ts, event: x.event }],
-      }))
+      const pending = liveWorkflowPendingRef.current
+      const rows = pending.get(x.messageId)
+      if (rows) pushCoalescedTelemetry(rows, { ts: x.ts, event: x.event })
+      else pending.set(x.messageId, [{ ts: x.ts, event: x.event }])
+      if (liveWorkflowFlushTimerRef.current == null) {
+        liveWorkflowFlushTimerRef.current = setTimeout(flushLiveWorkflow, streamFlushMs(liveDeltaTotalLenRef.current))
+      }
     })
         return () => {
       u1()
@@ -1998,7 +2090,12 @@ export function App(): React.ReactElement {
         clearTimeout(liveDeltaFlushTimerRef.current)
         liveDeltaFlushTimerRef.current = null
       }
+      if (liveWorkflowFlushTimerRef.current != null) {
+        clearTimeout(liveWorkflowFlushTimerRef.current)
+        liveWorkflowFlushTimerRef.current = null
+      }
       flushLiveDeltas()
+      flushLiveWorkflow()
     }
   }, [
     activeId,
@@ -2011,6 +2108,7 @@ export function App(): React.ReactElement {
     refreshSkillRoutes,
     flushLiveDeltas,
     scheduleLiveDeltaFlush,
+    flushLiveWorkflow,
   ])
 
   useEffect(() => {
@@ -2687,6 +2785,13 @@ export function App(): React.ReactElement {
         const listed = await window.sylo.ollama.listTags(baseUrl)
         if (!listed.ok) throw new Error(listed.error)
         return { baseUrl, models: listed.models }
+      }
+      // Skill surfaces run in a sandboxed iframe with no access to shared host modules,
+      // so the Codex catalog is served through the bridge instead of duplicated there.
+      if (op === 'settingsChatgptModels') {
+        return {
+          models: CHATGPT_CODEX_MODELS.map((m) => ({ id: m.id, name: m.name, vision: m.vision })),
+        }
       }
       if (window.sylo.personal) {
         // Personal-bundle ops (route bridge + companion) — generic dispatch;
@@ -3599,7 +3704,7 @@ export function App(): React.ReactElement {
                     ref={chatAreaRef}
                     className={chatArea}
                     onScroll={onChatAreaScroll}
-                    onWheel={(e) => { if (e.deltaY < 0) markUserScrolledUp() }}
+                    onWheel={onChatAreaWheel}
                   >
                     <ChatTimelineList
                       ref={chatListRef}
@@ -3784,7 +3889,7 @@ export function App(): React.ReactElement {
                   ref={chatAreaRef}
                   className={chatArea}
                   onScroll={onChatAreaScroll}
-                  onWheel={(e) => { if (e.deltaY < 0) markUserScrolledUp() }}
+                  onWheel={onChatAreaWheel}
                 >
                   <ChatTimelineList
                     ref={chatListRef}

@@ -11,7 +11,7 @@ import {
   rmdirSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, relative as pathRelative, resolve } from 'node:path'
 import { execFile } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
@@ -29,8 +29,19 @@ import {
 import { BUILD_INFO } from '../generated/build-info.js'
 
 import { DefaultPackageManager, SettingsManager } from '@earendil-works/pi-coding-agent'
+import { SYLO_MODEL_PROVIDERS, CHATGPT_CODEX_MODELS } from '../shared/chatgpt-codex.js'
+import {
+  SYLO_SURFACE_SCHEME,
+  syloSurfaceRelativePath,
+} from '../shared/sylo-surface-protocol.js'
+import {
+  cancelChatgptLogin,
+  chatgptAuthStatus,
+  loginChatgptCodex,
+  logoutChatgptCodex,
+} from './chatgpt-oauth.js'
 
-import { appIconWindowOptions } from './app-icon.js'
+import { appIconWindowOptions, SYLO_APP_USER_MODEL_ID } from './app-icon.js'
 import {
   deployGlobalAgents,
   readGlobalAgentsStatus,
@@ -62,6 +73,13 @@ import {
   clearPersistedBoardBinding,
 } from './tasks-live.js'
 import { readSkillMd, writeSkillMd } from './skill-md-io.js'
+import { installCrashHandlers } from './crash-log.js'
+import {
+  appendPersistedToolEvents,
+  persistedToolEventsToJson,
+  toolFlushDelayMs,
+  type StampedToolEvent,
+} from './tool-telemetry.js'
 
 const CANVAS_MAX_BYTES = 262144
 
@@ -124,8 +142,25 @@ import {
   appendImageDeliveryMetadata,
   type ImageDeliverySummary,
 } from '../shared/chat-image-delivery.js'
-import { readModelInputConfig, resolveModelInputTypes, writeModelInputTypes } from './model-input.js'
+import {
+  DEFAULT_MODEL_MAX_TOKENS,
+  readModelContextWindow,
+  readModelInputConfig,
+  readModelMaxTokens,
+  resolveModelInputTypes,
+  writeModelContextWindow,
+  writeModelInputTypes,
+  writeModelMaxTokens,
+} from './model-input.js'
 import { probeOllamaVision } from './ollama-vision.js'
+import {
+  DEFAULT_OLLAMA_CONTEXT_LIMIT,
+  describeContextWindowVerdict,
+  isCloudHostedOllamaModel,
+  judgeContextWindow,
+  probeOllamaContext,
+  resolveEffectiveOllamaContext,
+} from './ollama-context.js'
 import {
   patchSyloDisabledCapability,
   readSyloDisabledCapabilities,
@@ -167,7 +202,6 @@ import {
   startGithubDeviceFlow,
 } from './github-auth.js'
 import { deriveChatTitleFromUserText, isAutoTitleEligible } from './chat-title.js'
-import { formatCompactionNoticeContent, type CompactionReason } from '../shared/compaction-notice.js'
 import {
   CONVERSATION_RETENTION_MS,
   deleteWorkspaceFully,
@@ -250,7 +284,11 @@ import {
   readThinkTankConfig,
   writeThinkTankConfig,
 } from './think-tank-config.js'
-import type { SyloThinkTankEvent } from '../shared/think-tank-events.js'
+import {
+  THINK_TANK_CANCEL_GRACE_MS,
+  THINK_TANK_CANCEL_MESSAGE,
+  type SyloThinkTankEvent,
+} from '../shared/think-tank-events.js'
 import {
   persistToolResultImages,
 } from './web-access-images.js'
@@ -928,6 +966,31 @@ function isLocalMediaFilePath(filePath: string): boolean {
   return LOCAL_MEDIA_EXTENSIONS.has(extname(filePath).toLowerCase())
 }
 
+function registerSkillSurfaceProtocol(): void {
+  const rendererRoot = resolve(join(__dirname, '../renderer'))
+  protocol.handle(SYLO_SURFACE_SCHEME, (request) => {
+    const rel = syloSurfaceRelativePath(request.url)
+    if (!rel) return new Response(null, { status: 400 })
+    const target = resolve(rendererRoot, rel)
+    const escaped = pathRelative(rendererRoot, target)
+    if (!escaped || escaped.startsWith('..') || isAbsolute(escaped)) {
+      return new Response(null, { status: 400 })
+    }
+    try {
+      if (!existsSync(target) || !statSync(target).isFile()) {
+        return new Response(null, { status: 404 })
+      }
+    } catch {
+      return new Response(null, { status: 404 })
+    }
+    return net.fetch(pathToFileURL(target).href).then((res) => {
+      const headers = new Headers(res.headers)
+      headers.set('Access-Control-Allow-Origin', '*')
+      return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
+    })
+  })
+}
+
 function registerLocalImageProtocol(): void {
   protocol.handle(SYLO_FILE_SCHEME, (request) => {
     let filePath = ''
@@ -985,6 +1048,16 @@ function registerExternalLinkRouting(): void {
 protocol.registerSchemesAsPrivileged([
   {
     scheme: SYLO_FILE_SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  },
+  {
+    scheme: SYLO_SURFACE_SCHEME,
     privileges: {
       standard: true,
       secure: true,
@@ -1167,16 +1240,6 @@ function appendExtensionCommandOutput(
  */
 const CONTENT_FLUSH_MS = 500
 
-/**
- * Max ms to wait before flushing buffered tool telemetry to SQLite.
- *
- * appendToolCallsJson is O(n²): each call SELECTs, JSON.parses, JSON.stringifies,
- * and UPDATEs the entire tool_calls_json blob. On a 20+ tool-call run the blob
- * can be multiple MB; each append re-serializes the whole thing. Batching to
- * 1 s collapses many appends into one SELECT + parse + stringify + UPDATE.
- */
-const TOOL_FLUSH_MS = 1000
-
 type PendingTurn = {
   convId: string
   assistantId: string
@@ -1197,7 +1260,14 @@ type PendingTurn = {
   /** Debounced timer ID for the next content flush (null = no flush scheduled). */
   contentFlushTimer: ReturnType<typeof setTimeout> | null
   /** Buffered tool telemetry events waiting for a batch flush to SQLite. */
-  toolEventsBuffer: Array<{ ts: number; event: Record<string, unknown> }>
+  toolEventsBuffer: StampedToolEvent[]
+  /**
+   * Condensed telemetry already merged for this turn — the authoritative copy, so a
+   * flush never has to read the growing blob back out of SQLite to append to it.
+   */
+  toolEventsPersisted: StampedToolEvent[]
+  /** Size of the last serialized blob, used to back off the flush cadence. */
+  toolJsonChars: number
   /** Debounced timer ID for the next tool telemetry batch flush (null = none). */
   toolFlushTimer: ReturnType<typeof setTimeout> | null
 }
@@ -1216,16 +1286,26 @@ function scheduleContentFlush(pending: PendingTurn): void {
   }, CONTENT_FLUSH_MS)
 }
 
-/** Schedule a debounced tool telemetry batch flush (at most one per TOOL_FLUSH_MS). */
+/** Merge buffered broker events into the turn's telemetry and write it to SQLite. */
+function flushToolEvents(pending: PendingTurn): void {
+  if (pending.toolEventsBuffer.length === 0) return
+  pending.toolEventsPersisted = appendPersistedToolEvents(
+    pending.toolEventsPersisted,
+    pending.toolEventsBuffer,
+  )
+  pending.toolEventsBuffer = []
+  const json = persistedToolEventsToJson(pending.toolEventsPersisted)
+  pending.toolJsonChars = json.length
+  db.writeToolCallsJson(pending.assistantId, json)
+}
+
+/** Schedule a debounced tool telemetry batch flush (see toolFlushDelayMs for cadence). */
 function scheduleToolFlush(pending: PendingTurn): void {
   if (pending.toolFlushTimer) return
   pending.toolFlushTimer = setTimeout(() => {
     pending.toolFlushTimer = null
-    if (pending.toolEventsBuffer.length > 0) {
-      db.appendToolCallsJsonBatch(pending.assistantId, pending.toolEventsBuffer)
-      pending.toolEventsBuffer = []
-    }
-  }, TOOL_FLUSH_MS)
+    flushToolEvents(pending)
+  }, toolFlushDelayMs(pending.toolJsonChars))
 }
 
 /**
@@ -1242,10 +1322,7 @@ function flushPendingTurnBuffers(pending: PendingTurn): void {
     clearTimeout(pending.toolFlushTimer)
     pending.toolFlushTimer = null
   }
-  if (pending.toolEventsBuffer.length > 0) {
-    db.appendToolCallsJsonBatch(pending.assistantId, pending.toolEventsBuffer)
-    pending.toolEventsBuffer = []
-  }
+  flushToolEvents(pending)
   // Content: cancel timer; caller writes explicitly with final status
   if (pending.contentFlushTimer) {
     clearTimeout(pending.contentFlushTimer)
@@ -1827,6 +1904,22 @@ function mergedDisabledForConversation(convId: string): SyloDisabledCapabilities
   return mergedDisabledForWorkspace(conv?.workspace_id)
 }
 
+/**
+ * Skill paths the workspace pins inline into the system prompt. Pinning is per-workspace
+ * and opt-in because an inlined SKILL.md costs its full length on every turn; unpinned
+ * skills stay one-line pointers the model can read on demand.
+ */
+function alwaysApplySkillPathsForWorkspace(workspaceId: string | null | undefined): string[] {
+  const wid = typeof workspaceId === 'string' ? workspaceId.trim() : ''
+  if (!wid) return []
+  const ws = db.getWorkspace(wid)
+  return ws ? db.workspaceAlwaysApplySkillPaths(ws) : []
+}
+
+function alwaysApplySkillPathsForConversation(convId: string): string[] {
+  return alwaysApplySkillPathsForWorkspace(db.getConversation(convId)?.workspace_id)
+}
+
 function disabledFingerprint(disabled: SyloDisabledCapabilities): string {
   const s = (x: string[]) => x.join('\0')
   const tools = (disabled.disabledTools ?? [])
@@ -1934,7 +2027,10 @@ async function ensureBrokerSessionForConversation(
   if (phase === 'ui-focus' && supervisorHasInFlightTurn(supervisor)) return
   if (primaryBrokerBusyWithOtherConversation(convId) && supervisor === broker) return
   const { sessionAbs, sessionCwd, mergedDisabled } = sessionBindingForConversation(convId)
-  const dfp = disabledFingerprint(mergedDisabled)
+  const alwaysApplySkillPaths = alwaysApplySkillPathsForConversation(convId)
+  // Pinned skills change the system prompt, so they belong in the fingerprint that
+  // decides whether a switchSession can be skipped.
+  const dfp = `${disabledFingerprint(mergedDisabled)}\0${alwaysApplySkillPaths.join('\0')}`
   const eff = effectiveModelForConversation(convId)
   const mfp = modelFingerprint(eff)
   if (
@@ -1952,6 +2048,7 @@ async function ensureBrokerSessionForConversation(
     disabledExtensionPaths: mergedDisabled.extensionPaths,
     disabledTools: mergedDisabled.disabledTools,
     includeCursorSkills: readIncludeCursorSkillsPref(),
+    alwaysApplySkillPaths,
         modelProvider: eff.provider,
     modelId: eff.modelId,
     imageModelId: eff.imageModelId,
@@ -2110,6 +2207,8 @@ async function startChatTurn(
     contentDirty: false,
     contentFlushTimer: null,
     toolEventsBuffer: [],
+    toolEventsPersisted: [],
+    toolJsonChars: 0,
     toolFlushTimer: null,
   })
   const assignedBroker = await acquireBrokerForTurn(conversationId)
@@ -2349,6 +2448,15 @@ function patchOllamaBaseUrlInModelsJson(
   }
   if (ollama.api === undefined) ollama.api = 'openai-completions'
   if (ollama.apiKey === undefined) ollama.apiKey = 'ollama'
+  // Without `maxTokensField`, Pi's openai-completions client sends the output limit as
+  // `max_completion_tokens`. Ollama's /v1 endpoint silently ignores that field and only
+  // honors `max_tokens` — verified against this server: `max_completion_tokens: 12` ran on
+  // to 4,058 tokens with finish_reason "stop", while `max_tokens: 12` stopped at 12 with
+  // finish_reason "length". Unset, every request is effectively unlimited and a model that
+  // never emits a stop token generates until its context window fills.
+  const compat = { ...((ollama.compat as Record<string, unknown>) ?? {}) }
+  if (compat.maxTokensField === undefined) compat.maxTokensField = 'max_tokens'
+  ollama.compat = compat
 
   const wantId = typeof ensureModelId === 'string' ? ensureModelId.trim() : ''
   if (wantId) {
@@ -2374,6 +2482,93 @@ function patchOllamaBaseUrlInModelsJson(
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
   }
+}
+
+/**
+ * The server-wide `OLLAMA_CONTEXT_LENGTH` ceiling. Ollama exposes no endpoint for
+ * its own configuration, so the operator mirrors it here; it is only consulted
+ * when the model is not loaded and `/api/ps` cannot report the real allocation.
+ */
+function ollamaContextLimitPref(): number {
+  const raw = db.getPref('sylo.ollama_context_limit', DEFAULT_OLLAMA_CONTEXT_LIMIT)
+  const parsed = typeof raw === 'number' ? raw : Number.parseInt(String(raw), 10)
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_OLLAMA_CONTEXT_LIMIT
+}
+
+export type OllamaContextStatus = {
+  modelId: string
+  /** What Ollama will actually allocate, or null when it could not be determined. */
+  effective: number | null
+  /** What `models.json` currently tells Pi, or null when Pi is left to guess. */
+  declared: number | null
+  /** True once `/api/ps` confirmed the allocation on a loaded model. */
+  measured: boolean
+  verdict: ReturnType<typeof judgeContextWindow>['kind']
+  message: string
+}
+
+/** Compare the context window Ollama gives a model against the one Pi is told about. */
+async function ollamaContextStatus(
+  baseOrigin: string,
+  modelId: string,
+): Promise<{ ok: true; status: OllamaContextStatus } | { ok: false; error: string }> {
+  const id = modelId.trim()
+  if (!id) return { ok: false, error: 'Model id is required' }
+  const probed = await probeOllamaContext(baseOrigin, id)
+  if (!probed.ok) return probed
+  const effective = resolveEffectiveOllamaContext(
+    probed.probe,
+    ollamaContextLimitPref(),
+    isCloudHostedOllamaModel(id),
+  )
+  const declared = readModelContextWindow(hostAgentDir(), 'ollama', id)
+  const verdict = judgeContextWindow(effective, declared)
+  return {
+    ok: true,
+    status: {
+      modelId: id,
+      effective,
+      declared,
+      measured: probed.probe.loaded != null,
+      verdict: verdict.kind,
+      message: describeContextWindowVerdict(verdict, id),
+    },
+  }
+}
+
+/**
+ * Record the detected window in `models.json` so Pi neither over-feeds Ollama (silent
+ * truncation) nor compacts early. Leaves the file alone when the probe fails or the
+ * declared value already matches, so a hand-tuned entry is not overwritten on every save.
+ */
+async function syncOllamaContextWindow(baseOrigin: string, modelId: string): Promise<void> {
+  const id = modelId.trim()
+  if (!id) return
+  const probed = await probeOllamaContext(baseOrigin, id)
+  if (!probed.ok) return
+  const effective = resolveEffectiveOllamaContext(
+    probed.probe,
+    ollamaContextLimitPref(),
+    isCloudHostedOllamaModel(id),
+  )
+  if (effective == null) return
+  if (readModelContextWindow(hostAgentDir(), 'ollama', id) === effective) return
+  writeModelContextWindow(hostAgentDir(), 'ollama', id, effective)
+}
+
+/**
+ * Give an Ollama model an output cap if it has none.
+ *
+ * Ollama's default `num_predict` is unlimited, so a model that never emits a stop token
+ * generates until the context window fills. Only an explicit `max_tokens` stops it, and Pi
+ * sends one only for models it composed from `models.json`. An existing value is left alone
+ * — this establishes a ceiling, it does not retune a deliberate one.
+ */
+function ensureOllamaMaxTokens(modelId: string): void {
+  const id = modelId.trim()
+  if (!id) return
+  if (readModelMaxTokens(hostAgentDir(), 'ollama', id) != null) return
+  writeModelMaxTokens(hostAgentDir(), 'ollama', id, DEFAULT_MODEL_MAX_TOKENS)
 }
 
 /** Read a provider's saved API key status from `~/.pi/agent/auth.json` (mask only — never return the raw key). */
@@ -2419,6 +2614,15 @@ function writeProviderAuthKey(
     }
   }
   const key = typeof keyRaw === 'string' ? keyRaw.trim() : ''
+  const existing = root[provider]
+  const existingType =
+    existing && typeof existing === 'object' ? (existing as { type?: unknown }).type : undefined
+  if (key !== '' && existingType === 'oauth') {
+    return {
+      ok: false,
+      error: 'This provider is signed in with OAuth. Sign out first instead of pasting an API key.',
+    }
+  }
   if (key === '') {
     delete root[provider]
   } else {
@@ -2506,34 +2710,6 @@ type BrokerMessageContext = {
   isPrimary: boolean
   overflowSlot?: OverflowBrokerSlot
   isStale: () => boolean
-}
-
-function persistCompactionChatNotice(
-  convId: string,
-  ev: Record<string, unknown>,
-): void {
-  const reason = ev.reason
-  const compactionReason: CompactionReason =
-    reason === 'manual' || reason === 'overflow' || reason === 'threshold' ? reason : 'threshold'
-  const aborted = ev.aborted === true
-  const errorMessage = typeof ev.errorMessage === 'string' ? ev.errorMessage : undefined
-  const summary = typeof ev.summary === 'string' ? ev.summary : undefined
-  const tokensBefore = typeof ev.tokensBefore === 'number' ? ev.tokensBefore : undefined
-  const tokensAfter = typeof ev.tokensAfter === 'number' ? ev.tokensAfter : undefined
-  const hasResult = !aborted && !errorMessage && (summary != null || tokensBefore != null)
-  if (!hasResult && !aborted && !errorMessage) return
-
-  const content = formatCompactionNoticeContent({
-    kind: 'compaction',
-    reason: compactionReason,
-    tokensBefore,
-    tokensAfter,
-    summary,
-    aborted: aborted || undefined,
-    errorMessage,
-  })
-  db.insertMessage(convId, 'system', content, 'complete')
-  emitChatRefresh(convId, 'messages')
 }
 
 function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext): void {
@@ -2944,10 +3120,9 @@ function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext
         pending.convId,
         evWithImages,
       ) as Record<string, unknown>
-      // Buffered tool telemetry: push to in-memory buffer and batch-flush at
-      // most every TOOL_FLUSH_MS. appendToolCallsJson is O(n²) (SELECT + parse +
-      // stringify + UPDATE of the entire growing blob); batching collapses many
-      // appends into one.
+      // Buffered tool telemetry: push to an in-memory buffer that the flush merges
+      // into the turn's condensed list (see tool-telemetry.ts). The live IPC copy
+      // below stays per-event so streaming UI is unaffected.
       pending.toolEventsBuffer.push({ ts, event: evWithOffset })
       scheduleToolFlush(pending)
       if (ev.type === 'tool_execution_start' || ev.type === 'tool_execution_end') {
@@ -2961,9 +3136,6 @@ function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext
       }
       mainWindow?.webContents.send('chat:tool', toolPayload)
       emitCompanionEvent({ channel: 'chat:tool', payload: toolPayload })
-      if (ev.type === 'compaction_end') {
-        persistCompactionChatNotice(pending.convId, ev as Record<string, unknown>)
-      }
     }
   }
 }
@@ -3004,6 +3176,7 @@ function buildBrokerSupervisorOptions(
     disabledExtensionPaths: initialBind.mergedDisabled.extensionPaths,
     disabledTools: initialBind.mergedDisabled.disabledTools,
     includeCursorSkills: readIncludeCursorSkillsPref(),
+    alwaysApplySkillPaths: convId ? alwaysApplySkillPathsForConversation(convId) : [],
     piBuiltinTools: readPiBuiltinToolsPref(),
     chatOnly: db.getPref('sylo.chat_only', false) as boolean,
     builtinToolsGuardExtension:
@@ -3349,8 +3522,9 @@ function registerIpc(): void {
           imageModelProvider: (db.getPref('sylo.image_model_provider', 'ollama') as string).trim(),
         },
         ollamaOrigin: origin,
-        providers: ['ollama', 'openai', 'anthropic', 'groq', 'openrouter'],
+        providers: [...SYLO_MODEL_PROVIDERS],
         ollamaModels,
+        chatgptModels: CHATGPT_CODEX_MODELS.map((m) => ({ id: m.id, name: m.name, visionCapable: m.vision })),
       }
     },
     deleteConversation: (id) => {
@@ -3750,6 +3924,32 @@ function registerIpc(): void {
       })
       if (!res) return { ok: false as const, error: 'unknown_workspace' }
       return { ok: true as const, disabled: res }
+    },
+  )
+
+  ipcMain.handle('capabilities:getPinnedSkills', (_e, workspaceId: unknown) => {
+    const id = typeof workspaceId === 'string' ? workspaceId.trim() : ''
+    const wid = id || db.defaultWorkspaceId()
+    if (!wid) return { ok: false as const, error: 'bad_workspace' }
+    return { ok: true as const, paths: alwaysApplySkillPathsForWorkspace(wid) }
+  })
+
+  ipcMain.handle(
+    'capabilities:setPinnedSkill',
+    (_e, workspaceId: unknown, skillPath: unknown, pinned: unknown) => {
+      const id = typeof workspaceId === 'string' ? workspaceId.trim() : ''
+      const wid = id || db.defaultWorkspaceId()
+      if (!wid) return { ok: false as const, error: 'bad_workspace' }
+      if (typeof skillPath !== 'string' || !skillPath.trim()) {
+        return { ok: false as const, error: 'bad_path' }
+      }
+      if (typeof pinned !== 'boolean') return { ok: false as const, error: 'bad_pinned' }
+      const paths = db.patchWorkspaceAlwaysApplySkill({ workspaceId: wid, path: skillPath, pinned })
+      if (!paths) return { ok: false as const, error: 'unknown_workspace' }
+      // No explicit rebind needed: pinned paths are part of the session fingerprint, so
+      // the next ensureBrokerSessionForConversation switches the session automatically —
+      // same path the disabled-capability toggles rely on.
+      return { ok: true as const, paths }
     },
   )
 
@@ -4493,11 +4693,26 @@ function registerIpc(): void {
       const active = findPendingTurnForConversation(conversationId)
       if (active) {
         const [turnId, pending] = active
-        pending.aborted = true
         const assigned = turnBrokerPool.supervisorForTurn(turnId) ?? broker
-        finalizePendingTurn(turnId, pending, 'cancelled')
-        assigned?.abort()
-        void flushDeferredTurns()
+        const abortTurn = () => {
+          if (pendingTurns.get(turnId) !== pending || pending.aborted) return
+          pending.aborted = true
+          finalizePendingTurn(turnId, pending, 'cancelled')
+          assigned?.abort()
+          void flushDeferredTurns()
+        }
+        // Cancel the run, not the turn: killing the turn destroys the in-flight
+        // `sylo_think_tank_run` call before it can return, and the model reads the resulting
+        // empty tool result as the tool being broken. Aborting stays the fallback for a run
+        // that will not wind down.
+        const pushed =
+          assigned?.sendChildMessage({
+            type: THINK_TANK_CANCEL_MESSAGE,
+            sessionId: sid,
+            reason: 'Stopped by operator',
+          }) ?? false
+        if (pushed) setTimeout(abortTurn, THINK_TANK_CANCEL_GRACE_MS)
+        else abortTurn()
       }
     }
     mainWindow?.webContents.send('thinkTank:lifecycle', {
@@ -5329,6 +5544,13 @@ function registerIpc(): void {
     return probeOllamaVision(baseOrigin, modelId)
   })
 
+  ipcMain.handle('ollama:contextStatus', async (_e, baseOrigin: unknown, modelId: unknown) => {
+    if (typeof baseOrigin !== 'string' || typeof modelId !== 'string') {
+      return { ok: false as const, error: 'bad_args' }
+    }
+    return ollamaContextStatus(baseOrigin, modelId)
+  })
+
   ipcMain.handle('models:getInputConfig', (_e, provider: unknown, modelId: unknown) => {
     if (typeof provider !== 'string' || typeof modelId !== 'string') {
       return { ok: false as const, error: 'bad_args' }
@@ -5378,6 +5600,10 @@ function registerIpc(): void {
         const wrote = writeModelInputTypes(agentDir, 'ollama', extra, vision)
         if (!wrote.ok) return wrote
       }
+      // Keep Pi's context window in step with what Ollama actually allocates. Best
+      // effort: a probe failure leaves models.json as-is rather than blocking the save.
+      await syncOllamaContextWindow(baseOrigin, extra)
+      ensureOllamaMaxTokens(extra)
       return { ok: true as const }
     },
   )
@@ -5412,6 +5638,26 @@ function registerIpc(): void {
     if ('error' in r) return { ok: false as const, error: r.error }
     return { ok: true as const, models: r.models, source: r.source }
   })
+
+  ipcMain.handle('chatgpt:status', () => chatgptAuthStatus(hostAgentDir()))
+
+  ipcMain.handle('chatgpt:login', async () => {
+    return loginChatgptCodex({
+      agentDir: hostAgentDir(),
+      openExternal: (url) => shell.openExternal(url),
+      onEvent: (event) => {
+        const mw = mainWindow
+        if (mw && !mw.isDestroyed()) mw.webContents.send('chatgpt:login-event', event)
+      },
+    })
+  })
+
+  ipcMain.handle('chatgpt:cancel', () => {
+    cancelChatgptLogin()
+    return { ok: true as const }
+  })
+
+  ipcMain.handle('chatgpt:logout', async () => logoutChatgptCodex(hostAgentDir()))
 
   ipcMain.handle('capabilities:disabled:get', () => readSyloDisabledCapabilities())
 
@@ -6286,8 +6532,36 @@ async function maybeAutoMigrateFieldBrainDb(): Promise<void> {
 
 let primaryWorkspaceFolderMissing = false
 
+// Before whenReady so startup failures land in the log too.
+installCrashHandlers(() => mainWindow ?? null)
+
+// Windows groups taskbar buttons, jump lists, and notifications by this ID. Without
+// it the window is attributed to electron.exe, so a Start Menu shortcut pinned by the
+// operator never merges with the running window.
+if (process.platform === 'win32') app.setAppUserModelId(SYLO_APP_USER_MODEL_ID)
+
+/**
+ * A second instance would open the same SQLite file with two writers, spawn a second
+ * broker, and fight for the companion server port — easy to trigger once Sylo has both
+ * a Startup entry and a Start Menu shortcut. Reuse the running window instead.
+ */
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    const win = mainWindow
+    if (!win || win.isDestroyed()) return
+    if (win.isMinimized()) win.restore()
+    win.show()
+    void win.focus()
+  })
+}
+
 app.whenReady().then(() => {
+  if (!gotSingleInstanceLock) return
   registerLocalImageProtocol()
+  registerSkillSurfaceProtocol()
   registerExternalLinkRouting()
   db.openDatabase(app.getPath('userData'), SYLO_REPO_ROOT)
   bindGithubPrefStore({
@@ -6391,6 +6665,7 @@ app.on('before-quit', () => {
     /* */
   }
     shutdownSubagentTaskHostSession()
+  thinkTankStore.flushThinkTankTurnWorkflow()
   shutdownScheduledPromptsService()
   shutdownSweepService()
   closeAllWorkspaceScheduleDbs()

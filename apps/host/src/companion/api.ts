@@ -146,6 +146,7 @@ export type ModelChoice = {
   ollamaOrigin: string
   providers: string[]
   ollamaModels: { id: string; visionCapable: boolean }[]
+  chatgptModels?: { id: string; name: string; visionCapable: boolean }[]
 }
 
 export type ConversationModelOverride = {

@@ -131,9 +131,9 @@ export function CompanionModelBar({
           aria-label="Model provider"
         >
           <option value={GLOBAL_SENTINEL}>Global ({globalProviderLabel})</option>
-          {(choice?.providers ?? ['ollama', 'openai', 'anthropic', 'groq', 'openrouter']).map((p) => (
+          {(choice?.providers ?? ['ollama', 'openai-codex', 'openai', 'anthropic', 'groq', 'openrouter']).map((p) => (
             <option key={p} value={p}>
-              {p}
+              {p === 'openai-codex' ? 'ChatGPT OAuth' : p === 'openai' ? 'OpenAI API' : p}
             </option>
           ))}
         </select>
@@ -156,6 +156,24 @@ export function CompanionModelBar({
                 </option>
               ))}
               {override.model_id && !(choice?.ollamaModels ?? []).some((m) => m.id === override.model_id) ? (
+                <option value={override.model_id}>{override.model_id} (not listed)</option>
+              ) : null}
+            </select>
+          ) : effProvider === 'openai-codex' ? (
+            <select
+              className={`${selectCls} min-w-0 flex-1`}
+              value={modelValue}
+              onChange={(e) => onModelChange(e.target.value)}
+              disabled={!brokerReady}
+              aria-label="ChatGPT Codex model"
+            >
+              <option value={GLOBAL_SENTINEL}>Global ({globalModelLabel})</option>
+              {(choice?.chatgptModels ?? []).map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+              {override.model_id && !(choice?.chatgptModels ?? []).some((m) => m.id === override.model_id) ? (
                 <option value={override.model_id}>{override.model_id} (not listed)</option>
               ) : null}
             </select>

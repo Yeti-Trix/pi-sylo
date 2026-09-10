@@ -65,9 +65,18 @@ function seatMetaFromConfig(
   return { label: seatId, agent: 'think-tank-seat' }
 }
 
-function inferStatus(body: string, toolCallsJson: string | null): ExportThinkTankTurn['status'] {
+/** Session statuses that mean a run is still expected to produce turns. */
+const LIVE_SESSION_STATUSES = new Set(['debating', 'final_reports'])
+
+/**
+ * An empty body only means "still streaming" while the session itself is still running.
+ * Once the session has stopped, an empty draft is a turn that never landed — reading it as
+ * streaming is what made stopped runs render as live with an ever-growing elapsed timer.
+ */
+function inferStatus(body: string, sessionStatus: string): ExportThinkTankTurn['status'] {
   if (body.trim()) return 'complete'
-  if (toolCallsJson && toolCallsJson !== '[]') return 'streaming'
+  if (sessionStatus === 'cancelled') return 'cancelled'
+  if (!LIVE_SESSION_STATUSES.has(sessionStatus)) return 'failed'
   return 'streaming'
 }
 
@@ -143,7 +152,7 @@ export function mergeThinkTankTurnsForExport(args: {
         seatAgent: meta.agent,
         body,
         stance: String(msg.stance ?? 'continue'),
-        status: inferStatus(body, tool_calls_json),
+        status: inferStatus(body, sessionStatus),
         created_at: Number(msg.created_at ?? Date.now()),
         tool_calls_json,
         debug_json,
@@ -234,7 +243,10 @@ export function thinkTankUiBubblesFromDb(sessions: DbThinkTankSession[]): import
     body: t.body,
     stance: t.stance,
     phase: 'debate' as const,
-    status: t.status === 'failed' ? ('failed' as const) : t.status === 'streaming' ? ('streaming' as const) : ('complete' as const),
+    status:
+      t.status === 'failed' || t.status === 'cancelled' ? ('failed' as const)
+      : t.status === 'streaming' ? ('streaming' as const)
+      : ('complete' as const),
     created_at: t.created_at,
     tool_calls_json: t.tool_calls_json,
     model: t.model,

@@ -52,6 +52,7 @@ import {
 import {
   assistantTurnDurationMs,
   buildAssistantSegments,
+  compactionSegmentLabel,
   formatDurationMs,
   gapsForOrderedChatSegments,
   labelLeadChatGap,
@@ -299,9 +300,7 @@ function InlineAssistantSegment({
           >
             ⧉
           </span>
-          <span className={chatSegmentLabel}>
-            {isLive ? 'Compacting context…' : 'Context compacted'}
-          </span>
+          <span className={chatSegmentLabel}>{compactionSegmentLabel(segment)}</span>
           {tokenLabel ?
             <span className={chatSegmentMeta}>{tokenLabel}</span>
           : null}
@@ -316,6 +315,10 @@ function InlineAssistantSegment({
           <p className={cn(mutedText, 'text-[0.78rem] leading-[1.45]')}>
             {isLive ?
               'Pi is summarizing older turns to free context window space.'
+            : segment.aborted ?
+              'Older history was not summarized. The full conversation is still in context.'
+            : segment.errorMessage ?
+              segment.errorMessage
             : 'Older turns were summarized. Recent messages are kept; facts from before this boundary may be missing.'}
           </p>
           <p className={cn(mutedText, 'mt-1 text-[0.74rem]')}>

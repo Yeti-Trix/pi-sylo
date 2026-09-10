@@ -1,3 +1,18 @@
+/**
+ * Host → broker child push telling a running think tank session to wind itself down.
+ * Mirrors `THINK_TANK_CANCEL_MESSAGE` in packages/sylo-think-tank/extensions/sylo-host.ts,
+ * which is where the broker side listens.
+ */
+export const THINK_TANK_CANCEL_MESSAGE = 'sylo_think_tank_cancel'
+
+/**
+ * How long a cancelled run has to return a tool result before the turn is aborted outright.
+ *
+ * Covers a seat's kill deadline plus the engine unwinding. The fallback exists so Stop always
+ * stops; the grace exists so the model gets a real result instead of an empty tool call.
+ */
+export const THINK_TANK_CANCEL_GRACE_MS = 30_000
+
 export type ThinkTankStance = 'continue' | 'satisfied' | 'no_more_to_add'
 
 export type ThinkTankSessionStatus =

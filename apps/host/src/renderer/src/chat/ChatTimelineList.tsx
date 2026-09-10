@@ -77,13 +77,18 @@ export const ChatTimelineList = forwardRef<ChatTimelineListHandle, Props>(
       // Wait one frame after the initial scroll so the virtualizer can process
       // the scroll and mounted items can start measuring. Then repeatedly
       // re-scroll to the end while the total size is growing (measurements
-      // replacing estimates). Stop after the total has been stable for 2 frames.
+      // replacing estimates). Two stable frames was not enough for markdown
+      // and tool cards; keep going until height holds or we hit the cap.
       settleRafRef.current = requestAnimationFrame(() => {
         let lastTotal = virtualizer.getTotalSize()
         let stableFrames = 0
+        let frames = 0
+        const STABLE_FRAMES = 6
+        const MAX_FRAMES = 45
         const step = () => {
           settleRafRef.current = null
-          if (stableFrames >= 2) {
+          frames += 1
+          if (stableFrames >= STABLE_FRAMES || frames >= MAX_FRAMES) {
             onSettleEndRef.current?.()
             return
           }

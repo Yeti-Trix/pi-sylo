@@ -192,6 +192,12 @@ export interface BrokerConfig {
   disabledTools?: { extensionPath: string; toolName: string }[]
   /** When true, broker lists/applies skills under the session workspace `.cursor/skills`. */
   includeCursorSkills?: boolean
+  /**
+   * Skill paths pinned into the system prompt for this workspace. Everything else is
+   * referenced by a one-line pointer the model can `read` on demand, so each pinned
+   * skill costs its full SKILL.md on every turn.
+   */
+  alwaysApplySkillPaths?: string[]
   /** Sylo pref — Pi built-in tools (read/bash/…) for the agent session. */
   piBuiltinTools?: PiBuiltinToolsPref
   /** Sylo pref — plain chat (no tools sent to the model). */
@@ -291,6 +297,7 @@ export class BrokerSupervisor {
       disabledExtensionPaths: cfg.disabledExtensionPaths ?? [],
       disabledTools: cfg.disabledTools ?? [],
       includeCursorSkills: cfg.includeCursorSkills ?? false,
+      alwaysApplySkillPaths: cfg.alwaysApplySkillPaths ?? [],
       piBuiltinTools: cfg.piBuiltinTools,
       builtinToolsGuardExtension: cfg.builtinToolsGuardExtension,
       imageFallbackExtension: cfg.imageFallbackExtension,
@@ -434,6 +441,7 @@ export class BrokerSupervisor {
       disabledExtensionPaths: this.cfg.disabledExtensionPaths ?? [],
       disabledTools: this.cfg.disabledTools ?? [],
       includeCursorSkills: this.cfg.includeCursorSkills ?? false,
+      alwaysApplySkillPaths: this.cfg.alwaysApplySkillPaths ?? [],
       piBuiltinTools: this.cfg.piBuiltinTools,
       chatOnly: this.cfg.chatOnly ?? false,
     }
@@ -450,6 +458,8 @@ export class BrokerSupervisor {
       disabledExtensionPaths?: string[]
       disabledTools?: { extensionPath: string; toolName: string }[]
       includeCursorSkills?: boolean
+      /** Skill paths pinned into the system prompt for the switched-to workspace. */
+      alwaysApplySkillPaths?: string[]
       /** Per-chat main model override (empty = keep current). */
       modelProvider?: string
       modelId?: string
@@ -490,6 +500,7 @@ export class BrokerSupervisor {
           disabledExtensionPaths: options?.disabledExtensionPaths,
           disabledTools: options?.disabledTools,
           includeCursorSkills: options?.includeCursorSkills,
+          alwaysApplySkillPaths: options?.alwaysApplySkillPaths,
           modelProvider: options?.modelProvider,
           modelId: options?.modelId,
           imageModelId: options?.imageModelId,
@@ -572,9 +583,11 @@ export class BrokerSupervisor {
     this.child?.send({ type: 'cancel_subagent', runId: id })
   }
 
-  sendChildMessage(payload: Record<string, unknown>): void {
-    if (!this.child || this.child.killed) return
+  /** Returns false when there is no live child to receive the message. */
+  sendChildMessage(payload: Record<string, unknown>): boolean {
+    if (!this.child || this.child.killed) return false
     this.child.send(payload)
+    return true
   }
 
   /** Ask the broker for its loaded extensions/skills snapshot. Rejects on timeout / no child / broker error. */

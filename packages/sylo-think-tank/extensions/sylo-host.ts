@@ -107,6 +107,40 @@ export function notifyThinkTank(event: SyloThinkTankEvent): void {
   snd({ type: 'sylo_think_tank', event })
 }
 
+/** Host → broker child push telling a running session to wind itself down. */
+export const THINK_TANK_CANCEL_MESSAGE = 'sylo_think_tank_cancel'
+
+/** Error prefix marking a run the operator stopped, as opposed to one that failed. */
+export const THINK_TANK_STOPPED_BY_OPERATOR = 'Think tank stopped by operator'
+
+/**
+ * Listen for an operator stop pushed from the host.
+ *
+ * Stopping used to abort the whole assistant turn, which killed the `sylo_think_tank_run`
+ * tool call before it could return anything. Pi then had to backfill the missing tool result
+ * with a placeholder, and the model read that placeholder as the tool being broken. Cancelling
+ * through the session instead lets the tool fail with a real message the model can act on.
+ *
+ * Returns an unsubscribe function.
+ */
+export function onThinkTankCancel(
+  sessionId: string,
+  onCancel: (reason: string) => void,
+): () => void {
+  if (typeof process.on !== 'function') return () => {}
+  const handler = (msg: unknown) => {
+    if (!msg || typeof msg !== 'object') return
+    const m = msg as { type?: string; sessionId?: string; reason?: string }
+    if (m.type !== THINK_TANK_CANCEL_MESSAGE) return
+    if (m.sessionId && m.sessionId !== sessionId) return
+    onCancel(m.reason?.trim() || 'Stopped by operator')
+  }
+  process.on('message', handler)
+  return () => {
+    process.off('message', handler)
+  }
+}
+
 export type ThinkTankRpcRequest =
   | { op: 'status'; sessionId: string }
   | { op: 'pick'; sessionId: string; reportId: string }

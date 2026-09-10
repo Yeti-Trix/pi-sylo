@@ -492,6 +492,17 @@ contextBridge.exposeInMainWorld('sylo', {
           | { ok: false; error: string }
         >,
     },
+    /** Skills pinned inline into this workspace's system prompt. */
+    pinnedSkills: {
+      get: (workspaceId?: string) =>
+        ipcRenderer.invoke('capabilities:getPinnedSkills', workspaceId) as Promise<
+          { ok: true; paths: string[] } | { ok: false; error: string }
+        >,
+      set: (workspaceId: string | undefined, skillPath: string, pinned: boolean) =>
+        ipcRenderer.invoke('capabilities:setPinnedSkill', workspaceId, skillPath, pinned) as Promise<
+          { ok: true; paths: string[] } | { ok: false; error: string }
+        >,
+    },
     skillParamsMeta: (skillPath: string) =>
       ipcRenderer.invoke('capabilities:skillParamsMeta', skillPath),
     skillParamsGet: (skillPath: string) =>
@@ -595,6 +606,21 @@ contextBridge.exposeInMainWorld('sylo', {
       ipcRenderer.invoke('ollama:probeVision', baseOrigin, modelId) as Promise<
         { ok: true; vision: boolean } | { ok: false; error: string }
       >,
+    contextStatus: (baseOrigin: string, modelId: string) =>
+      ipcRenderer.invoke('ollama:contextStatus', baseOrigin, modelId) as Promise<
+        | {
+            ok: true
+            status: {
+              modelId: string
+              effective: number | null
+              declared: number | null
+              measured: boolean
+              verdict: 'unknown' | 'ok' | 'missing' | 'truncating' | 'wasting' | 'cramped'
+              message: string
+            }
+          }
+        | { ok: false; error: string }
+      >,
     patchBaseUrl: (baseOrigin: string, ensureModelId?: string, visionCapable?: boolean) =>
       ipcRenderer.invoke('pi:patchOllamaBaseUrl', baseOrigin, ensureModelId, visionCapable) as Promise<
         { ok: true } | { ok: false; error: string }
@@ -621,6 +647,44 @@ contextBridge.exposeInMainWorld('sylo', {
     /** key: '' removes the entry; null/missing key keeps it. */
     set: (provider: string, key: string) => ipcRenderer.invoke('pi:setProviderAuth', provider, key) as
       Promise<{ ok: true } | { ok: false; error: string }>,
+  },
+  /** ChatGPT Plus/Pro (OpenAI Codex OAuth) — tokens in Pi's auth.json. */
+  chatgpt: {
+    status: () =>
+      ipcRenderer.invoke('chatgpt:status') as Promise<{ connected: boolean; accountId: string | null }>,
+    login: () =>
+      ipcRenderer.invoke('chatgpt:login') as Promise<
+        { ok: true } | { ok: false; error: string; cancelled?: boolean }
+      >,
+    cancel: () => ipcRenderer.invoke('chatgpt:cancel') as Promise<{ ok: true }>,
+    logout: () =>
+      ipcRenderer.invoke('chatgpt:logout') as Promise<{ ok: true } | { ok: false; error: string }>,
+    onLoginEvent: (
+      cb: (event: {
+        type: 'device_code' | 'auth_url' | 'progress' | 'info'
+        userCode?: string
+        verificationUri?: string
+        expiresInSeconds?: number
+        url?: string
+        instructions?: string
+        message?: string
+      }) => void,
+    ) => {
+      const ch = (
+        _: unknown,
+        event: {
+          type: 'device_code' | 'auth_url' | 'progress' | 'info'
+          userCode?: string
+          verificationUri?: string
+          expiresInSeconds?: number
+          url?: string
+          instructions?: string
+          message?: string
+        },
+      ) => cb(event)
+      ipcRenderer.on('chatgpt:login-event', ch)
+      return () => ipcRenderer.removeListener('chatgpt:login-event', ch)
+    },
   },
   /** OpenRouter (free-tier) model list from the public endpoint. */
   openrouter: {

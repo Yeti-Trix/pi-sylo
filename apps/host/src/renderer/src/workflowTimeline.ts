@@ -84,7 +84,24 @@ export function mergedWorkflowTelemetry(
 function dedupe(entries: WorkflowStampedEntry[]): WorkflowStampedEntry[] {
   const seen = new Set<string>()
   const out: WorkflowStampedEntry[] = []
+  // A merged thinking run is keyed by the timestamp of the delta that opened it, so
+  // the persisted copy (as of the last flush) and the live copy (still growing)
+  // collide on ts while holding different amounts of text. Keep the longer one.
+  const thinkingRunIndexByTs = new Map<number, number>()
   for (const r of entries) {
+    if (isThinkingDeltaEvent(r.event)) {
+      const existingIx = thinkingRunIndexByTs.get(r.ts)
+      if (existingIx === undefined) {
+        thinkingRunIndexByTs.set(r.ts, out.length)
+        out.push(r)
+        continue
+      }
+      const existing = out[existingIx]!
+      if (readThinkingDelta(r.event).length > readThinkingDelta(existing.event).length) {
+        out[existingIx] = r
+      }
+      continue
+    }
     try {
       const k = `${r.ts}\u0001${typeof r.event === 'string' ? r.event : JSON.stringify(r.event)}`
       if (seen.has(k)) continue
@@ -196,6 +213,39 @@ function thinkingDeltaText(ev: unknown): string | null {
   const o = ev as Record<string, unknown>
   if (o.type !== 'thinking_delta') return null
   return typeof o.delta === 'string' ? o.delta : null
+}
+
+export function isThinkingDeltaEvent(ev: unknown): boolean {
+  return Boolean(ev) && typeof ev === 'object' && (ev as Record<string, unknown>).type === 'thinking_delta'
+}
+
+export function readThinkingDelta(ev: unknown): string {
+  return thinkingDeltaText(ev) ?? ''
+}
+
+/**
+ * Append a telemetry row, folding it into the previous entry when both are thinking
+ * deltas. The broker emits these at the same rate as text deltas (one measured turn
+ * produced 50,593), and every consumer concatenates contiguous runs anyway, so
+ * keeping them separate only costs memory and render work. The merged entry keeps
+ * the opening timestamp and `_textOffset` so placement in the bubble is unchanged.
+ */
+export function pushCoalescedTelemetry(
+  rows: WorkflowStampedEntry[],
+  entry: WorkflowStampedEntry,
+): void {
+  const last = rows[rows.length - 1]
+  if (last && isThinkingDeltaEvent(last.event) && isThinkingDeltaEvent(entry.event)) {
+    rows[rows.length - 1] = {
+      ts: last.ts,
+      event: {
+        ...(last.event as Record<string, unknown>),
+        delta: readThinkingDelta(last.event) + readThinkingDelta(entry.event),
+      },
+    }
+    return
+  }
+  rows.push(entry)
 }
 
 /** Wall-clock collapsed thinking blocks between non-thinking telemetry. */
@@ -505,6 +555,10 @@ export type AssistantSegment =
       tokensAfter: number | null
       summary: string | null
       live: boolean
+      /** Compaction was cancelled — history is untouched and still fully in context. */
+      aborted: boolean
+      /** Compaction failed; the reason Pi reported. */
+      errorMessage: string | null
       textOffset: number | null
     }
 
@@ -640,6 +694,8 @@ export function buildAssistantSegments(
         tokensAfter: null,
         summary: null,
         live: true,
+        aborted: false,
+        errorMessage: null,
         textOffset: offset,
       })
       continue
@@ -657,6 +713,8 @@ export function buildAssistantSegments(
         tokensAfter: typeof o.tokensAfter === 'number' ? o.tokensAfter : null,
         summary: typeof o.summary === 'string' ? o.summary : null,
         live: false,
+        aborted: o.aborted === true,
+        errorMessage: typeof o.errorMessage === 'string' ? o.errorMessage : null,
         textOffset: openIx >= 0 ? segments[openIx]!.textOffset : offset,
       }
       if (openIx >= 0) segments[openIx] = finalized
@@ -865,6 +923,16 @@ function eventType(ev: unknown): string {
   return typeof t === 'string' ? t : ''
 }
 
+/** Cancelled and failed compaction read as success unless they are named separately. */
+export function compactionSegmentLabel(
+  seg: Extract<AssistantSegment, { kind: 'compaction' }>,
+): string {
+  if (seg.live) return 'Compacting context…'
+  if (seg.aborted) return 'Context compaction cancelled'
+  if (seg.errorMessage) return 'Context compaction failed'
+  return 'Context compacted'
+}
+
 function segmentEndTs(seg: AssistantSegment): number | null {
   if (seg.kind === 'thinking') return seg.endTs
   return seg.endTs
@@ -872,7 +940,7 @@ function segmentEndTs(seg: AssistantSegment): number | null {
 
 function segmentLabel(seg: AssistantSegment): string {
   if (seg.kind === 'thinking') return seg.text.trim() ? 'Thought' : 'Thinking (no text)'
-  if (seg.kind === 'compaction') return seg.live ? 'Compacting context' : 'Context compacted'
+  if (seg.kind === 'compaction') return compactionSegmentLabel(seg)
   return `Tool: ${seg.toolName}`
 }
 

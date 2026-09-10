@@ -34,6 +34,7 @@ import {
 import { ensureWindowsPiShellFallback } from './pi-windows-shell.js'
 import { discoverBundledSkillPaths } from '../shared/bundled-skill-discovery.js'
 import { SYLO_DEFAULT_MODEL_ID, SYLO_DEFAULT_MODEL_PROVIDER } from '../shared/sylo-model-defaults.js'
+import { SYLO_MODEL_PROVIDERS } from '../shared/chatgpt-codex.js'
 import { deriveExtensionDisplayName } from '../shared/capability-display-names-node.js'
 import {
   normalizePiBuiltinToolsPref,
@@ -48,6 +49,7 @@ import {
   normalizeSkillCapabilityPath,
   normalizeSkillPathListForPolicyJson,
   normalizeSyloCapabilityPath,
+  selectPinnedSkills,
 } from '../shared/sylo-capability-paths.js'
 import { isSkillPathInOperatorScope } from '../shared/sylo-skill-scope.js'
 import { readSyloPrefBool } from '../shared/sylo-sqlite-prefs.js'
@@ -82,6 +84,8 @@ type BrokerInit = {
   piBuiltinTools?: PiBuiltinToolsPref
   /** Sylo pref — include active workspace `.cursor/skills` in scope. */
   includeCursorSkills?: boolean
+  /** Workspace skill paths pinned inline into the system prompt (empty = pointers only). */
+  alwaysApplySkillPaths?: string[]
   /** Sylo pref — chat-only turns (no tools sent to the model). */
   chatOnly?: boolean
 }
@@ -129,6 +133,8 @@ type BrokerSwitchSession = {
   disabledExtensionPaths?: string[]
   disabledTools?: { extensionPath: string; toolName: string }[]
   includeCursorSkills?: boolean
+  /** Workspace skill paths pinned inline into the system prompt (empty = pointers only). */
+  alwaysApplySkillPaths?: string[]
   /** Per-chat main model override (empty/undefined = keep current). */
   modelProvider?: string
   modelId?: string
@@ -498,7 +504,7 @@ function resolveModel(registry: ModelRegistry, providerRaw: string, modelIdRaw: 
     )
   }
 
-    for (const p of ['ollama', 'openai', 'anthropic', 'groq', 'openrouter']) {
+    for (const p of SYLO_MODEL_PROVIDERS) {
     const m = registry.find(p, modelId)
     if (m) return m
   }
@@ -594,6 +600,12 @@ let disabledExtensionPathsSet = new Set<string>()
 let brokerAgentDir = ''
 let brokerSessionCwd = ''
 let brokerIncludeCursorSkills = false
+/**
+ * Skill paths the active workspace pins inline into the system prompt. Module-level so
+ * `handleSwitchSession` can update it before `runtime.switchSession` re-invokes the
+ * `createRuntime` factory — same pattern as the per-chat model override above.
+ */
+let brokerAlwaysApplySkillPaths = new Set<string>()
 /** Normalized `extensionPath\0toolName` keys — excluded tools stay in the list with `excludedFromAgent` for host UI. */
 let disabledToolKeysSet = new Set<string>()
 
@@ -629,6 +641,30 @@ function skillPathDisabledForAgent(path: string): boolean {
   if (!p) return false
   if (!isSkillPathInOperatorScope(path, brokerAgentDir, brokerSessionCwd, skillScopeOptions())) return true
   return disabledSkillPathsSet.has(p)
+}
+
+/**
+ * SKILL.md bodies for the skills this workspace pinned, shaped as context files.
+ *
+ * Pi's skill block only ever emits a pointer, so a pinned skill has to ride in with the
+ * AGENTS.md context files to actually be present every turn. Unreadable files are skipped
+ * rather than thrown: a stale pin must not take the session down.
+ */
+function readPinnedSkillContextFiles(filePaths: readonly string[]): { path: string; content: string }[] {
+  const out: { path: string; content: string }[] = []
+  const seen = new Set<string>()
+  for (const filePath of filePaths) {
+    const key = normalizeSyloCapabilityPath(filePath)
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    try {
+      const content = readFileSync(filePath, 'utf8').trim()
+      if (content) out.push({ path: filePath, content })
+    } catch {
+      // stale or unreadable pin — leave it out
+    }
+  }
+  return out
 }
 
 function extensionBrokerPolicy() {
@@ -735,6 +771,9 @@ async function handleInit(msg: BrokerInit): Promise<void> {
     // the focused conversation's workspace was known.
     process.env.SYLO_PI_CWD = sessionCwd
     brokerIncludeCursorSkills = msg.includeCursorSkills === true
+    brokerAlwaysApplySkillPaths = new Set(
+      normalizeSkillPathListForPolicyJson(msg.alwaysApplySkillPaths ?? []),
+    )
     brokerChatOnly =
       process.env.SYLO_CHAT_ONLY === '1' ||
       msg.chatOnly === true ||
@@ -862,14 +901,20 @@ async function handleInit(msg: BrokerInit): Promise<void> {
       if (additionalSkillPaths.length > 0) {
         resourceLoaderOptions.additionalSkillPaths = additionalSkillPaths
       }
-      // Keep only the web-access skill inline (it's the most frequently used
-      // research skill). Everything else is referenced by a one-line pointer in
-      // the system prompt; the model can load specific SKILL.md files via the
-      // read tool when a task matches. This cuts the skills block from ~2,100
-      // tokens down to ~140 tokens.
+      // Never drop skills here. `skillsOverride` replaces the loader's whole skill list,
+      // and that list feeds both the agent and Sylo's Capability manager snapshot — a
+      // filtered skill is not "collapsed to a pointer", it stops existing. Pi already
+      // renders every skill as a pointer (name/description/location; see
+      // formatSkillsForPrompt), so there is no per-skill body cost to trim.
+      //
+      // Pinned skills are inlined below as context files instead, which is the only
+      // place SKILL.md content can actually reach the prompt.
+      let pinnedSkillFilePaths: string[] = []
       resourceLoaderOptions.skillsOverride = (current) => {
-        const inline = current.skills.filter((s) => s.name === 'web-access')
-        return { ...current, skills: inline }
+        pinnedSkillFilePaths = selectPinnedSkills(current.skills, brokerAlwaysApplySkillPaths)
+          .map((s) => s.filePath)
+          .filter((p): p is string => typeof p === 'string' && p.trim() !== '')
+        return current
       }
       // Reorder context files: put the global AGENTS.md (operator principles /
       // Veritas Standard) last so it lands in the recency zone of the system
@@ -877,15 +922,15 @@ async function handleInit(msg: BrokerInit): Promise<void> {
       // al. 2023). Combined with the patch-package swap (skills before context),
       // this moves operator principles to ~82% of the prompt length.
       resourceLoaderOptions.agentsFilesOverride = (current) => {
-        const files = current.agentsFiles
-        if (files.length <= 1) return current
+        const files = [...current.agentsFiles, ...readPinnedSkillContextFiles(pinnedSkillFilePaths)]
+        if (files.length <= 1) return { agentsFiles: files }
         // Global context file is the one from agentDir (typically ~/.pi/agent/AGENTS.md).
         // loadProjectContextFiles puts it first; move it to the end.
         const agentDirNormalized = effAgentDir.replace(/\\/g, '/').toLowerCase()
         const globalIdx = files.findIndex(
           (f) => f.path.replace(/\\/g, '/').toLowerCase().startsWith(agentDirNormalized),
         )
-        if (globalIdx <= 0) return current
+        if (globalIdx < 0) return { agentsFiles: files }
         const reordered = [...files]
         const [globalFile] = reordered.splice(globalIdx, 1)
         reordered.push(globalFile)
@@ -967,6 +1012,11 @@ async function handleSwitchSession(msg: BrokerSwitchSession): Promise<void> {
     }
     if (msg.includeCursorSkills !== undefined) {
       brokerIncludeCursorSkills = msg.includeCursorSkills === true
+    }
+    if (msg.alwaysApplySkillPaths !== undefined) {
+      brokerAlwaysApplySkillPaths = new Set(
+        normalizeSkillPathListForPolicyJson(msg.alwaysApplySkillPaths),
+      )
     }
     // Per-chat model override: update the module-level vars before
     // `runtime.switchSession` re-invokes the createRuntime factory, so Pi

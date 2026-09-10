@@ -24,12 +24,19 @@ test('think-tank seat subprocess registers assignment tools only', async () => {
   try {
     const mod = await import('./index.ts')
     let toolCount = 0
+    const hooks = []
     mod.default({
       registerTool() {
         toolCount++
       },
+      // Seat mode also installs the vision fallback for text-only seat models,
+      // so the stub has to accept event hooks as well as tools.
+      on(event) {
+        hooks.push(event)
+      },
     })
     assert.equal(toolCount, 4)
+    assert.deepEqual(hooks, ['tool_result'])
   } finally {
     if (prev === undefined) delete process.env.SYLO_THINK_TANK_SEAT_RUN
     else process.env.SYLO_THINK_TANK_SEAT_RUN = prev

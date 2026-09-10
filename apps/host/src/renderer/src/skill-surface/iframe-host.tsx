@@ -16,13 +16,7 @@ import {
   SkillSurfacePolicyError,
   skillSurfaceInjectedStyles,
 } from './sandbox-policy'
-
-function resolveWidgetFetchUrl(path: string): string {
-  const t = path.trim()
-  if (t.startsWith('http://') || t.startsWith('https://')) return t
-  const withSlash = t.startsWith('/') ? t : `/${t}`
-  return new URL(withSlash, window.location.href).href
-}
+import { resolveWidgetFetchUrl } from '../../../shared/sylo-surface-protocol'
 
 export type SkillSurfaceSandboxProps = {
   /** Path served from the renderer host (e.g. /skill-surface/smoke.html) or absolute http(s) URL. */
@@ -147,7 +141,7 @@ export function SkillSurfaceSandbox({
         let fragment: string
         let routeHeadHtml = ''
         if (hasPath) {
-          const url = resolveWidgetFetchUrl(fixturePath!)
+          const url = resolveWidgetFetchUrl(fixturePath!, window.location.href)
           const res = await fetch(url, { signal: ctrl.signal })
           if (!res.ok) {
             const msg = `Fetch ${fixturePath}: ${res.status}`

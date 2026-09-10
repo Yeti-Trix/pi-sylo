@@ -12,7 +12,9 @@ import {
 import {
   bridge,
   BUNDLED_PERSONAS,
+  CHATGPT_OAUTH_PROVIDER,
   MODEL_PROVIDERS,
+  type ChatgptModelRow,
 } from './bridge'
 
 type TabId = 'settings' | 'guide'
@@ -29,13 +31,22 @@ function personaSelectOptions(currentId: string): Array<{ id: string; label: str
 function SeatModelFields({
   seat,
   ollamaModels,
+  chatgptModels,
   onChange,
 }: {
   seat: ThinkTankSeatRow
   ollamaModels: string[]
+  chatgptModels: ChatgptModelRow[]
   onChange: (patch: Partial<ThinkTankSeatRow>) => void
 }): React.ReactElement {
   const provider = seat.model_provider
+  const isChatgpt = provider === CHATGPT_OAUTH_PROVIDER
+  // A saved id that is no longer in the catalog would silently vanish from a select,
+  // so keep it as its own option rather than resetting the seat.
+  const unlistedChatgptModel =
+    isChatgpt && seat.model_id.trim() && !chatgptModels.some((m) => m.id === seat.model_id) ?
+      seat.model_id
+    : null
   return (
     <>
       <div className="think-tank-field">
@@ -54,7 +65,11 @@ function SeatModelFields({
       </div>
       <div className="think-tank-field">
         <span className="think-tank-label">
-          {provider === 'ollama' ? 'Model (Ollama)' : 'Model id'}
+          {provider === 'ollama' ?
+            'Model (Ollama)'
+          : isChatgpt ?
+            'Model (ChatGPT OAuth)'
+          : 'Model id'}
         </span>
         {provider === 'ollama' ?
           <select
@@ -66,6 +81,23 @@ function SeatModelFields({
             {ollamaModels.map((m) => (
               <option key={m} value={m}>
                 {m}
+              </option>
+            ))}
+          </select>
+        : isChatgpt ?
+          <select
+            className="think-tank-select"
+            value={seat.model_id}
+            onChange={(e) => onChange({ model_id: e.target.value })}
+          >
+            <option value="">— select model —</option>
+            {unlistedChatgptModel ?
+              <option value={unlistedChatgptModel}>{unlistedChatgptModel} (custom)</option>
+            : null}
+            {chatgptModels.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name} — {m.id}
+                {m.vision ? '' : ' (text only)'}
               </option>
             ))}
           </select>
@@ -86,6 +118,7 @@ export function App(): React.ReactElement {
   const [config, setConfig] = useState<ThinkTankConfig>(() => normalizeThinkTankUiConfig({ debater_count: 2, seats: [] }))
   const [ollamaModels, setOllamaModels] = useState<string[]>([])
   const [ollamaBaseUrl, setOllamaBaseUrl] = useState('')
+  const [chatgptModels, setChatgptModels] = useState<ChatgptModelRow[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [status, setStatus] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
@@ -105,6 +138,16 @@ export function App(): React.ReactElement {
     }
   }, [])
 
+  const refreshChatgpt = useCallback(async () => {
+    try {
+      const r = await bridge.listChatgptModels()
+      setChatgptModels(r.models)
+    } catch (e) {
+      setChatgptModels([])
+      console.error(e)
+    }
+  }, [])
+
   useEffect(() => {
     void (async () => {
       setLoading(true)
@@ -119,7 +162,8 @@ export function App(): React.ReactElement {
       }
     })()
     void refreshOllama()
-  }, [refreshOllama])
+    void refreshChatgpt()
+  }, [refreshOllama, refreshChatgpt])
 
   const updateSeat = (index: number, patch: Partial<ThinkTankSeatRow>) => {
     setConfig((prev) => ({
@@ -287,6 +331,7 @@ export function App(): React.ReactElement {
                   <SeatModelFields
                     seat={seat}
                     ollamaModels={ollamaModels}
+                    chatgptModels={chatgptModels}
                     onChange={(patch) => updateSeat(index, patch)}
                   />
                   <div className="think-tank-field">
@@ -335,6 +380,7 @@ export function App(): React.ReactElement {
                   <SeatModelFields
                     seat={moderatorSeat}
                     ollamaModels={ollamaModels}
+                    chatgptModels={chatgptModels}
                     onChange={(patch) => {
                       const idx = config.seats.findIndex((s) => s.id === moderatorSeat.id)
                       updateSeat(idx, patch)
