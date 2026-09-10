@@ -5,8 +5,10 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import {
   chatMessagesMatchConversation,
+  chatVirtualizerNeedsViewportRetry,
   isUserDrivenScrollUp,
   isUserScrollUpWheel,
+  readChatScrollRect,
 } from '../../../../out/test/chatScrollIntent.mjs'
 
 describe('chatMessagesMatchConversation', () => {
@@ -55,6 +57,29 @@ describe('isUserDrivenScrollUp', () => {
 
   test('scrolling down never opts out', () => {
     assert.equal(isUserDrivenScrollUp({ ...base, scrollTop: 500, lastScrollTop: 400 }), false)
+  })
+})
+
+describe('readChatScrollRect', () => {
+  test('ignores an unmeasured or collapsed scrollport', () => {
+    assert.equal(readChatScrollRect(null), undefined)
+    assert.equal(readChatScrollRect({ clientWidth: 800, clientHeight: 0 }), undefined)
+  })
+
+  test('returns the viewport once it has a real height', () => {
+    assert.deepEqual(readChatScrollRect({ clientWidth: 800, clientHeight: 640 }), {
+      width: 800,
+      height: 640,
+    })
+  })
+})
+
+describe('chatVirtualizerNeedsViewportRetry', () => {
+  test('retries while the virtualizer would still yield no rows', () => {
+    assert.equal(chatVirtualizerNeedsViewportRetry(0, 0), true)
+    assert.equal(chatVirtualizerNeedsViewportRetry(0, 29), true)
+    assert.equal(chatVirtualizerNeedsViewportRetry(0, 30), false)
+    assert.equal(chatVirtualizerNeedsViewportRetry(640, 0), false)
   })
 })
 

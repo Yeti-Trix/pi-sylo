@@ -3707,6 +3707,7 @@ export function App(): React.ReactElement {
                     onWheel={onChatAreaWheel}
                   >
                     <ChatTimelineList
+                      key={activeId ?? 'none'}
                       ref={chatListRef}
                       rows={chatTimeline}
                       scrollRef={chatAreaRef}
@@ -3892,6 +3893,7 @@ export function App(): React.ReactElement {
                   onWheel={onChatAreaWheel}
                 >
                   <ChatTimelineList
+                    key={activeId ?? 'none'}
                     ref={chatListRef}
                     rows={chatTimeline}
                     scrollRef={chatAreaRef}

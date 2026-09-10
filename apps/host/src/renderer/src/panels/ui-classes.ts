@@ -863,7 +863,7 @@ export const canvasResizeHandleCol =
 export const chatPane = 'flex min-h-0 min-w-0 flex-1 flex-col'
 
 export const chatArea =
-  'flex min-w-0 flex-1 flex-col gap-3 overflow-x-hidden overflow-y-auto overscroll-y-contain px-4 py-4 touch-pan-y [overflow-anchor:none]'
+  'min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain px-4 py-4 touch-pan-y [overflow-anchor:none]'
 
 export const chatMessageList = 'flex w-full min-w-0 flex-col gap-3'
 

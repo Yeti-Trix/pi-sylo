@@ -5,7 +5,7 @@ import { detailsOpenFromToggleEvent } from '../../panels/capability/helpers'
 import { ChainStepper } from '../../panels/tasks/ChainStepper'
 import { TaskDetailDrawer } from '../../panels/tasks/TaskDetailDrawer'
 import { TaskRow } from '../../panels/tasks/TaskRow'
-import { batchProgress, statusLabel } from '../../panels/tasks/task-helpers'
+import { batchProgress, statusLabel, taskModelLabel } from '../../panels/tasks/task-helpers'
 import {
   chatMsgAssistant,
   chatMsgBubble,
@@ -20,15 +20,21 @@ import {
 
 import type { SubagentTaskBatch } from './matchSubagentBatches'
 
-function batchTitle(batch: SubagentTaskBatch): string {
+function batchTitle(batch: SubagentTaskBatch, focusId: string | null): string {
+  const focus =
+    batch.tasks.find((t) => t.id === focusId) ??
+    batch.tasks.find((t) => t.status === 'running') ??
+    batch.tasks[0]
+  const model = focus ? taskModelLabel(focus) : null
+  const withModel = (label: string) => (model ? `${label} · ${model}` : label)
   if (batch.mode === 'single') {
-    return batch.tasks[0]?.agent_name ?? 'subagent'
+    return withModel(focus?.agent_name ?? 'subagent')
   }
   if (batch.mode === 'chain') {
-    return `chain · ${batch.tasks.length} steps`
+    return withModel(`chain · ${batch.tasks.length} steps`)
   }
   const { done, total, running } = batchProgress(batch.tasks)
-  return `parallel · ${running > 0 ? `${running} live` : `${done}/${total} done`}`
+  return withModel(`parallel · ${running > 0 ? `${running} live` : `${done}/${total} done`}`)
 }
 
 function batchStatusLabel(batch: SubagentTaskBatch): string {
@@ -86,7 +92,7 @@ export function SubagentRunBlock({
   const selectedTask = batch.tasks.find((t) => t.id === selectedId) ?? null
   const chainTasks = batch.mode === 'chain' && batch.tasks.length > 1 ? batch.tasks : null
   const status = batchStatusLabel(batch)
-  const title = batchTitle(batch)
+  const title = batchTitle(batch, selectedId)
 
   const cls = useMemo(
     () =>

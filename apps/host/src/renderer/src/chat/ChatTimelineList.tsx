@@ -1,7 +1,12 @@
-import { useVirtualizer } from '@tanstack/react-virtual'
+import { observeElementRect, useVirtualizer } from '@tanstack/react-virtual'
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef } from 'react'
 import type { ChatTimelineRow } from '../components/think-tank/buildChatTimeline'
 import type { ThinkTankSessionUiState } from '../components/think-tank/ThinkTankSessionBlock'
+import {
+  CHAT_VIEWPORT_REMEASURE_MAX_FRAMES,
+  chatVirtualizerNeedsViewportRetry,
+  readChatScrollRect,
+} from './chatScrollIntent'
 import { estimateTimelineRowHeight } from './chatRowEstimate'
 
 export const CHAT_NEAR_BOTTOM_PX = 120
@@ -32,9 +37,36 @@ export const ChatTimelineList = forwardRef<ChatTimelineListHandle, Props>(
       [rows, thinkTankUi],
     )
 
+    const observeScrollRect = useCallback<typeof observeElementRect>((instance, cb) => {
+      const unsub = observeElementRect(instance, cb)
+      const el = instance.scrollElement
+      if (!el || !('clientHeight' in el)) return unsub
+      const node = el as unknown as HTMLElement
+      let frames = 0
+      let raf = 0
+      const step = () => {
+        raf = 0
+        frames += 1
+        const height = node.clientHeight
+        if (height > 0) {
+          cb({ width: node.clientWidth, height })
+          return
+        }
+        if (chatVirtualizerNeedsViewportRetry(height, frames)) {
+          raf = requestAnimationFrame(step)
+        }
+      }
+      raf = requestAnimationFrame(step)
+      return () => {
+        if (raf) cancelAnimationFrame(raf)
+        unsub?.()
+      }
+    }, [])
+
+    const initialRect = readChatScrollRect(scrollRef.current)
+
     const virtualizer = useVirtualizer({
       count: rows.length,
-      enabled: rows.length > 0,
       getScrollElement: () => scrollRef.current,
       estimateSize,
       overscan: 4,
@@ -44,6 +76,8 @@ export const ChatTimelineList = forwardRef<ChatTimelineListHandle, Props>(
       followOnAppend: true,
       scrollEndThreshold: CHAT_NEAR_BOTTOM_PX,
       directDomUpdates: true,
+      ...(initialRect ? { initialRect } : {}),
+      observeElementRect: observeScrollRect,
       // The virtualizer calls flushSync from its mount layout effect
       // (_willUpdate → notify(true)), which React 18 cannot honor while
       // rendering — it warns and drops the forced flush. Plain batching is
@@ -72,39 +106,59 @@ export const ChatTimelineList = forwardRef<ChatTimelineListHandle, Props>(
     onSettleEndRef.current = onSettleEnd
 
     const scrollToEndSettled = useCallback(() => {
-      virtualizer.scrollToEnd()
       stopSettle()
-      // Wait one frame after the initial scroll so the virtualizer can process
-      // the scroll and mounted items can start measuring. Then repeatedly
-      // re-scroll to the end while the total size is growing (measurements
-      // replacing estimates). Two stable frames was not enough for markdown
-      // and tool cards; keep going until height holds or we hit the cap.
-      settleRafRef.current = requestAnimationFrame(() => {
-        let lastTotal = virtualizer.getTotalSize()
-        let stableFrames = 0
-        let frames = 0
-        const STABLE_FRAMES = 6
-        const MAX_FRAMES = 45
-        const step = () => {
-          settleRafRef.current = null
-          frames += 1
-          if (stableFrames >= STABLE_FRAMES || frames >= MAX_FRAMES) {
-            onSettleEndRef.current?.()
-            return
+      let waitFrames = 0
+      const startSettlePump = () => {
+        virtualizer.scrollToEnd()
+        // Wait one frame after the initial scroll so the virtualizer can process
+        // the scroll and mounted items can start measuring. Then repeatedly
+        // re-scroll to the end while the total size is growing (measurements
+        // replacing estimates). Two stable frames was not enough for markdown
+        // and tool cards; keep going until height holds or we hit the cap.
+        settleRafRef.current = requestAnimationFrame(() => {
+          let lastTotal = virtualizer.getTotalSize()
+          let stableFrames = 0
+          let frames = 0
+          const STABLE_FRAMES = 6
+          const MAX_FRAMES = 45
+          const step = () => {
+            settleRafRef.current = null
+            frames += 1
+            if (stableFrames >= STABLE_FRAMES || frames >= MAX_FRAMES) {
+              onSettleEndRef.current?.()
+              return
+            }
+            const total = virtualizer.getTotalSize()
+            if (total === lastTotal) {
+              stableFrames += 1
+            } else {
+              stableFrames = 0
+              lastTotal = total
+            }
+            virtualizer.scrollToEnd()
+            settleRafRef.current = requestAnimationFrame(step)
           }
-          const total = virtualizer.getTotalSize()
-          if (total === lastTotal) {
-            stableFrames += 1
-          } else {
-            stableFrames = 0
-            lastTotal = total
-          }
-          virtualizer.scrollToEnd()
-          settleRafRef.current = requestAnimationFrame(step)
+          step()
+        })
+      }
+      const waitForViewport = () => {
+        const el = scrollRef.current
+        if (!el || el.clientHeight > 0) {
+          startSettlePump()
+          return
         }
-        step()
-      })
-    }, [virtualizer, stopSettle])
+        waitFrames += 1
+        if (waitFrames >= CHAT_VIEWPORT_REMEASURE_MAX_FRAMES) {
+          startSettlePump()
+          return
+        }
+        settleRafRef.current = requestAnimationFrame(() => {
+          settleRafRef.current = null
+          waitForViewport()
+        })
+      }
+      waitForViewport()
+    }, [virtualizer, stopSettle, scrollRef])
 
     useImperativeHandle(
       ref,
@@ -127,6 +181,7 @@ export const ChatTimelineList = forwardRef<ChatTimelineListHandle, Props>(
               data-index={virtualRow.index}
               ref={virtualizer.measureElement}
               className="absolute top-0 left-0 w-full contain-layout"
+              style={{ transform: `translate3d(0, ${virtualRow.start}px, 0)` }}
             >
               {renderRow(row)}
             </div>
@@ -134,8 +189,6 @@ export const ChatTimelineList = forwardRef<ChatTimelineListHandle, Props>(
         }),
       [virtualItems, rows, renderRow, virtualizer.measureElement],
     )
-
-    if (rows.length === 0) return null
 
     return (
       <div ref={virtualizer.containerRef} className="relative w-full">

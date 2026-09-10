@@ -107,6 +107,17 @@ interface SubagentDetails {
   results: SingleResult[]
 }
 
+function thinkingFromMessage(msg: Message): string {
+  const parts: string[] = []
+  for (const part of msg.content) {
+    if (!part || typeof part !== 'object') continue
+    const rec = part as { type?: unknown; thinking?: unknown }
+    if (rec.type !== 'thinking' || typeof rec.thinking !== 'string' || !rec.thinking.trim()) continue
+    parts.push(rec.thinking)
+  }
+  return parts.join('\n\n')
+}
+
 function getFinalOutput(messages: Message[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
@@ -199,6 +210,13 @@ async function runSingleAgent(
   parentRunId?: string,
 ): Promise<SingleResult> {
   const agent = agents.find((a) => a.name === agentName)
+  const subagentModel = agent ? subagentModelCliArgs(agent.name) : { args: [] as string[] }
+  const modelLabel =
+    subagentModel.modelId ?
+      subagentModel.provider ?
+        `${subagentModel.provider}/${subagentModel.modelId}`
+      : subagentModel.modelId
+    : agent?.model
 
   notifySyloSubagent({
     type: 'subagent_run_start',
@@ -209,6 +227,7 @@ async function runSingleAgent(
     groupRunId,
     parentRunId,
     stepIndex: step,
+    model: modelLabel,
   })
 
   if (!agent) {
@@ -234,7 +253,6 @@ async function runSingleAgent(
   }
 
   const args: string[] = ['--mode', 'json', '-p', '--no-session']
-  const subagentModel = subagentModelCliArgs(agent.name)
   args.push(...subagentModel.args)
   if (agent.tools && agent.tools.length > 0) args.push('--tools', agent.tools.join(','))
 
@@ -249,12 +267,7 @@ async function runSingleAgent(
     messages: [],
     stderr: '',
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-    model:
-      subagentModel.modelId ?
-        subagentModel.provider ?
-          `${subagentModel.provider}/${subagentModel.modelId}`
-        : subagentModel.modelId
-      : agent.model,
+    model: modelLabel,
     step,
     runId,
   }
@@ -262,23 +275,27 @@ async function runSingleAgent(
   // Tails of the message currently streaming, before it lands in `currentResult.messages`.
   let liveText = ''
   let liveThinking = ''
+  // Kept after the reasoning channel closes so the box can collapse instead of vanish.
+  let completedThinking = ''
   let liveToolName: string | undefined
   let liveToolPreview: string | undefined
   let updateTimer: ReturnType<typeof setTimeout> | undefined
   let updateQueued = false
 
   const previewText = () => liveText.trim() || getFinalOutput(currentResult.messages)
+  const previewThinking = () => liveThinking.trim() || completedThinking
 
   const emitUpdate = () => {
     notifySyloSubagent({
       type: 'subagent_run_update',
       runId,
       partialText: previewText() || undefined,
-      // Always a string, never undefined: the store treats undefined as "leave alone", which
-      // would strand the last think on screen after the message that produced it ended.
-      partialThinking: liveThinking.trim(),
+      // Always a string, never undefined: the store treats undefined as "leave alone".
+      partialThinking: previewThinking(),
+      thinkingLive: liveThinking.trim().length > 0 && !liveText.trim(),
       toolName: liveToolName,
       toolPreview: liveToolPreview ?? '',
+      model: currentResult.model,
     })
     if (onUpdate) {
       onUpdate({
@@ -392,8 +409,12 @@ async function runSingleAgent(
         if (event.type === 'message_end' && event.message) {
           const msg = event.message
           currentResult.messages.push(msg)
+          const fromMsg = thinkingFromMessage(msg)
+          if (fromMsg || liveThinking.trim()) {
+            completedThinking = fromMsg || liveThinking.trim()
+          }
           // The finished message is the source of truth now; drop the streaming tail so the
-          // preview does not show it twice.
+          // preview does not show it twice. Keep completedThinking for the collapsed box.
           liveText = ''
           liveThinking = ''
 
@@ -473,6 +494,8 @@ async function runSingleAgent(
       runId,
       status: failed ? 'failed' : 'succeeded',
       resultText: failed ? undefined : getResultOutput(currentResult),
+      thinking: previewThinking() || undefined,
+      model: currentResult.model,
       error: failed ? getResultOutput(currentResult) : undefined,
       usage: {
         input: currentResult.usage.input,

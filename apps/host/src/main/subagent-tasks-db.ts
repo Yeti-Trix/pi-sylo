@@ -207,6 +207,7 @@ export function insertAgentTaskStart(input: {
   agent: string
   task: string
   stepIndex?: number
+  model?: string
   now?: number
 }): AgentTaskRow {
   const now = input.now ?? Date.now()
@@ -217,6 +218,7 @@ export function insertAgentTaskStart(input: {
     agent: input.agent,
     groupRunId: input.groupRunId,
     ...(input.stepIndex !== undefined ? { stepIndex: input.stepIndex } : {}),
+    ...(input.model?.trim() ? { model: input.model.trim() } : {}),
   }
   const row: AgentTaskRow = {
     id: input.id,
@@ -278,8 +280,10 @@ export function updateAgentTaskProgress(
   patch: {
     partialText?: string
     partialThinking?: string
+    thinkingLive?: boolean
     toolName?: string
     toolPreview?: string
+    model?: string
   },
   now = Date.now(),
 ): void {
@@ -298,8 +302,10 @@ export function updateAgentTaskProgress(
   }
   if (patch.partialText !== undefined) spec.lastPartialText = patch.partialText
   if (patch.partialThinking !== undefined) spec.lastPartialThinking = patch.partialThinking
+  if (patch.thinkingLive !== undefined) spec.lastThinkingLive = patch.thinkingLive
   if (patch.toolName !== undefined) spec.lastToolName = patch.toolName
   if (patch.toolPreview !== undefined) spec.lastToolPreview = patch.toolPreview
+  if (patch.model?.trim()) spec.model = patch.model.trim()
 
   getDb()
     .prepare(
@@ -319,11 +325,32 @@ export function finalizeAgentTask(
   },
   now = Date.now(),
 ): void {
+  const existing = getAgentTask(id)
+  let specJson = existing?.spec_json ?? null
+  if (existing) {
+    let spec: AgentTaskSpec
+    try {
+      spec = JSON.parse(existing.spec_json) as AgentTaskSpec
+    } catch {
+      spec = {
+        task: existing.title,
+        mode: existing.mode,
+        agent: existing.agent_name,
+        groupRunId: existing.group_run_id ?? id,
+      }
+    }
+    spec.lastThinkingLive = false
+    const thinking = input.resultJson?.thinking
+    if (typeof thinking === 'string' && thinking.trim()) spec.lastPartialThinking = thinking.trim()
+    const model = input.resultJson?.model
+    if (typeof model === 'string' && model.trim()) spec.model = model.trim()
+    specJson = JSON.stringify(spec)
+  }
   getDb()
     .prepare(
       `UPDATE agent_tasks
        SET status = ?, status_reason = ?, ended_at = ?, result_summary = ?,
-           result_json = ?, tokens_used = ?, updated_at = ?
+           result_json = ?, tokens_used = ?, spec_json = ?, updated_at = ?
        WHERE id = ?`,
     )
     .run(
@@ -333,6 +360,7 @@ export function finalizeAgentTask(
       input.resultSummary ?? null,
       input.resultJson ? JSON.stringify(input.resultJson) : null,
       input.tokensUsed ?? null,
+      specJson,
       now,
       id,
     )

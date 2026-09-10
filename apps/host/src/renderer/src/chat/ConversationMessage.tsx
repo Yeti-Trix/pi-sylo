@@ -574,7 +574,9 @@ function InterleavedAssistantBody({
       : seg.kind === 'tool' ? seg.endTs === null
       : seg.kind === 'compaction' ? seg.live
       : false
-    const autoOpen = isLive
+    // Tools stay collapsed: the summary already has a one-line args preview, and
+    // subagent payloads are huge. Reasoning still opens while it is streaming.
+    const autoOpen = isLive && seg.kind !== 'tool'
     const key = `${messageId}:${seg.id}`
     pieces.push(
       <InlineAssistantSegment

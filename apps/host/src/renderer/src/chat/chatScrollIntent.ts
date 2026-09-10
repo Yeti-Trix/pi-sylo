@@ -43,3 +43,28 @@ export function isUserScrollUpWheel(deltaY: number, deltaMode = 0): boolean {
   if (deltaMode !== 0) return true
   return deltaY <= -CHAT_WHEEL_UP_PX
 }
+
+/**
+ * TanStack Virtual yields `range: null` (no mounted rows) while the
+ * scrollport height is 0. A missed first measure is the blank-chat-until-
+ * resize / chat-switch symptom. Retry for this many frames.
+ */
+export const CHAT_VIEWPORT_REMEASURE_MAX_FRAMES = 30
+
+export function readChatScrollRect(
+  el: { clientWidth: number; clientHeight: number } | null | undefined,
+): { width: number; height: number } | undefined {
+  if (!el) return undefined
+  const width = el.clientWidth
+  const height = el.clientHeight
+  if (height <= 0) return undefined
+  return { width, height }
+}
+
+export function chatVirtualizerNeedsViewportRetry(
+  viewportHeight: number,
+  framesTried: number,
+  maxFrames = CHAT_VIEWPORT_REMEASURE_MAX_FRAMES,
+): boolean {
+  return viewportHeight <= 0 && framesTried < maxFrames
+}
