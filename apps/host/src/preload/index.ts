@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type { AppUpdateStatus } from '../shared/app-update-types.js'
 
 const SYLO_FILE_SCHEME = 'sylo-file'
 
@@ -711,6 +712,11 @@ contextBridge.exposeInMainWorld('sylo', {
      *  Window-menu item label stays in sync ("Show Canvas" / "Hide Canvas"). */
     reportOpenState: (open: boolean) =>
       ipcRenderer.invoke('canvas:set-open-state', open) as Promise<true>,
+    /** Renderer → main: mirror the latest freehand sketch (PNG data URL) so the
+     *  broker's canvas_sketch tool can pull it from normal chat. Pass null when
+     *  the drawing area is cleared. */
+    setSketchImage: (dataUrl: string | null) =>
+      ipcRenderer.invoke('canvas:set-sketch-image', dataUrl) as Promise<true>,
     /** Main → renderer: the operator clicked "Show/Hide Canvas" in the native
      *  Window menu. The renderer toggles its `canvasOpen` state (and persists
      *  the pref), then reports the new state back via `reportOpenState`. */
@@ -1194,6 +1200,15 @@ contextBridge.exposeInMainWorld('sylo', {
       const ch = (_e: unknown, payload: unknown) => cb(payload)
       ipcRenderer.on('thinkTank:lifecycle', ch)
       return () => ipcRenderer.removeListener('thinkTank:lifecycle', ch)
+    },
+  },
+  updates: {
+    status: () => ipcRenderer.invoke('updates:status') as Promise<AppUpdateStatus>,
+    checkNow: () => ipcRenderer.invoke('updates:checkNow') as Promise<AppUpdateStatus>,
+    onChanged: (cb: (payload: AppUpdateStatus) => void) => {
+      const ch = (_e: unknown, payload: AppUpdateStatus) => cb(payload)
+      ipcRenderer.on('app:update-status', ch)
+      return () => ipcRenderer.removeListener('app:update-status', ch)
     },
   },
   schedules: {

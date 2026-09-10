@@ -8,12 +8,15 @@
 // repo. Resolution order per bundle:
 //   1. env override (SYLO_TOOLS_CONTROLS_DIR / SYLO_TOOLS_ONENOTE_DIR)
 //   2. ~/.pi/agent/settings.json packages[] entry matching the bundle name
+//      (either a bundle-root entry …/<bundleName> or a per-sub-package entry
+//      …/<bundleName>/packages/<pkg> — resolved by walking up to the segment
+//      named <bundleName>)
 //   3. Default dev location: ~/Documents/GitHub/<bundle>
 // resolveToolsPackageDir() then falls back to the legacy in-repo layout
 // (<sylo-dev repo>/packages/<name>) for any install that hasn't migrated.
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
 
 const BUNDLE_ENV: Record<string, string> = {
@@ -33,11 +36,21 @@ export function resolveToolsBundleDir(bundleName: string): string | null {
     const settingsPath = join(homedir(), '.pi', 'agent', 'settings.json')
     if (existsSync(settingsPath)) {
       const req = createRequire(import.meta.url)
-      const raw = req(settingsPath) as { packages?: string[] }
-      const entry = raw.packages?.find((p) => basename(p.replace(/\\/g, '/')) === bundleName)
-      if (entry) {
-        const abs = resolve(settingsPath, '..', entry)
-        if (existsSync(abs)) return abs
+      const raw = req(settingsPath) as { packages?: unknown[] }
+      const packages = Array.isArray(raw.packages) ? raw.packages : []
+      // Bundle-root entry (basename === bundleName) or a sub-package entry
+      // (…/<bundleName>/packages/<pkg>, one per package after the monorepo
+      // expansion) — walk up from each resolved entry to the segment named
+      // <bundleName> and use that dir as the bundle root.
+      for (const entry of packages) {
+        if (typeof entry !== 'string' || !entry.trim()) continue
+        let dir = resolve(settingsPath, '..', entry)
+        for (;;) {
+          if (basename(dir) === bundleName && existsSync(dir)) return dir
+          const parent = dirname(dir)
+          if (parent === dir) break
+          dir = parent
+        }
       }
     }
   } catch {

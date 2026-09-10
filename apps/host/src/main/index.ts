@@ -12,6 +12,7 @@ import {
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path'
+import { migrateMonorepoPackageSpecs } from './package-spec-migration.js'
 import { execFile } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
@@ -31,6 +32,12 @@ import { BUILD_INFO } from '../generated/build-info.js'
 import { DefaultPackageManager, SettingsManager } from '@earendil-works/pi-coding-agent'
 
 import { appIconWindowOptions } from './app-icon.js'
+import {
+  checkForAppUpdate,
+  getAppUpdateStatus,
+  startAppUpdateChecker,
+  type AppUpdateStatus,
+} from './app-update-checker.js'
 import {
   deployGlobalAgents,
   readGlobalAgentsStatus,
@@ -361,6 +368,13 @@ const SYLO_IMAGE_FALLBACK_EXTENSION = join(
   SYLO_REPO_ROOT,
   'apps/host/src/broker/sylo-image-fallback.ts',
 )
+const SYLO_CANVAS_SKETCH_EXTENSION = join(SYLO_REPO_ROOT, 'apps/host/src/broker/sylo-canvas-sketch.ts')
+
+/** Mirrored freehand-canvas sketch PNG (userData). The renderer keeps it fresh
+ *  via `canvas:set-sketch-image`; the broker's `canvas_sketch` tool reads it. */
+function canvasSketchImagePath(): string {
+  return join(app.getPath('userData'), 'canvas-sketch.png')
+}
 
 function resolvePreloadPath(): string {
   const cjs = join(__dirname, '../preload/index.cjs')
@@ -887,6 +901,14 @@ function discoverFilesystemCapabilities(
       ),
     )
   }
+  if (existsSync(SYLO_CANVAS_SKETCH_EXTENSION)) {
+    extBuckets.push(
+      ...tagExtensions(
+        [{ name: 'sylo-canvas-sketch', path: SYLO_CANVAS_SKETCH_EXTENSION }],
+        'sylo-builtin',
+      ),
+    )
+  }
   const extensions = mergeByPath(extBuckets).sort((a, b) => a.name.localeCompare(b.name))
   return { skills, extensions }
 }
@@ -1034,6 +1056,62 @@ async function showAboutDialog(): Promise<void> {
   }
 }
 
+/** Help ▸ Check for Updates… — runs one check and shows the result. Manual
+ *  path, so fetch errors are surfaced here (the automatic background check
+ *  stays silent). */
+async function checkForAppUpdateViaMenu(): Promise<void> {
+  const status: AppUpdateStatus = await checkForAppUpdate()
+  const parent = !!mainWindow && !mainWindow.isDestroyed() ? (mainWindow as BrowserWindow) : undefined
+  const box = async (opts: Electron.MessageBoxOptions): Promise<number> => {
+    const { response } = parent
+      ? await dialog.showMessageBox(parent, opts)
+      : await dialog.showMessageBox(opts)
+    return response
+  }
+  if (status.error && !status.latestVersion) {
+    await box({
+      type: 'warning',
+      title: 'Check for Updates',
+      message: 'Could not check for updates.',
+      detail: `${status.error}\n\n${SYLO_REPO_URL}`,
+      buttons: ['OK'],
+      noLink: true,
+    })
+    return
+  }
+  if (status.isUpdateAvailable && status.latestVersion) {
+    const response = await box({
+      type: 'info',
+      title: 'Update available',
+      message: `Sylo ${status.latestVersion} is available — you have ${status.currentVersion}.`,
+      detail:
+        'Sylo updates from the public repository (never auto-updates):\n' +
+        '  1. git pull\n' +
+        '  2. npm install\n' +
+        '  3. restart Sylo\n\n' +
+        `${SYLO_REPO_URL}`,
+      buttons: ['Open Changelog', 'Open GitHub Repository', 'Close'],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+    })
+    if (response === 0) {
+      void shell.openExternal(`${SYLO_REPO_URL}/blob/main/CHANGELOG.md`)
+    } else if (response === 1) {
+      void shell.openExternal(SYLO_REPO_URL)
+    }
+    return
+  }
+  await box({
+    type: 'info',
+    title: "You're up to date",
+    message: `Sylo ${status.currentVersion} is up to date.`,
+    detail: `Latest published: ${status.latestVersion ?? status.currentVersion}\n${SYLO_REPO_URL}`,
+    buttons: ['OK'],
+    noLink: true,
+  })
+}
+
 /** Mirrors the renderer's `canvasOpen` state so the native Window-menu item can
  *  show "Show Canvas" / "Hide Canvas" and toggle the docked canvas. Seeded from
  *  the saved pref at startup, then kept in sync via the `canvas:set-open-state`
@@ -1069,6 +1147,12 @@ function buildAppMenu(): Menu {
       label: 'About Sylo',
       click: () => {
         void showAboutDialog()
+      },
+    },
+    {
+      label: 'Check for Updates…',
+      click: () => {
+        void checkForAppUpdateViaMenu()
       },
     },
     { type: 'separator' },
@@ -1669,16 +1753,18 @@ function globalAgentsRedeploy(): GlobalAgentsStatus & { ok: boolean; error?: str
 
 /** Resolved Pi project directory for a workspace (primary row is the global default; others inherit it when unset or invalid). */
 function effectivePiCwdForWorkspace(workspaceId: string): string {
-  const userData = app.getPath('userData')
   const primaryId = db.defaultWorkspaceId()
   const ws = db.getWorkspace(workspaceId)
   const raw = ws?.pi_cwd?.trim() ?? ''
 
   if (workspaceId === primaryId) {
     if (raw && existsSync(raw)) return raw
-    const canon = db.canonicalDefaultWorkspacePiProjectPath()
-    mkdirSync(canon, { recursive: true })
-    return canon
+    // Setup pending (folder deleted externally / fresh machine): resolve to the
+    // canonical path READ-ONLY. Do not silently re-create the folder here —
+    // the create-or-clone restore dialog owns provisioning, and auto-seeding
+    // on launch both defeats that flow and trips its folder_exists guard on
+    // the operator's next create attempt.
+    return db.canonicalDefaultWorkspacePiProjectPath()
   }
 
   if (raw && existsSync(raw)) return raw
@@ -1748,6 +1834,9 @@ async function installPackageInPiContext(
     const settingsManager = SettingsManager.create(piCwd, agentDir)
     const pm = new DefaultPackageManager({ cwd: piCwd, agentDir, settingsManager })
     await pm.installAndPersist(trimmed, { local: false })
+    // Flush Pi's async settings write queue so a right-after install/refresh (or the
+    // Downloaded packages inventory) reads settings.json with the new packages[] entry.
+    await settingsManager.flush().catch(() => {})
     return { ok: true, detail: `Installed ${trimmed}` }
   } catch (e) {
     return { ok: false, detail: e instanceof Error ? e.message : String(e) }
@@ -1764,15 +1853,41 @@ async function removePackageInPiContext(
   try {
     const settingsManager = SettingsManager.create(piCwd, agentDir)
     const pm = new DefaultPackageManager({ cwd: piCwd, agentDir, settingsManager })
-    if (await pm.removeAndPersist(trimmed, { local: false })) {
-      purgePackageInventoryMemoryForSpec(trimmed)
-      return { ok: true, detail: `Removed ${trimmed}` }
+    let removedProject = false
+    let removed = await pm.removeAndPersist(trimmed, { local: false })
+    if (!removed) {
+      try {
+        removed = await pm.removeAndPersist(trimmed, { local: true })
+        removedProject = removed
+      } catch (projectErr) {
+        // Untrusted workspace: Pi refuses project-scope package storage. The user-scope
+        // attempt above is the common case — don't mask it with the trust error.
+        const msg = projectErr instanceof Error ? projectErr.message : String(projectErr)
+        if (!/not trusted/i.test(msg)) throw projectErr
+      }
     }
-    if (await pm.removeAndPersist(trimmed, { local: true })) {
+    if (removed) {
+      // Pi persists settings through an async write queue. Flush so the immediate
+      // capabilities refresh (and a possible second Uninstall click) reads the
+      // updated settings.json instead of the pre-remove snapshot — otherwise the
+      // card lingers and the second click alerts "No matching package found".
+      await settingsManager.flush().catch(() => {})
       purgePackageInventoryMemoryForSpec(trimmed)
-      return { ok: true, detail: `Removed ${trimmed} (project scope)` }
+      // Inventory memory stores the raw settings.json source (often agent-dir-relative,
+      // e.g. ..\..\Documents\GitHub\<pkg>) while `trimmed` is usually absolute — purge
+      // both so the stale entry actually drops.
+      purgePackageInventoryMemoryForSpec(spec)
+      return {
+        ok: true,
+        detail: removedProject ? `Removed ${trimmed} (project scope)` : `Removed ${trimmed}`,
+      }
     }
-    return { ok: false, detail: `No matching package found for ${trimmed}` }
+    return {
+      ok: false,
+      detail:
+        `No matching package found for ${trimmed}. It may already be uninstalled — ` +
+        'refresh the Capability manager list and check packages[] in ~/.pi/agent/settings.json.',
+    }
   } catch (e) {
     return { ok: false, detail: e instanceof Error ? e.message : String(e) }
   }
@@ -1789,6 +1904,7 @@ async function updatePackageInPiContext(
     const settingsManager = SettingsManager.create(piCwd, agentDir)
     const pm = new DefaultPackageManager({ cwd: piCwd, agentDir, settingsManager })
     await pm.update(trimmed)
+    await settingsManager.flush().catch(() => {})
     return { ok: true, detail: `Updated ${trimmed}` }
   } catch (e) {
     return { ok: false, detail: e instanceof Error ? e.message : String(e) }
@@ -1934,6 +2050,11 @@ async function ensureBrokerSessionForConversation(
   if (phase === 'ui-focus' && supervisorHasInFlightTurn(supervisor)) return
   if (primaryBrokerBusyWithOtherConversation(convId) && supervisor === broker) return
   const { sessionAbs, sessionCwd, mergedDisabled } = sessionBindingForConversation(convId)
+  if (phase === 'turn-start' && !existsSync(sessionCwd)) {
+    throw new Error(
+      `Workspace folder is missing on disk (${sessionCwd}). Finish workspace setup (create or restore) before sending a message.`,
+    )
+  }
   const dfp = disabledFingerprint(mergedDisabled)
   const eff = effectiveModelForConversation(convId)
   const mfp = modelFingerprint(eff)
@@ -3010,6 +3131,9 @@ function buildBrokerSupervisorOptions(
       existsSync(SYLO_BUILTIN_TOOLS_GUARD_EXTENSION) ? SYLO_BUILTIN_TOOLS_GUARD_EXTENSION : undefined,
     imageFallbackExtension:
       existsSync(SYLO_IMAGE_FALLBACK_EXTENSION) ? SYLO_IMAGE_FALLBACK_EXTENSION : undefined,
+    canvasSketchExtension:
+      existsSync(SYLO_CANVAS_SKETCH_EXTENSION) ? SYLO_CANVAS_SKETCH_EXTENSION : undefined,
+    canvasSketchPath: canvasSketchImagePath(),
     skillSurfaceExtension: existsSync(SYLO_SKILL_SURFACE_EXTENSION) ? SYLO_SKILL_SURFACE_EXTENSION : undefined,
     subagentsExtension: existsSync(SYLO_SUBAGENTS_EXTENSION) ? SYLO_SUBAGENTS_EXTENSION : undefined,
     schedulerExtension: existsSync(SYLO_SCHEDULER_EXTENSION) ? SYLO_SCHEDULER_EXTENSION : undefined,
@@ -3101,6 +3225,10 @@ async function acquireBrokerForTurn(conversationId: string): Promise<BrokerSuper
 }
 
 function registerBroker(): void {
+  // Per-package Capability manager cards: expand monorepo bundles (e.g.
+  // sylo-tools-controls) into per-sub-package packages[] entries before the
+  // broker reads settings.json. Idempotent no-op once expanded.
+  migrateMonorepoPackageSpecs(hostAgentDir())
   turnBrokerPool.killAllOverflow()
   broker?.kill()
   brokerSpawnGeneration++
@@ -3614,17 +3742,20 @@ function registerIpc(): void {
       if (!seg) return { ok: false as const, error: 'bad_name', detail: 'Invalid workspace name.' }
       const row = db.listWorkspaces()[0]
       if (!row) return { ok: false as const, error: 'bad_workspace', detail: 'No primary workspace row.' }
+      // Create fresh at the default clone root under the chosen name (flat,
+      // sibling of the other GitHub workspaces).
+      const dest = join(defaultGithubCloneDir(), seg)
       const raw = row.pi_cwd?.trim() ?? ''
-      if (raw && existsSync(raw)) {
+      if (raw && existsSync(raw) && pathsEqualIgnoreCase(dest, raw)) {
+        // Only block when the operator is provisioning onto the row's current
+        // path. A different name is a legitimate create: make the new folder
+        // and repoint the row, leaving the existing folder untouched on disk.
         return {
           ok: false as const,
           error: 'folder_exists',
           detail: 'The workspace folder already exists — reload to use it.',
         }
       }
-      // Create fresh at the default clone root under the chosen name (flat,
-      // sibling of the other GitHub workspaces).
-      const dest = join(defaultGithubCloneDir(), seg)
       if (existsSync(dest) && readdirSync(dest).length > 0) {
         return {
           ok: false as const,
@@ -3850,6 +3981,8 @@ function registerIpc(): void {
   ipcMain.handle('messages:list', (_e, conversationId: string) => db.listMessages(conversationId))
   ipcMain.handle('prefs:get', (_e, key: string, fallback: unknown) => db.getPref(key, fallback))
   ipcMain.handle('prefs:set', (_e, key: string, value: unknown) => db.setPref(key, value))
+  ipcMain.handle('updates:status', () => getAppUpdateStatus())
+  ipcMain.handle('updates:checkNow', () => checkForAppUpdate())
   ipcMain.handle('proposals:list', () => listProposals())
   ipcMain.handle('proposals:apply', (_e, root: string, relPath: string, editedBody?: string) =>
     applyProposal(root, relPath, editedBody),
@@ -4195,6 +4328,27 @@ function registerIpc(): void {
   // Renderer → main: report the docked canvas' open state so the native
   // Window-menu item label stays in sync ("Show Canvas" / "Hide Canvas").
   // Rebuilding the menu is infrequent (only on open/close transitions).
+  // Renderer → main: mirror the latest freehand canvas sketch (PNG data URL) so
+  // the broker's canvas_sketch tool can pull it from normal chat. null/'' clears
+  // (empty drawing area). Best-effort — failures are non-fatal.
+  ipcMain.handle('canvas:set-sketch-image', (_event, dataUrl: unknown) => {
+    try {
+      const p = canvasSketchImagePath()
+      if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/png;base64,')) {
+        try {
+          unlinkSync(p)
+        } catch {
+          /* absent — fine */
+        }
+        return true
+      }
+      const b64 = dataUrl.slice('data:image/png;base64,'.length)
+      writeFileSync(p, Buffer.from(b64, 'base64'))
+    } catch {
+      /* best-effort mirror */
+    }
+    return true
+  })
   ipcMain.handle('canvas:set-open-state', (_event, open: unknown) => {
     const next = open === true
     if (next !== canvasOpenState) {
@@ -6321,6 +6475,13 @@ app.whenReady().then(() => {
   pruneStaleWebAccessRuns(Date.now() - CONVERSATION_RETENTION_MS)
   pruneOrphanChatAttachments(userData)
   pruneStaleTtsRouteClips(userData)
+  // Canvas sketch mirror: the freehand drawing does not survive restarts — drop
+  // any stale PNG so the broker's canvas_sketch tool never serves a dead image.
+  try {
+    unlinkSync(canvasSketchImagePath())
+  } catch {
+    /* absent — fine */
+  }
   pruneStalePdfCacheDir()
   initSubagentTaskHostSession()
   initScheduledPromptsService({
@@ -6357,6 +6518,16 @@ app.whenReady().then(() => {
   canvasOpenState = db.getPref<boolean>('sylo.canvas.open', false) === true
   Menu.setApplicationMenu(buildAppMenu())
   createWindow()
+  // Periodic update check (public repo version vs running version) — launch
+  // check ~30s in, then every 12h; each completed check pushes
+  // `app:update-status` to the renderer for the banner.
+  // Skipped on the operator's dev clone: `revisions/` is a dev-only folder
+  // (stripped from public clones by publish-to-public), and the dev checkout is
+  // always current by definition — no banner nagging the operator between
+  // publish and rebuild. Help ▸ Check for Updates… still works everywhere.
+  if (!existsSync(join(SYLO_REPO_ROOT, 'revisions'))) {
+    startAppUpdateChecker(() => mainWindow)
+  }
 
   const strikes = evaluateBootStrikes()
   if (strikes >= 3) {

@@ -2,10 +2,11 @@ import { execFile } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { resolveToolsPackageDir } from './tools-bundles.js'
 
 const hostMainDir = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(hostMainDir, '..', '..', '..', '..')
-const packageRoot = join(repoRoot, 'packages', 'sylo-logicforge')
+const packageRoot = resolveToolsPackageDir(repoRoot, 'sylo-tools-controls', 'sylo-logicforge')
 const scriptsDir = join(packageRoot, 'scripts')
 
 function resolvePythonInvocation(sdk = false): { command: string; prefixArgs: string[] } {

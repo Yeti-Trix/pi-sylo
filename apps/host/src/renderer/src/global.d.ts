@@ -950,6 +950,10 @@ declare global {
         /** Renderer → main: report the docked canvas' open state so the native
          *  Window-menu item label stays in sync. */
         reportOpenState: (open: boolean) => Promise<true>
+        /** Renderer → main: mirror the latest freehand sketch (PNG data URL) so
+         *  the broker's canvas_sketch tool can pull it from normal chat. Pass
+         *  null when the drawing area is cleared. */
+        setSketchImage: (dataUrl: string | null) => Promise<true>
         /** Main → renderer: the operator clicked "Show/Hide Canvas" in the
          *  native Window menu. */
         onToggleRequest: (cb: () => void) => () => void
@@ -1250,6 +1254,13 @@ declare global {
             exists: boolean
           }>
         >
+      }
+      updates: {
+        status: () => Promise<import('../shared/app-update-types.js').AppUpdateStatus>
+        checkNow: () => Promise<import('../shared/app-update-types.js').AppUpdateStatus>
+        onChanged: (
+          cb: (payload: import('../shared/app-update-types.js').AppUpdateStatus) => void,
+        ) => () => void
       }
       tasksDb: {
         snapshotGet: (workspaceCwd: string) => Promise<

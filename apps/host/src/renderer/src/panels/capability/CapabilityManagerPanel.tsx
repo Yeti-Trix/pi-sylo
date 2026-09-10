@@ -94,7 +94,6 @@ import { CapEnableSwitch, OriginBadge } from './badges'
 import { ConfigFormModal } from './config-form'
 import { ExtensionCapabilityCard } from './extension-cards'
 import { SyloOptionalPackagesSection } from './SyloOptionalPackagesSection'
-import { UserPackagesSection } from './UserPackagesSection'
 import { SkillRowCard } from './SkillRowCard'
 import {
   alsoStripForPackageToggle,
@@ -106,6 +105,8 @@ import {
   knownPackagePrimarySpec,
   mergeInstalledPackageBundle,
   normalizeNpmInstallSpec,
+    bundleFolderBasename,
+  bundleItemFolderFromPath,
   packageBundleOriginFromPath,
   specsEquivalentTo,
   type PackageBundleSlice,
@@ -157,10 +158,10 @@ export function CapabilityManagerPanel({
   const [includeCursorBusy, setIncludeCursorBusy] = useState(false)
   const [expandedSkillPath, setExpandedSkillPath] = useState<string | null>(null)
   const [extensionsSectionOpen, setExtensionsSectionOpen] = useState(false)
-  // Downloaded packages is the primary inventory surface — keep this section expanded by default;
+  // Personal packages (moved Downloaded-packages card) is the primary inventory surface — keep this section expanded by default;
   // individual package rows below stay collapsed until opened.
   const [downloadedOpen, setDownloadedOpen] = useState(true)
-  /** Tracks open state for each Downloaded-packages row (<details>). */
+  /** Tracks open state for each Personal-packages row (<details>). */
   const [pkgCardOpenBySource, setPkgCardOpenBySource] = useState<Record<string, boolean>>({})
   const [piDevType, setPiDevType] = useState<'' | 'extension' | 'skill' | 'theme' | 'prompt'>('')
   const [piDevSort, setPiDevSort] = useState<'downloads' | 'recent' | 'name'>('downloads')
@@ -383,7 +384,7 @@ export function CapabilityManagerPanel({
     [installedInventoryRows],
   )
 
-  /** Matches pi.dev catalog rows to Downloaded packages inventory (canonical id + KNOWN_PACKAGES aliases). */
+  /** Matches pi.dev catalog rows to the Personal packages inventory (canonical id + KNOWN_PACKAGES aliases). */
   const piDevRowLoadedByCanonFolder = useMemo(() => {
     const m = new Map<string, boolean>()
     for (const inv of installedInventoryRows) {
@@ -394,41 +395,80 @@ export function CapabilityManagerPanel({
     return m
   }, [installedInventoryRows, enabledPkgs])
 
-  const bundlesByKey = useMemo(() => {
-    type SkillRow = CapabilitiesView['skills'][number]
-    const map = new Map<
-      string,
-      {
-        skills: SkillRow[]
-        extensions: NonNullable<CapabilitiesView['extensions']>
-      }
-    >()
+    /**
+   * Individual package slices per installed inventory entry. npm/git packages group
+   * by their package id (node_modules | npm | git mirror segment); local-path bundles
+   * group by monorepo sub-package (…/packages/<id>/…) or fall back to the bundle
+   * folder name — so each individual package can get its own card.
+   */
+  const bundleItemsBySource = useMemo(() => {
+    const bySource = new Map<string, Map<string, PackageBundleSlice>>()
 
-    const bump = (key: string) => {
-      let b = map.get(key)
-      if (!b) {
-        b = { skills: [], extensions: [] }
-        map.set(key, b)
+    const itemKeyFor = (p: string, inv: (typeof installedInventoryRows)[number]): string =>
+      bundleItemFolderFromPath(p) ?? bundleFolderBasename(inv.installedPath || '', inv.source)
+
+    const ownerFor = (
+      p: string,
+    ): { inv: (typeof installedInventoryRows)[number]; itemKey: string } | null => {
+      const norm = p.replace(/\\/g, '/')
+      const lower = norm.toLowerCase()
+      const npmFolder = npmPackageFolderFromPath(norm)
+      let best: {
+        inv: (typeof installedInventoryRows)[number]
+        depth: number
+        itemKey: string
+      } | null = null
+      for (const inv of installedInventoryRows) {
+        // Local-path packages load in place — a row belongs to the deepest install root it sits under.
+        if (inv.installedPath) {
+          const root = inv.installedPath.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+          if (root && lower.startsWith(root + '/')) {
+            const cand = { inv, depth: root.split('/').length, itemKey: itemKeyFor(norm, inv) }
+            if (!best || cand.depth > best.depth) best = cand
+            continue
+          }
+        }
+        if (!best && npmFolder && folderIdFromSpec(inv.source).toLowerCase() === npmFolder.toLowerCase()) {
+          best = { inv, depth: 0, itemKey: npmFolder }
+        }
       }
-      return b
+      return best ? { inv: best.inv, itemKey: best.itemKey } : null
+    }
+
+    const bump = (source: string, itemKey: string): PackageBundleSlice => {
+      let items = bySource.get(source)
+      if (!items) {
+        items = new Map<string, PackageBundleSlice>()
+        bySource.set(source, items)
+      }
+      let slice = items.get(itemKey)
+      if (!slice) {
+        slice = { skills: [], extensions: [] }
+        items.set(itemKey, slice)
+      }
+      return slice
     }
 
     for (const s of skills) {
-      const k = npmPackageFolderFromPath(s.path)
-      if (k && installedFolderIds.has(k)) bump(k).skills.push(s)
+      const o = ownerFor(s.path)
+      if (!o) continue
+      bump(o.inv.source, o.itemKey).skills.push(s)
     }
     for (const x of extensions) {
-      const k = npmPackageFolderFromPath(x.path)
-      if (k && installedFolderIds.has(k)) bump(k).extensions.push(x)
+      const o = ownerFor(x.path)
+      if (!o) continue
+      bump(o.inv.source, o.itemKey).extensions.push(x)
     }
 
-    for (const b of map.values()) {
-      b.skills.sort((a, c) => a.name.localeCompare(c.name))
-      b.extensions.sort((a, c) => a.name.localeCompare(c.name))
+    for (const items of bySource.values()) {
+      for (const slice of items.values()) {
+        slice.skills.sort((a, c) => a.name.localeCompare(c.name))
+        slice.extensions.sort((a, c) => a.name.localeCompare(c.name))
+      }
     }
 
-    return map
-  }, [skills, extensions, installedFolderIds])
+    return bySource
+  }, [skills, extensions, installedInventoryRows])
 
   const skillsSorted = useMemo(
     () => [...skills].sort((a, b) => a.name.localeCompare(b.name)),
@@ -491,44 +531,125 @@ export function CapabilityManagerPanel({
     }))
   }
 
-  const installedCards = useMemo(() => {
-    return installedInventoryRows.map((inv) => {
-      const id = folderIdFromSpec(inv.source)
-      const b = bundlesByKey.get(id) ?? { skills: [], extensions: [] }
-      return {
-        inventory: inv,
-        bundle: {
-          key: id,
-          skills: b.skills,
-          extensions: b.extensions,
-        },
-      }
-    })
-  }, [installedInventoryRows, bundlesByKey])
-
-  /** Last non-empty broker snapshot per install folder — keeps extension/skill rows visible after unload until broker restart. */
+    /** Last non-empty broker snapshot per individual package — keeps rows visible after unload until broker restart. */
   const packageBundleSnapshotRef = useRef<Map<string, PackageBundleSlice>>(new Map())
-  useEffect(() => {
-    const snap = packageBundleSnapshotRef.current
-    for (const [key, b] of bundlesByKey) {
-      if (b.extensions.length > 0 || b.skills.length > 0) {
-        snap.set(key, {
-          skills: b.skills.map((s) => ({ ...s })),
-          extensions: b.extensions.map((e) => ({
-            ...e,
-            tools: e.tools.map((t) => ({ ...t })),
-            commandNames: [...e.commandNames],
-          })),
+
+  /**
+   * One card per individual package: monorepo sub-packages (e.g. sylo-tools-controls's
+   * packages/sylo-allen-bradley, sylo-fieldbrain, …) each get their own card; single
+   * packages keep one card titled by their folder. Enable/Update/Uninstall stay
+   * bundle-level — Pi loads and removes the whole packages[] spec.
+   */
+  const installedItemCards = useMemo(() => {
+    const cards: {
+      cardKey: string
+      inv: (typeof installedInventoryRows)[number]
+      title: string
+      titleHint: string | null
+      originTag: CapabilityOrigin
+      siblingCount: number
+      bundleLabel: string
+      brokerStaleBanner: string | null
+      merged: ReturnType<typeof mergeInstalledPackageBundle>
+      on: boolean
+    }[] = []
+    for (const inv of installedInventoryRows) {
+      const primary = knownPackagePrimarySpec(inv.source)
+      const on = specsEquivalentTo(inv.source).some((x) => enabledPkgs.has(x))
+      const liveItems = bundleItemsBySource.get(inv.source) ?? new Map<string, PackageBundleSlice>()
+      // Union live item keys with snapshot keys recorded for this source.
+      const snapPrefix = `${inv.source}::`
+      const itemKeys = new Set<string>(liveItems.keys())
+      for (const key of packageBundleSnapshotRef.current.keys()) {
+        if (key.startsWith(snapPrefix)) itemKeys.add(key.slice(snapPrefix.length))
+      }
+      const bundleLabel = bundleFolderBasename(inv.installedPath || '', inv.source)
+      let liveHasAny = false
+      let mergedHasAny = false
+      const mergedByKey = new Map<string, ReturnType<typeof mergeInstalledPackageBundle>>()
+      for (const itemKey of itemKeys) {
+        const live = liveItems.get(itemKey) ?? { skills: [], extensions: [] }
+        const merged = mergeInstalledPackageBundle(
+          live,
+          packageBundleSnapshotRef.current.get(`${inv.source}::${itemKey}`),
+        )
+        mergedByKey.set(itemKey, merged)
+        if (live.skills.length > 0 || live.extensions.length > 0) liveHasAny = true
+        if (merged.skills.length > 0 || merged.extensions.length > 0) mergedHasAny = true
+      }
+      const brokerStaleBanner =
+        !on && liveHasAny
+          ? 'This package is off in settings, but the broker still has it loaded. Restart broker so the agent drops it (the list updates after restart).'
+          : on && !liveHasAny && mergedHasAny && capabilities?.brokerOk
+            ? 'This package is on in settings, but the running broker has not loaded it yet. Restart broker so the agent picks it up.'
+            : null
+      const knHint =
+        KNOWN_PACKAGES.find((k) => k.canonical === inv.source || k.aliases?.includes(inv.source))?.hint ?? null
+      if (itemKeys.size === 0) {
+        // Nothing discovered yet — single card for the bundle itself.
+        cards.push({
+          cardKey: `${inv.source}::self`,
+          inv,
+          title: bundleLabel,
+          titleHint: knHint,
+          originTag: packageBundleOriginFromPath(inv.installedPath || inv.source),
+          siblingCount: 1,
+          bundleLabel: inv.source,
+          brokerStaleBanner,
+          merged: { skills: [], extensions: [] },
+          on,
+        })
+        continue
+      }
+      for (const [itemKey, merged] of mergedByKey) {
+        const samplePath =
+          merged.extensions[0]?.row.path ?? merged.skills[0]?.row.path ?? inv.installedPath ?? ''
+        cards.push({
+          cardKey: `${inv.source}::${itemKey}`,
+          inv,
+          title: itemKey,
+          titleHint: itemKeys.size > 1 ? `part of ${bundleLabel}` : knHint,
+          originTag: packageBundleOriginFromPath(samplePath || inv.installedPath || ''),
+          siblingCount: itemKeys.size,
+          bundleLabel,
+          brokerStaleBanner,
+          merged,
+          on,
         })
       }
     }
-  }, [bundlesByKey])
+    return cards
+    // packageBundleSnapshotRef is intentionally read without being a dep — the snapshot
+    // effect fills it right after render, same timing as the previous per-bundle behavior.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [installedInventoryRows, bundleItemsBySource, enabledPkgs, capabilities?.brokerOk])
 
-  // Auto-expand Downloaded packages when there are cards (section is at the page
+  // Fill the snapshot right after render so the next refresh (e.g. after a broker
+  // restart unloads a package) still shows the last-known rows until the broker
+  // reflects the change.
+  useEffect(() => {
+    const snap = packageBundleSnapshotRef.current
+    for (const [source, items] of bundleItemsBySource) {
+      for (const [itemKey, b] of items) {
+        if (b.extensions.length > 0 || b.skills.length > 0) {
+          snap.set(`${source}::${itemKey}`, {
+            skills: b.skills.map((s) => ({ ...s })),
+            extensions: b.extensions.map((e) => ({
+              ...e,
+              tools: e.tools.map((t) => ({ ...t })),
+              commandNames: [...e.commandNames],
+            })),
+          })
+        }
+      }
+    }
+  }, [bundleItemsBySource])
+
+  // Auto-expand the Personal packages section when there are cards (section is at the page
   // bottom; operator usually wants to see inventory without another click).
   useEffect(() => {
-    if (installedCards.length > 0) setDownloadedOpen(true)
-  }, [installedCards.length])
+    if (installedItemCards.length > 0) setDownloadedOpen(true)
+  }, [installedItemCards.length])
 
   const syncCapabilitiesAfterPackageOp = useCallback(async () => {
     await onRefresh()
@@ -724,7 +845,7 @@ export function CapabilityManagerPanel({
       <div className={cn(capBanner, capSectionLeadTight)}>
         <strong>Per-workspace</strong> <strong>Enable</strong> under <strong>Skills</strong> and <strong>Extensions</strong>{' '}
         merges with global <code>~/.sylo/disabled.json</code> for workspace{' '}
-        <strong>{exclusionWorkspaceName}</strong>. <strong>Load package for agent</strong> on Downloaded packages stays
+        <strong>{exclusionWorkspaceName}</strong>. <strong>Load package for agent</strong> on Personal packages stays
         global (<code>packages[]</code>).
       </div>
     : null
@@ -870,7 +991,204 @@ export function CapabilityManagerPanel({
         }}
       />
 
-      <UserPackagesSection />
+      <details
+        className={capSection}
+        open={downloadedOpen}
+        onToggle={(e) => setDownloadedOpen(detailsOpenFromToggleEvent(e))}
+      >
+        <summary className={capSectionSummary}>
+          <h2 className={capSectionSummaryTitle}>Personal packages</h2>
+          <span className={capCount}>{installedItemCards.length}</span>
+          <span className={capSectionChevron} aria-hidden="true" />
+        </summary>
+        <div className={capSectionBody}>
+          <p className={cn(mutedText, capSectionLeadTight)}>
+            Pi packages <strong>you installed yourself</strong> (npm, git, or a local path like the{' '}
+            <code>sylo-tools-*</code> bundles) — loaded <strong>in every workspace</strong> at broker start.{' '}
+            <strong>Load package for agent</strong> adds the spec to <code>packages[]</code> (global — broker loads the
+            whole package). Turn it <strong>off</strong> to stop the broker from loading that package for the AI; files
+            stay installed. To remove files from the machine, use <strong>Uninstall</strong> (<code>pi uninstall</code>);
+            restart the broker after either. Per-skill/per-extension <strong>disable</strong> (hide from AI only) is
+            under <strong>Skills</strong> and <strong>Extensions</strong> above.
+          </p>
+          {installedItemCards.length === 0 && (
+            <p className={cn(mutedText, capEmptyNote)}>
+              No packages installed yet — install from the catalog below, then Restart broker.
+            </p>
+          )}
+                    {installedItemCards.map(
+            ({ cardKey, inv, title, titleHint, originTag, siblingCount, bundleLabel, brokerStaleBanner, merged, on }) => {
+        const primary = knownPackagePrimarySpec(inv.source)
+        const strip = alsoStripForPackageToggle(primary)
+        const busy = cardBusy === inv.source
+        const mergedHasAny = merged.extensions.length > 0 || merged.skills.length > 0
+        return (
+                    <details
+            key={cardKey}
+            className={capPkgCard}
+            open={pkgCardOpenBySource[cardKey] === true}
+            onToggle={(e) => {
+              setPkgCardOpenBySource((p) => ({
+                ...p,
+                [cardKey]: detailsOpenFromToggleEvent(e),
+              }))
+            }}
+          >
+            <summary className={capPkgCardSummary}>
+              <div className={capPkgCardSummaryLead}>
+                <div className={capPkgCardHeadline}>
+                  <code className={capPkgCardName}>{title}</code>
+                  {titleHint ? <span className={capPkgCardHint}>{titleHint}</span> : null}
+                </div>
+              </div>
+              <div className={capPkgCardSummaryTrail}>
+                <OriginBadge origin={originTag} />
+                <span
+                  className={capPkgCardSummaryActions}
+                  onClick={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === ' ' || e.key === 'Enter') e.stopPropagation()
+                  }}
+                >
+                  <CapEnableSwitch
+                    checked={on}
+                    disabled={!!installBusy || busy}
+                    ariaLabel={
+                      on ?
+                        'Package loaded for agent — click to stop loading (files stay on disk)'
+                      : 'Package not loaded — click to add to packages[] for the agent'
+                    }
+                    label="Enable"
+                    className="mr-0"
+                    onClick={() =>
+                      void onTogglePackage(primary, !on, strip, {
+                        skillPaths: merged.skills.map(({ row }) => row.path).filter(Boolean),
+                      })
+                    }
+                  />
+                </span>
+              </div>
+            </summary>
+            <div className={capPkgCardBody}>
+              <div className={capPkgCardToolbar}>
+                <button
+                  type="button"
+                  className={btnGhost}
+                  disabled={!!installBusy || busy}
+                  onClick={() => void runUpdate(inv.source)}
+                >
+                  {busy ? 'Working…' : 'Update'}
+                </button>
+                                <button
+                  type="button"
+                  className={btnDanger}
+                  disabled={!!installBusy || busy}
+                  title={
+                    siblingCount > 1 ?
+                      `Removes the whole ${bundleLabel} bundle (${siblingCount} packages)` :
+                      undefined
+                  }
+                  onClick={() => void runUninstall(inv.source)}
+                >
+                  {siblingCount > 1 ? `Uninstall bundle (${siblingCount})` : 'Uninstall'}
+                </button>
+              </div>
+
+              {brokerStaleBanner ? (
+                <div className={cn(capBanner, capBannerWarn, 'mb-2.5')}>
+                  {brokerStaleBanner}
+                </div>
+              ) : null}
+
+                            <div className={capPkgCardMeta}>
+                <span className={mutedText}>{siblingCount > 1 ? 'Bundle' : 'Installed at'}</span>
+                <code className={capPath}>{siblingCount > 1 ? inv.source : inv.installedPath}</code>
+              </div>
+
+              {mergedHasAny ?
+                <>
+                  <p className={cn(mutedText, capSectionLeadTight, 'mb-0 mt-2.5')}>
+                    {merged.skills.length} skill(s), {merged.extensions.length} extension(s)
+                    {siblingCount > 1 ? ` — part of the ${bundleLabel} bundle` : ''} — use{' '}
+                    <strong>Skills</strong> and <strong>Extensions</strong> to disable individual items for the AI.
+                  </p>
+                  {merged.skills.length > 0 ?
+                    <p className={cn(mutedText, 'mt-1.5 text-xs')}>
+                      Skills:{' '}
+                      {merged.skills.map(({ row }) => (
+                        <code key={row.path} className="mr-2">
+                          {row.name}
+                        </code>
+                      ))}
+                    </p>
+                  : null}
+                  {merged.extensions.length > 0 ?
+                    <p className={cn(mutedText, 'mt-1 text-xs')}>
+                      Extensions:{' '}
+                      {merged.extensions.map(({ row }) => (
+                        <code key={row.path} className="mr-2">
+                          {row.name}
+                        </code>
+                      ))}
+                    </p>
+                  : null}
+                </>
+              : null}
+
+              {!mergedHasAny && (
+                <p className={cn(mutedText, capPkgCardEmpty)}>
+                  No skills/extensions discovered for this install yet — use <strong>Load package for agent</strong>, then{' '}
+                  <strong>Restart broker</strong>.
+                </p>
+              )}
+            </div>
+          </details>
+        )
+      })}
+        </div>
+      </details>
+
+      {capabilities?.loadErrors && capabilities.loadErrors.length > 0 && (
+        <div className={cn(capBanner, capBannerError, 'mt-3')}>
+          <strong>Extension load errors:</strong>
+          <ul style={{ margin: '4px 0 0 16px' }}>
+            {capabilities.loadErrors.map((e) => (
+              <li key={e.path}>
+                <code>{e.path}</code>: {e.error}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {capabilities?.brokerOk && orphanPackages.length > 0 && (
+        <div className={cn(capBanner, capBannerWarn)} style={{ marginTop: 12 }}>
+          <strong>Enabled in settings but no matching loaded extension:</strong>
+          <ul style={{ margin: '6px 0 0 18px', padding: 0, listStyle: 'disc inside' }}>
+            {orphanPackages.map((pkg) => (
+              <li key={pkg} style={{ marginBottom: 10 }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                  <code>{pkg}</code>
+                  <button
+                    type="button"
+                    className={btnGhostSm}
+                    disabled={!!installBusy || !!cardBusy || installBusy === pkg}
+                    onClick={() => void runInstall(pkg)}
+                  >
+                    {installBusy === pkg ? 'Installing…' : 'Install / repair'}
+                  </button>
+                </div>
+                <div className={cn(mutedText, 'mt-1')}>
+                  Often the package was never installed, or the extension failed to import (see errors above).
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
 
       <details
         className={capSection}
@@ -889,7 +1207,7 @@ export function CapabilityManagerPanel({
               pi.dev
             </a>
             . <strong>Install</strong> runs <code>pi install</code>. When it finishes, click <strong>Restart broker</strong>{' '}
-            above so installs show up; a <strong>Downloaded packages</strong> card appears below once Pi sees them on
+            above so installs show up; a <strong>Personal packages</strong> card appears below once Pi sees them on
             disk.
           </p>
 
@@ -1099,7 +1417,7 @@ export function CapabilityManagerPanel({
             packages. Optional: include this workspace&apos;s <code>.cursor/skills</code> (not other repos).{' '}
             <strong>Disable</strong> (off) hides a skill from the AI without deleting files.{' '}
             <strong>Remove</strong> deletes standalone folders from disk; package skills are removed via{' '}
-            <strong>Downloaded packages → Uninstall</strong>. Click a skill name to expand and edit{' '}
+            <strong>Personal packages → Uninstall</strong>. Click a skill name to expand and edit{' '}
             <code>SKILL.md</code> in place.
           </p>
           <div className={cn(rowHeadline, 'mb-2')}>
@@ -1173,7 +1491,7 @@ export function CapabilityManagerPanel({
             registers one or more <strong>tools</strong> (individual commands the model can call). Use the header{' '}
             <strong>Enable</strong> for the whole extension, or each tool row’s <strong>Enable</strong> to hide only that
             tool (stored in <code>~/.sylo/disabled.json</code>, merged with workspace exclusions). Turning{' '}
-            <strong>Enable</strong> off does not <strong>uninstall</strong> anything; use Downloaded packages →{' '}
+            <strong>Enable</strong> off does not <strong>uninstall</strong> anything; use Personal packages →{' '}
             <strong>Uninstall</strong> to remove files from disk.
           </p>
           {extensions.length === 0 ? (
@@ -1205,197 +1523,7 @@ export function CapabilityManagerPanel({
         </div>
       </details>
 
-      <details
-        className={capSection}
-        open={downloadedOpen}
-        onToggle={(e) => setDownloadedOpen(detailsOpenFromToggleEvent(e))}
-      >
-        <summary className={capSectionSummary}>
-          <h2 className={capSectionSummaryTitle}>Downloaded packages</h2>
-          <span className={capCount}>{installedCards.length}</span>
-          <span className={capSectionChevron} aria-hidden="true" />
-        </summary>
-        <div className={capSectionBody}>
-          <p className={cn(mutedText, capSectionLeadTight)}>
-            One row per package Pi has on disk. <strong>Load package for agent</strong> adds the spec to{' '}
-            <code>packages[]</code> (global — broker loads the whole package). Turn it <strong>off</strong> to stop the
-            broker from loading that package for the AI; files stay installed. To remove files from the machine, use{' '}
-            <strong>Uninstall</strong> (<code>pi uninstall</code>). Per-skill/per-extension <strong>disable</strong>{' '}
-            (hide from AI only) is under <strong>Skills</strong> and <strong>Extensions</strong> above.
-          </p>
-          {installedCards.length === 0 && (
-            <p className={cn(mutedText, capEmptyNote)}>
-              No downloaded packages yet — install from the catalog, then Restart broker.
-            </p>
-          )}
-          {installedCards.map(({ inventory: inv, bundle }) => {
-        const primary = knownPackagePrimarySpec(inv.source)
-        const strip = alsoStripForPackageToggle(primary)
-        const on = specsEquivalentTo(inv.source).some((x) => enabledPkgs.has(x))
-        const snap = packageBundleSnapshotRef.current.get(bundle.key)
-        const merged = mergeInstalledPackageBundle(
-          { skills: bundle.skills, extensions: bundle.extensions },
-          snap,
-        )
-        const liveHasAny = bundle.extensions.length > 0 || bundle.skills.length > 0
-        const mergedHasAny = merged.extensions.length > 0 || merged.skills.length > 0
-        let brokerStaleBanner: string | null = null
-        if (!on && liveHasAny) {
-          brokerStaleBanner =
-            'This package is off in settings, but the broker still has it loaded. Restart broker so the agent drops it (the list updates after restart).'
-        } else if (on && !liveHasAny && mergedHasAny && capabilities?.brokerOk) {
-          brokerStaleBanner =
-            'This package is on in settings, but the running broker has not loaded it yet. Restart broker so the agent picks it up.'
-        }
-        const samplePath =
-          merged.extensions[0]?.row.path ??
-          merged.skills[0]?.row.path ??
-          inv.installedPath ??
-          ''
-        const originTag = packageBundleOriginFromPath(samplePath || inv.installedPath || '')
-        const hint = KNOWN_PACKAGES.find(
-          (k) => k.canonical === inv.source || k.aliases?.includes(inv.source),
-        )?.hint
-        const busy = cardBusy === inv.source
-        return (
-          <details
-            key={inv.source}
-            className={capPkgCard}
-            open={pkgCardOpenBySource[inv.source] === true}
-            onToggle={(e) => {
-              const src = inv.source
-              setPkgCardOpenBySource((p) => ({
-                ...p,
-                [src]: detailsOpenFromToggleEvent(e),
-              }))
-            }}
-          >
-            <summary className={capPkgCardSummary}>
-              <div className={capPkgCardSummaryLead}>
-                <div className={capPkgCardHeadline}>
-                  <code className={capPkgCardName}>{inv.source}</code>
-                  {hint ? <span className={capPkgCardHint}>{hint}</span> : null}
-                </div>
-              </div>
-              <div className={capPkgCardSummaryTrail}>
-                <OriginBadge origin={originTag} />
-                <span
-                  className={capPkgCardSummaryActions}
-                  onClick={(e) => {
-                    e.preventDefault()
-                    e.stopPropagation()
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === ' ' || e.key === 'Enter') e.stopPropagation()
-                  }}
-                >
-                  <CapEnableSwitch
-                    checked={on}
-                    disabled={!!installBusy || busy}
-                    ariaLabel={
-                      on ?
-                        'Package loaded for agent — click to stop loading (files stay on disk)'
-                      : 'Package not loaded — click to add to packages[] for the agent'
-                    }
-                    label="Enable"
-                    className="mr-0"
-                    onClick={() =>
-                      void onTogglePackage(primary, !on, strip, {
-                        skillPaths: merged.skills.map(({ row }) => row.path).filter(Boolean),
-                      })
-                    }
-                  />
-                </span>
-              </div>
-            </summary>
-            <div className={capPkgCardBody}>
-              <div className={capPkgCardToolbar}>
-                <button
-                  type="button"
-                  className={btnGhost}
-                  disabled={!!installBusy || busy}
-                  onClick={() => void runUpdate(inv.source)}
-                >
-                  {busy ? 'Working…' : 'Update'}
-                </button>
-                <button
-                  type="button"
-                  className={btnDanger}
-                  disabled={!!installBusy || busy}
-                  onClick={() => void runUninstall(inv.source)}
-                >
-                  Uninstall
-                </button>
-              </div>
 
-              {brokerStaleBanner ? (
-                <div className={cn(capBanner, capBannerWarn, 'mb-2.5')}>
-                  {brokerStaleBanner}
-                </div>
-              ) : null}
-
-              <div className={capPkgCardMeta}>
-                <span className={mutedText}>Installed at</span>
-                <code className={capPath}>{inv.installedPath}</code>
-              </div>
-
-              {(merged.extensions.length > 0 || merged.skills.length > 0) ?
-                <p className={cn(mutedText, capSectionLeadTight, 'mb-0 mt-2.5')}>
-                  {merged.skills.length} skill(s), {merged.extensions.length} extension(s) — use{' '}
-                  <strong>Skills</strong> and <strong>Extensions</strong> to disable individual items for the AI.
-                </p>
-              : null}
-
-              {!mergedHasAny && (
-                <p className={cn(mutedText, capPkgCardEmpty)}>
-                  No skills/extensions discovered for this install yet — use <strong>Load package for agent</strong>, then{' '}
-                  <strong>Restart broker</strong>.
-                </p>
-              )}
-            </div>
-          </details>
-        )
-      })}
-        </div>
-      </details>
-
-      {capabilities?.loadErrors && capabilities.loadErrors.length > 0 && (
-        <div className={cn(capBanner, capBannerError, 'mt-3')}>
-          <strong>Extension load errors:</strong>
-          <ul style={{ margin: '4px 0 0 16px' }}>
-            {capabilities.loadErrors.map((e) => (
-              <li key={e.path}>
-                <code>{e.path}</code>: {e.error}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {capabilities?.brokerOk && orphanPackages.length > 0 && (
-        <div className={cn(capBanner, capBannerWarn)} style={{ marginTop: 12 }}>
-          <strong>Enabled in settings but no matching loaded extension:</strong>
-          <ul style={{ margin: '6px 0 0 18px', padding: 0, listStyle: 'disc inside' }}>
-            {orphanPackages.map((pkg) => (
-              <li key={pkg} style={{ marginBottom: 10 }}>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-                  <code>{pkg}</code>
-                  <button
-                    type="button"
-                    className={btnGhostSm}
-                    disabled={!!installBusy || !!cardBusy || installBusy === pkg}
-                    onClick={() => void runInstall(pkg)}
-                  >
-                    {installBusy === pkg ? 'Installing…' : 'Install / repair'}
-                  </button>
-                </div>
-                <div className={cn(mutedText, 'mt-1')}>
-                  Often the package was never installed, or the extension failed to import (see errors above).
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
 
       {removeSkillModal ?
         createPortal(
@@ -1423,7 +1551,7 @@ export function CapabilityManagerPanel({
                 {removeSkillModal.path}
               </code>
               <p className={cn(mutedText, capSectionLeadTight, 'mt-0')}>
-                Package skills are removed via <strong>Downloaded packages → Uninstall</strong>.
+                Package skills are removed via <strong>Personal packages → Uninstall</strong>.
               </p>
               <div className={modalActions}>
                 <button type="button" className={btnGhost} onClick={() => setRemoveSkillModal(null)}>

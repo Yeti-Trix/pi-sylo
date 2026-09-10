@@ -3,7 +3,7 @@
   syloBuiltinExtensionHint,
 } from './sylo-builtin-extensions.js'
 
-/** Bundled first-party Pi package — off by default; enable in Capability manager → Sylo optional packages. */
+/** Bundled first-party Pi package — off by default; enable in Capability manager → Sylo built-in packages. */
 export type SyloOptionalPackage = {
   id: string
   title: string

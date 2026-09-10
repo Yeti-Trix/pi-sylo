@@ -5,23 +5,24 @@ import {
   normalizeSyloOptionalPackagesPref,
   type SyloOptionalPackage,
 } from '../../../../shared/sylo-optional-packages.js'
-import { CapEnableSwitch } from './badges'
+import { CapEnableSwitch, OriginBadge } from './badges'
 import {
   capBanner,
   capBannerWarn,
   capEmptyNote,
+  capPkgCardHint,
+  capPkgCardName,
   capSection,
   capSectionBody,
   capSectionChevron,
   capSectionLeadTight,
   capSectionSummary,
   capSectionSummaryTitle,
-  capSkillRow,
+    capSkillRow,
   capCount,
   mutedText,
   rowHeadline,
   rowList,
-  rowName,
   rowSpacer,
 } from '../ui-classes'
 
@@ -97,7 +98,7 @@ export function SyloOptionalPackagesSection({
       onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
     >
       <summary className={capSectionSummary}>
-        <h2 className={capSectionSummaryTitle}>Sylo optional packages</h2>
+        <h2 className={capSectionSummaryTitle}>Sylo built-in packages</h2>
         <span className={capCount}>
           {enabledCount}/{SYLO_OPTIONAL_PACKAGES.length}
         </span>
@@ -119,22 +120,24 @@ export function SyloOptionalPackagesSection({
           <div className={cn(capBanner, capBannerWarn, 'mb-2 whitespace-pre-wrap')}>{installNote}</div>
         : null}
         {SYLO_OPTIONAL_PACKAGES.length === 0 ?
-          <p className={cn(mutedText, capEmptyNote)}>No optional packages registered yet.</p>
+          <p className={cn(mutedText, capEmptyNote)}>No built-in packages registered yet.</p>
         : (
           <ul className={rowList}>
-            {SYLO_OPTIONAL_PACKAGES.map((pkg) => (
+                        {SYLO_OPTIONAL_PACKAGES.map((pkg) => (
               <li key={pkg.id} className={capSkillRow}>
+                {/* Same anatomy as the Downloaded packages cards: mono spec + origin
+                    badge + Enable toggle on the headline, description below. */}
                 <div className={rowHeadline}>
-                  <span className={rowName}>
-                    {pkg.title}
-                    <span className={cn(mutedText, 'ml-2 font-mono text-xs')}>{pkg.id}</span>
-                  </span>
+                  <code className={capPkgCardName}>{pkg.id}</code>
+                  <span className={capPkgCardHint}>{pkg.title}</span>
                   <span className={rowSpacer} />
+                  <OriginBadge origin="sylo-optional" />
                   <CapEnableSwitch
                     checked={pref[pkg.id] === true}
                     disabled={busy === pkg.id}
                     ariaLabel={`${pkg.title} ${pref[pkg.id] ? 'enabled' : 'disabled'}`}
-                    label={busy === pkg.id ? '…' : pref[pkg.id] ? 'On' : 'Off'}
+                    label={busy === pkg.id ? '…' : 'Enable'}
+                    className="mr-0"
                     onClick={() => void setEnabled(pkg, !pref[pkg.id])}
                   />
                 </div>

@@ -1,5 +1,5 @@
 /**
- * Sylo optional packages run Python helper scripts via pip/extensions.
+ * Sylo built-in packages run Python helper scripts via pip/extensions.
  * Gate unsupported Python versions before pip (native wheels vary by release).
  *
  * Why we prefer 3.12: several pinned optional-package deps ship prebuilt wheels
@@ -301,7 +301,7 @@ export function formatUnsupportedPythonError(
   version: ParsedPythonVersion,
 ): string {
   return (
-    `Python ${version.major}.${version.minor}.${version.patch} is not supported for Sylo optional packages.\n` +
+    `Python ${version.major}.${version.minor}.${version.patch} is not supported for Sylo built-in packages.\n` +
     `Use Python ${SYLO_PYTHON_MIN.major}.${SYLO_PYTHON_MIN.minor}–${SYLO_PYTHON_MIN.major}.${SYLO_PYTHON_MAX_MINOR} ` +
     `(Sylo prefers ${SYLO_PYTHON_MIN.major}.${SYLO_PYTHON_PREFERRED_MINOR} for wheel coverage).\n\n` +
     `Fix:\n` +

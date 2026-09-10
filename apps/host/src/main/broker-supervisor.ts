@@ -200,6 +200,10 @@ export interface BrokerConfig {
   builtinToolsGuardExtension?: string
   /** Repo path to sylo-image-fallback (vision model for tool results on text-only main model). */
   imageFallbackExtension?: string
+  /** Repo path to sylo-canvas-sketch (canvas_sketch tool: pull the draw-area sketch into chat). */
+  canvasSketchExtension?: string
+  /** Absolute path to the mirrored canvas sketch PNG (SYLO_CANVAS_SKETCH_PATH for the tool). */
+  canvasSketchPath?: string
   /** Repo path to @sylo/skill-surface-extension (show_widget → host) */
   skillSurfaceExtension?: string
   /** Repo path to @sylo/sylo-subagents (subagent tool + sylo_subagent IPC) */
@@ -377,6 +381,10 @@ export class BrokerSupervisor {
         ...(this.cfg.imageFallbackExtension ?
           { SYLO_IMAGE_FALLBACK_EXTENSION: this.cfg.imageFallbackExtension }
         : {}),
+        ...(this.cfg.canvasSketchExtension ?
+          { SYLO_CANVAS_SKETCH_EXTENSION: this.cfg.canvasSketchExtension }
+        : {}),
+        ...(this.cfg.canvasSketchPath ? { SYLO_CANVAS_SKETCH_PATH: this.cfg.canvasSketchPath } : {}),
         SYLO_PI_BUILTIN_TOOLS: JSON.stringify(
           this.cfg.piBuiltinTools ?? defaultPiBuiltinToolsPref(),
         ),

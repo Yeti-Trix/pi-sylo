@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react'
 import { cn } from '../../lib/cn'
-import { btnGhostSm, mutedText } from '../../panels/ui-classes'
+import { btnGhostSm, mutedText, sidebarResizeBtn } from '../../panels/ui-classes'
 import { CanvasContent } from './CanvasContent'
 import { CanvasDraw } from './CanvasDraw'
 import { CanvasLiveContent } from './CanvasLiveContent'
@@ -23,12 +23,6 @@ type Props = {
    * Dropping a file always replaces whatever is showing (snapshot or live).
    */
   onDropFile?: (filePath: string, kind: 'markdown' | 'svg') => void
-  /** Active conversation id (docked variant only). Forwarded to the live
-   *  task-board so its "Send to agent" affordance can deliver a queued message
-   *  to the right conversation via `window.sylo.chat.deliverQueued`. Also used
-   *  by draw mode's "Send to agent" to deliver the sketch as an image
-   *  attachment. */
-  conversationId?: string
   /** Parent-held (App-level) backup of the last freehand sketch (PNG data
    *  URL). Lifted above CanvasPanel so the sketch survives CanvasPanel unmount
    *  on tab switches. Draw mode restores from this on mount. */
@@ -57,10 +51,9 @@ export function CanvasPanel({
   className,
   style,
   variant = 'docked',
-  onCollapse,
+    onCollapse,
   onPopOut,
   onDropFile,
-  conversationId,
   sketchBackupRef,
   tabs,
   activeTabId,
@@ -239,36 +232,33 @@ export function CanvasPanel({
               </button>
             </>
           : null}
-          {variant === 'docked' ?
-            <button
-              type="button"
-              className={cn(btnGhostSm, drawMode && 'bg-accent/20 text-accent')}
-              title="Switch the canvas to freehand draw mode (mouse). Send the sketch to the agent as an image."
-              onClick={() => setDrawMode((v) => !v)}
-            >
-              {drawMode ? 'Exit draw' : 'Draw'}
-            </button>
-          : null}
-                    {variant === 'docked' && live && !drawMode ?
-            <button
-              type="button"
-              className={btnGhostSm}
-              title="Stop the live canvas view"
-              onClick={() => {
-                void window.sylo.canvas.stopLiveDemo(live.liveId)
-              }}
-            >
-              Stop
-            </button>
-          : null}
           {variant === 'docked' && hasPopoutTarget && onPopOut && !drawMode ?
             <button type="button" className={btnGhostSm} title="Open in a new window" onClick={onPopOut}>
               Pop out
             </button>
           : null}
+          {variant === 'docked' && live && !drawMode ?
+            <button
+              type="button"
+              className={cn(btnGhostSm, 'px-2 text-[0.9rem] leading-none')}
+              title="Stop the live canvas view"
+              aria-label="Stop live view"
+              onClick={() => {
+                void window.sylo.canvas.stopLiveDemo(live.liveId)
+              }}
+            >
+              ×
+            </button>
+          : null}
           {variant === 'docked' && onCollapse ?
-            <button type="button" className={btnGhostSm} onClick={onCollapse}>
-              Hide
+            <button
+              type="button"
+              className={sidebarResizeBtn}
+              title="Collapse canvas"
+              aria-label="Collapse canvas"
+              onClick={onCollapse}
+            >
+              ▶
             </button>
           : null}
           {variant === 'popout' ?
@@ -343,10 +333,8 @@ export function CanvasPanel({
       : null}
       {variant === 'docked' && drawMode ?
         <div className="min-h-0 flex-1 p-2">
-          <CanvasDraw
-            conversationId={conversationId}
+                    <CanvasDraw
             backupRef={backupRef}
-            onExit={() => setDrawMode(false)}
           />
         </div>
       : (
@@ -363,6 +351,21 @@ export function CanvasPanel({
           )}
         </div>
       )}
+      {/* Bottom control bar (docked): the draw toggle lives here, not in the
+          header — the header keeps only the view actions, the × (stop live)
+          and the collapse arrow. */}
+      {variant === 'docked' ?
+        <footer className="flex shrink-0 items-center gap-2 border-t border-border px-3 py-1.5">
+          <button
+            type="button"
+            className={cn(btnGhostSm, drawMode && 'bg-accent/20 text-accent')}
+            title={drawMode ? 'Exit draw mode' : 'Switch the canvas to freehand draw mode (mouse). The agent can pull the sketch from chat (canvas_sketch tool).'}
+            onClick={() => setDrawMode((v) => !v)}
+          >
+            {drawMode ? 'Exit draw' : 'Draw'}
+          </button>
+        </footer>
+      : null}
     </section>
   )
 }

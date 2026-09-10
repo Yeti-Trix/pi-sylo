@@ -16,6 +16,7 @@ import {
 } from './exportChatMarkdown'
 // import { WorkflowModal } from './WorkflowModal'
 import { SYLO_DEFAULT_MODEL_ID, SYLO_DEFAULT_MODEL_PROVIDER } from '../../shared/sylo-model-defaults'
+import type { AppUpdateStatus } from '../../shared/app-update-types'
 import { SettingsPanel } from './panels/SettingsPanel'
 import { normalizeOllamaOriginUi } from './panels/ollama-ui'
 import {
@@ -597,6 +598,8 @@ export function App(): React.ReactElement {
   const tabRef = useRef<Tab>(tab)
   tabRef.current = tab
   const [safeMode, setSafeMode] = useState(false)
+  const [updateStatus, setUpdateStatus] = useState<AppUpdateStatus | null>(null)
+  const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null)
   const [conversations, setConversations] = useState<Conv[]>([])
   const [activeId, setActiveId] = useState<string | undefined>()
   const activeIdRef = useRef<string | undefined>(undefined)
@@ -760,6 +763,31 @@ export function App(): React.ReactElement {
   // iframes post their first bridge messages.
   useEffect(() => {
     void refreshPersonalBridgeOps()
+  }, [])
+  // Update checker: pull the current status, live-subscribe to later checks,
+  // and restore the per-version dismissal. Main pushes after every check
+  // (launch + 12h interval), so no renderer polling is needed.
+  useEffect(() => {
+    let disposed = false
+    void (async () => {
+      try {
+        const v = await window.sylo.prefs.get('sylo.update.dismissedVersion', '')
+        if (!disposed && typeof v === 'string' && v.length > 0) setDismissedUpdateVersion(v)
+      } catch {
+        // prefs unavailable — banner just stays dismiss-in-session only
+      }
+      try {
+        const s = await window.sylo.updates.status()
+        if (!disposed) setUpdateStatus(s)
+      } catch {
+        // bridge unavailable — no banner
+      }
+    })()
+    const off = window.sylo.updates.onChanged((s) => setUpdateStatus(s))
+    return () => {
+      disposed = true
+      off()
+    }
   }, [])
   const [thinkTankBubblesByConv, setThinkTankBubblesByConv] = useState<Record<string, ThinkTankBubbleRow[]>>({})
   const [thinkTankSessionsByConv, setThinkTankSessionsByConv] = useState<
@@ -3546,9 +3574,36 @@ export function App(): React.ReactElement {
             onPointerCancel={onSidebarResizePointerUp}
           />
         : null}
-      </aside>
+            </aside>
 
       <section className={mainContent}>
+        {updateStatus?.isUpdateAvailable && updateStatus.latestVersion && dismissedUpdateVersion !== updateStatus.latestVersion && (
+          <div className={banner}>
+            <strong>Sylo {updateStatus.latestVersion}</strong> is available — you have{' '}
+            {updateStatus.currentVersion}. Update: <code>git pull</code> + <code>npm install</code> + restart Sylo.{' '}
+            <a
+              href="https://github.com/Yeti-Trix/pi-sylo/blob/main/CHANGELOG.md"
+              target="_blank"
+              rel="noreferrer"
+            >
+              What's new
+            </a>
+            <button
+              type="button"
+              aria-label="Dismiss update notice"
+              title="Dismiss (reminds again when the version changes)"
+              className="ml-2 cursor-pointer text-[0.8rem] opacity-60 hover:opacity-100"
+              onClick={() => {
+                if (updateStatus.latestVersion) {
+                  setDismissedUpdateVersion(updateStatus.latestVersion)
+                  void window.sylo.prefs.set('sylo.update.dismissedVersion', updateStatus.latestVersion)
+                }
+              }}
+            >
+              ✕
+            </button>
+          </div>
+        )}
         {safeMode && (
           <div className={banner}>
             Safe Mode — agent broker disabled after repeated crash boots. Use{' '}
@@ -3766,7 +3821,6 @@ export function App(): React.ReactElement {
                   onUpdatePayload={(p) => updateActiveCanvasSnapshot(() => p)}
                   className="shrink-0"
                   style={{ width: canvasSize }}
-                  conversationId={activeId}
                   sketchBackupRef={sketchBackupRef}
                   onCollapse={collapseCanvas}
                   onPopOut={openCanvasPopout}

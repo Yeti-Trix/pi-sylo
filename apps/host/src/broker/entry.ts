@@ -814,6 +814,13 @@ async function handleInit(msg: BrokerInit): Promise<void> {
         extraExtensionPaths.push(imageFallbackPath)
       }
     }
+    const canvasSketchExtensionPath = process.env.SYLO_CANVAS_SKETCH_EXTENSION
+    if (canvasSketchExtensionPath && existsSync(canvasSketchExtensionPath)) {
+      const norm = normalizeSyloCapabilityPath(canvasSketchExtensionPath)
+      if (!norm || !disabledExtensionPathsSet.has(norm)) {
+        extraExtensionPaths.push(canvasSketchExtensionPath)
+      }
+    }
 
     const sessionDir = dirname(sessionPath)
     const sessionManager = SessionManager.open(sessionPath, sessionDir, sessionCwd)
