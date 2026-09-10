@@ -109,6 +109,17 @@ export function TaskDetailDrawer({
           </section>
         : null}
 
+        {spec.lastPartialThinking?.trim() && task.status === 'running' ?
+          <section className="mb-4">
+            <p className={cn(mutedText, 'mb-1.5 text-[0.78rem] font-medium uppercase tracking-[0.04em]')}>
+              Thinking
+            </p>
+            <pre className="m-0 max-h-[180px] overflow-auto whitespace-pre-wrap rounded-md border border-border bg-bg-primary p-2.5 font-mono text-[0.78rem] leading-[1.45] text-text-secondary">
+              {spec.lastPartialThinking.trim()}
+            </pre>
+          </section>
+        : null}
+
         {spec.lastToolName ?
           <section className="mb-4">
             <p className={cn(mutedText, 'mb-1.5 text-[0.78rem] font-medium uppercase tracking-[0.04em]')}>
@@ -132,7 +143,14 @@ export function TaskDetailDrawer({
               {resultText}
             </pre>
           </section>
-        : task.status === 'running' ?
+        : (
+          // Only when the child really has not said anything yet — the live sections above
+          // are output too, and calling that "waiting" reads as a stall.
+          task.status === 'running' &&
+          !preview &&
+          !spec.lastPartialThinking?.trim() &&
+          !spec.lastToolName
+        ) ?
           <p className={cn(mutedText, 'm-0 text-[0.82rem]')}>Waiting for subagent output…</p>
         : null}
 

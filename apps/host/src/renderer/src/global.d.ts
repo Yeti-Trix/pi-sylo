@@ -230,6 +230,22 @@ declare global {
             }
           | null
         >
+        /** Per-chat subagent pins plus the global pins they layer over. */
+        getSubagentModels: (
+          id: string,
+        ) => Promise<
+          | {
+              chat: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>
+              global: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>
+              allThinking: string
+              chatThinking: string | null
+            }
+          | null
+        >
+        setSubagentModels: (
+          id: string,
+          pins: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>,
+        ) => Promise<{ ok: true } | { ok: false; error: string }>
         delete: (id: string) => Promise<void>
       }
       /** Thinking (reasoning) effort supported for a provider/model per Pi. */
@@ -1586,6 +1602,9 @@ declare global {
           orphanedCount: number
           extensionEnabled: boolean
         }>
+        agents: () => Promise<
+          Array<{ name: string; description: string; source: 'builtin' | 'user' | 'project' }>
+        >
         onLifecycle: (cb: (payload: unknown) => void) => () => void
       }
       thinkTank: {

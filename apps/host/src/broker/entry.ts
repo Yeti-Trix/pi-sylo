@@ -138,6 +138,8 @@ type BrokerSwitchSession = {
   /** Per-chat main model override (empty/undefined = keep current). */
   modelProvider?: string
   modelId?: string
+  /** Resolved subagent pins for the switched-to chat; empty string clears the previous chat's. */
+  subagentModelsByAgent?: string
   /** Per-chat image (fallback) model override (empty/undefined = keep current). */
     imageModelId?: string
   imageModelProvider?: string
@@ -1024,6 +1026,19 @@ async function handleSwitchSession(msg: BrokerSwitchSession): Promise<void> {
     // undefined keeps the current model (no change).
     if (typeof msg.modelProvider === 'string') brokerModelProvider = msg.modelProvider
     if (typeof msg.modelId === 'string') brokerModelId = msg.modelId
+    // Subagents spawn their own Pi CLI and read the orchestrator model from these env
+    // vars at spawn time. Env is frozen at fork, so without re-publishing here a chat
+    // that overrides its model keeps spawning subagents against whatever model the
+    // broker started with.
+    if (msg.modelProvider?.trim()) process.env.SYLO_MODEL_PROVIDER = msg.modelProvider.trim()
+    if (msg.modelId?.trim()) process.env.SYLO_MODEL_ID = msg.modelId.trim()
+    // Assigned even when empty: the previous chat's pins / thinking must not leak into this one.
+    if (typeof msg.thinkingLevel === 'string') {
+      process.env.SYLO_THINKING_LEVEL = msg.thinkingLevel.trim()
+    }
+    if (typeof msg.subagentModelsByAgent === 'string') {
+      process.env.SYLO_SUBAGENTS_MODEL_BY_AGENT = msg.subagentModelsByAgent
+    }
     // Image (fallback) model: the sylo-image-fallback extension reads these env
     // vars at tool-execution time, so updating them here takes effect on the
     // next analyze_image call without a broker restart.

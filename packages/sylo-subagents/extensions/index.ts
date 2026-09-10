@@ -15,7 +15,7 @@ import { Type } from 'typebox'
 
 import { type AgentConfig, type AgentScope, discoverAgents } from './agents.ts'
 import { resolvePiSpawn } from './pi-cli.ts'
-import { orchestratorModelCliArgs } from './orchestrator-model.ts'
+import { subagentModelCliArgs } from './subagent-model.ts'
 import { cancelSubagentRun, consumeRunCancelled, registerSubagentRun, unregisterSubagentRun } from './subagent-run-registry.ts'
 import { newSubagentRunId, notifySyloSubagent, type SyloSubagentRunMode } from './sylo-host.ts'
 
@@ -25,6 +25,36 @@ const MAX_PARALLEL_TASKS = 8
 const MAX_CONCURRENCY = 4
 const PER_TASK_OUTPUT_CAP = 50 * 1024
 const DEFAULT_TIMEOUT_MS = 600_000
+
+/**
+ * Coalescing window for live progress.
+ *
+ * Every update writes the task row and makes the renderer re-query it, while the child emits
+ * one delta per token. Emitting per delta would turn a five-minute run into tens of thousands
+ * of SQLite writes; one update per window keeps the box moving at a fraction of that.
+ */
+const LIVE_UPDATE_INTERVAL_MS = 750
+
+/** Only the tail of the stream is kept — the run box is a small scrolling preview, not a log. */
+const LIVE_PREVIEW_TAIL_CHARS = 4_000
+
+function appendPreviewTail(current: string, delta: string): string {
+  const next = current + delta
+  return next.length <= LIVE_PREVIEW_TAIL_CHARS ? next : next.slice(-LIVE_PREVIEW_TAIL_CHARS)
+}
+
+/** First recognizable argument of a tool call, so the progress line says what it is working on. */
+function summarizeToolArgs(args: unknown): string | undefined {
+  if (!args || typeof args !== 'object') return undefined
+  const record = args as Record<string, unknown>
+  for (const key of ['command', 'path', 'file_path', 'pattern', 'query', 'url']) {
+    const value = record[key]
+    if (typeof value !== 'string' || !value.trim()) continue
+    const flat = value.trim().replace(/\s+/g, ' ')
+    return flat.length > 120 ? `${flat.slice(0, 120)}…` : flat
+  }
+  return undefined
+}
 
 /** Minimal Pi `-p` user line — full assignment lives in --append-system-prompt (think-tank seat pattern). */
 const SUBAGENT_CHILD_USER_TRIGGER = '.'
@@ -204,8 +234,8 @@ async function runSingleAgent(
   }
 
   const args: string[] = ['--mode', 'json', '-p', '--no-session']
-  const orchestratorModel = orchestratorModelCliArgs()
-  args.push(...orchestratorModel.args)
+  const subagentModel = subagentModelCliArgs(agent.name)
+  args.push(...subagentModel.args)
   if (agent.tools && agent.tools.length > 0) args.push('--tools', agent.tools.join(','))
 
   let tmpPromptDir: string | null = null
@@ -220,27 +250,63 @@ async function runSingleAgent(
     stderr: '',
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
     model:
-      orchestratorModel.modelId ?
-        orchestratorModel.provider ?
-          `${orchestratorModel.provider}/${orchestratorModel.modelId}`
-        : orchestratorModel.modelId
+      subagentModel.modelId ?
+        subagentModel.provider ?
+          `${subagentModel.provider}/${subagentModel.modelId}`
+        : subagentModel.modelId
       : agent.model,
     step,
     runId,
   }
 
+  // Tails of the message currently streaming, before it lands in `currentResult.messages`.
+  let liveText = ''
+  let liveThinking = ''
+  let liveToolName: string | undefined
+  let liveToolPreview: string | undefined
+  let updateTimer: ReturnType<typeof setTimeout> | undefined
+  let updateQueued = false
+
+  const previewText = () => liveText.trim() || getFinalOutput(currentResult.messages)
+
   const emitUpdate = () => {
     notifySyloSubagent({
       type: 'subagent_run_update',
       runId,
-      partialText: getFinalOutput(currentResult.messages) || undefined,
+      partialText: previewText() || undefined,
+      // Always a string, never undefined: the store treats undefined as "leave alone", which
+      // would strand the last think on screen after the message that produced it ended.
+      partialThinking: liveThinking.trim(),
+      toolName: liveToolName,
+      toolPreview: liveToolPreview ?? '',
     })
     if (onUpdate) {
       onUpdate({
-        content: [{ type: 'text', text: getFinalOutput(currentResult.messages) || '(running...)' }],
+        content: [{ type: 'text', text: previewText() || '(running...)' }],
         details: makeDetails([currentResult]),
       })
     }
+  }
+
+  /** Emit right away when idle, otherwise coalesce into one trailing emit per window. */
+  const scheduleUpdate = () => {
+    if (updateTimer) {
+      updateQueued = true
+      return
+    }
+    emitUpdate()
+    updateTimer = setTimeout(() => {
+      updateTimer = undefined
+      if (!updateQueued) return
+      updateQueued = false
+      scheduleUpdate()
+    }, LIVE_UPDATE_INTERVAL_MS)
+  }
+
+  const stopUpdates = () => {
+    if (updateTimer) clearTimeout(updateTimer)
+    updateTimer = undefined
+    updateQueued = false
   }
 
   try {
@@ -275,6 +341,7 @@ async function runSingleAgent(
 
       const finish = (code: number) => {
         if (timeout) clearTimeout(timeout)
+        stopUpdates()
         resolve(code)
       }
 
@@ -286,18 +353,49 @@ async function runSingleAgent(
         }, 5000)
       }, DEFAULT_TIMEOUT_MS)
 
+      type ChildEvent = {
+        type?: string
+        message?: Message
+        assistantMessageEvent?: { type?: string; delta?: string }
+        toolName?: string
+        args?: unknown
+      }
+
       const processLine = (line: string) => {
         if (!line.trim()) return
-        let event: { type?: string; message?: Message }
+        let event: ChildEvent
         try {
-          event = JSON.parse(line) as { type?: string; message?: Message }
+          event = JSON.parse(line) as ChildEvent
         } catch {
+          return
+        }
+
+        // Pi wraps streaming deltas in message_update. Without these the box shows nothing
+        // until a whole message completes, which on a reasoning model is minutes of silence.
+        if (event.type === 'message_update') {
+          const am = event.assistantMessageEvent
+          if (typeof am?.delta !== 'string' || am.delta === '') return
+          if (am.type === 'text_delta') liveText = appendPreviewTail(liveText, am.delta)
+          else if (am.type === 'thinking_delta') liveThinking = appendPreviewTail(liveThinking, am.delta)
+          else return
+          scheduleUpdate()
+          return
+        }
+
+        if (event.type === 'tool_execution_start') {
+          liveToolName = typeof event.toolName === 'string' ? event.toolName : undefined
+          liveToolPreview = summarizeToolArgs(event.args)
+          scheduleUpdate()
           return
         }
 
         if (event.type === 'message_end' && event.message) {
           const msg = event.message
           currentResult.messages.push(msg)
+          // The finished message is the source of truth now; drop the streaming tail so the
+          // preview does not show it twice.
+          liveText = ''
+          liveThinking = ''
 
           if (msg.role === 'assistant') {
             currentResult.usage.turns++

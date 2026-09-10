@@ -32,6 +32,7 @@ export type AgentTaskSpec = {
   groupRunId?: string
   stepIndex?: number
   lastPartialText?: string
+  lastPartialThinking?: string
   lastToolName?: string
   lastToolPreview?: string
 }

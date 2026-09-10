@@ -44,6 +44,7 @@ export function handleSubagentHostEvent(conversationId: string, event: SyloSubag
     case 'subagent_run_update':
       store.updateAgentTaskProgress(event.runId, {
         partialText: event.partialText,
+        partialThinking: event.partialThinking,
         toolName: event.toolName,
         toolPreview: event.toolPreview,
       })

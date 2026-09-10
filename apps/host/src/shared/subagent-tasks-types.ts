@@ -22,6 +22,8 @@ export type SyloSubagentHostEvent =
       type: 'subagent_run_update'
       runId: string
       partialText?: string
+      /** Tail of the child's reasoning channel, so a long silent think still shows progress. */
+      partialThinking?: string
       toolName?: string
       toolPreview?: string
     }
@@ -69,6 +71,7 @@ export type AgentTaskSpec = {
   groupRunId: string
   stepIndex?: number
   lastPartialText?: string
+  lastPartialThinking?: string
   lastToolName?: string
   lastToolPreview?: string
 }

@@ -3,6 +3,7 @@ import { SYLO_MODEL_PROVIDERS, SYLO_MODEL_PROVIDER_LABELS, CHATGPT_CODEX_PROVIDE
 import { cn } from '../lib/cn'
 import { select, input, mutedText } from '../panels/ui-classes'
 import { normalizeOllamaOriginUi, OllamaModelSelect } from '../panels/ollama-ui'
+import { ChatSubagentModelsModal } from './ChatSubagentModelsModal'
 
 /**
  * Per-chat model selector shown in the chat status row. Each chat stores an
@@ -78,6 +79,7 @@ export function ChatModelBar({
   // image-fallback dropdown lists only vision models.
   const [visionTags, setVisionTags] = useState<string[]>([])
   const [visionTagsLoading, setVisionTagsLoading] = useState(false)
+  const [subagentModalOpen, setSubagentModalOpen] = useState(false)
 
   // Load global defaults (prefs) once.
   useEffect(() => {
@@ -449,8 +451,27 @@ export function ChatModelBar({
           </>
         ) : null}
 
+        {conversationId ?
+          <button
+            type="button"
+            className="h-7 shrink-0 cursor-pointer rounded-md border border-border bg-transparent px-1.5 text-[0.72rem] leading-none text-text-primary hover:border-accent/50 hover:bg-bg-tertiary"
+            onClick={() => setSubagentModalOpen(true)}
+            aria-label="Subagent models for this chat"
+            title="Subagent models and thinking — pick a model and think level per role for this chat"
+          >
+            subagents
+          </button>
+        : null}
+
         {saving ? <span className={cn(mutedText, 'text-[0.7rem]')}>saving…</span> : null}
       </div>
+
+      {subagentModalOpen && conversationId ? (
+        <ChatSubagentModelsModal
+          conversationId={conversationId}
+          onClose={() => setSubagentModalOpen(false)}
+        />
+      ) : null}
     </div>
   )
 }

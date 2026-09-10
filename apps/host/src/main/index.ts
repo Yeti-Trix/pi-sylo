@@ -31,6 +31,11 @@ import { BUILD_INFO } from '../generated/build-info.js'
 import { DefaultPackageManager, SettingsManager } from '@earendil-works/pi-coding-agent'
 import { SYLO_MODEL_PROVIDERS, CHATGPT_CODEX_MODELS } from '../shared/chatgpt-codex.js'
 import {
+  mergeSubagentPins,
+  parseSubagentPins,
+  serializeSubagentPins,
+} from '../shared/subagent-model-pin.js'
+import {
   SYLO_SURFACE_SCHEME,
   syloSurfaceRelativePath,
 } from '../shared/sylo-surface-protocol.js'
@@ -221,6 +226,7 @@ import { discoverSkillRoutes, filterSkillRoutesForSidebar } from './skill-routes
 import { readSkillDataJson, writeSkillDataJson, SKILL_DATA_QUOTA_BYTES } from './skill-data-store.js'
 import { lintSkillSurfacesBatch } from './skill-surface-lint.js'
 import { removeStandaloneSkillFolder } from './standalone-skill-removal.js'
+import { listSubagentAgents } from './subagent-agents.js'
 import {
   handleSubagentHostEvent,
   initSubagentTaskHostSession,
@@ -1972,6 +1978,8 @@ function effectiveModelForConversation(convId: string): {
   imageModelProvider: string
   /** null = Pi default thinking level for the resolved model. */
   thinkingLevel: string | null
+  /** Serialized per-agent subagent pins (global pins + this chat's overrides). */
+  subagentModelsByAgent: string
 } {
   const conv = db.getConversation(convId)
   const gProvider = (db.getPref('sylo.model_provider', SYLO_DEFAULT_MODEL_PROVIDER) as string).trim()
@@ -1996,7 +2004,26 @@ function effectiveModelForConversation(convId: string): {
     conv?.thinking_level != null && conv.thinking_level.trim() !== '' ?
       conv.thinking_level.trim()
     : null
-  return { provider, modelId, imageModelId, imageModelProvider, thinkingLevel }
+  return {
+    provider,
+    modelId,
+    imageModelId,
+    imageModelProvider,
+    thinkingLevel,
+    subagentModelsByAgent: subagentModelsForConversation(convId),
+  }
+}
+
+/**
+ * Subagent model pins the broker should use for this conversation: the global
+ * Settings → Subagents pins with the chat's own pins layered on top. Serialized here
+ * rather than in the broker so the extension only ever sees one resolved map.
+ */
+function subagentModelsForConversation(convId: string | undefined): string {
+  const globalPins = parseSubagentPins(db.getPref('sylo.subagents.model_by_agent', ''))
+  const chatPins =
+    convId ? parseSubagentPins(db.getConversation(convId)?.subagent_models_json) : {}
+  return serializeSubagentPins(mergeSubagentPins(globalPins, chatPins))
 }
 
 /** Fingerprint so a model change forces a broker switchSession even if the session path is unchanged. */
@@ -2006,8 +2033,9 @@ function modelFingerprint(m: {
   imageModelId: string
   imageModelProvider: string
   thinkingLevel: string | null
+  subagentModelsByAgent: string
 }): string {
-  return `${m.provider}\0${m.modelId}\0${m.imageModelId}\0${m.imageModelProvider}\0${m.thinkingLevel ?? ''}`
+  return `${m.provider}\0${m.modelId}\0${m.imageModelId}\0${m.imageModelProvider}\0${m.thinkingLevel ?? ''}\0${m.subagentModelsByAgent}`
 }
 
 async function ensureBrokerSessionForConversation(
@@ -2053,7 +2081,8 @@ async function ensureBrokerSessionForConversation(
     modelId: eff.modelId,
     imageModelId: eff.imageModelId,
     imageModelProvider: eff.imageModelProvider,
-    thinkingLevel: eff.thinkingLevel ?? undefined,
+    thinkingLevel: eff.thinkingLevel ?? '',
+    subagentModelsByAgent: eff.subagentModelsByAgent,
   })
   if (supervisor === broker) {
     brokerFocusedConversationId = convId
@@ -3157,6 +3186,7 @@ function buildBrokerSupervisorOptions(
     imageModelId: (db.getPref('sylo.image_model_id', '') as string).trim(),
     imageModelProvider: (db.getPref('sylo.image_model_provider', 'ollama') as string).trim(),
     thinkingLevel: null,
+    subagentModelsByAgent: subagentModelsForConversation(undefined),
   }
   const modelId = eff.modelId
   const modelProvider = eff.provider
@@ -3172,6 +3202,8 @@ function buildBrokerSupervisorOptions(
     initialSessionCwd: initialBind.sessionCwd,
         modelProvider,
     modelId,
+    thinkingLevel: eff.thinkingLevel ?? '',
+    subagentModelsByAgent: eff.subagentModelsByAgent,
     disabledSkillPaths: initialBind.mergedDisabled.skillPaths,
     disabledExtensionPaths: initialBind.mergedDisabled.extensionPaths,
     disabledTools: initialBind.mergedDisabled.disabledTools,
@@ -3687,6 +3719,36 @@ function registerIpc(): void {
       // Resolved effective model (per-chat ?? global prefs).
       effective: effectiveModelForConversation(id),
     }
+  })
+
+  ipcMain.handle('conversations:getSubagentModels', (_e, id: unknown) => {
+    const cid = typeof id === 'string' ? id.trim() : ''
+    if (!cid) return null
+    return {
+      /** This chat's own pins only — the modal shows inherit for everything else. */
+      chat: parseSubagentPins(db.getConversation(cid)?.subagent_models_json),
+      /** Settings → Subagents pins, so the modal can name what inherit resolves to. */
+      global: parseSubagentPins(db.getPref('sylo.subagents.model_by_agent', '')),
+      allThinking: String(db.getPref('sylo.subagents.thinking_level', '') || '').trim(),
+      chatThinking: effectiveModelForConversation(cid).thinkingLevel,
+    }
+  })
+  ipcMain.handle('conversations:setSubagentModels', async (_e, id: unknown, pins: unknown) => {
+    const cid = typeof id === 'string' ? id.trim() : ''
+    if (!cid) return { ok: false as const, error: 'missing_id' }
+    const cleaned = parseSubagentPins(typeof pins === 'string' ? pins : JSON.stringify(pins ?? {}))
+    db.setConversationSubagentModels(
+      cid,
+      Object.keys(cleaned).length > 0 ? JSON.stringify(cleaned) : null,
+    )
+    // Republish to the broker now when this chat is focused and idle; otherwise the
+    // model fingerprint carries it into the next switchSession.
+    try {
+      await ensureBrokerSessionForConversation(cid, { phase: 'ui-focus' })
+    } catch {
+      /* broker not ready — persisted; applies on next focus/turn */
+    }
+    return { ok: true as const }
   })
 
   /** Thinking levels Pi supports for a concrete provider/model (empty target → fallback list flag). */
@@ -4568,6 +4630,15 @@ function registerIpc(): void {
       orphanedCount: subagentTaskStore.countOrphanedAgentTasks(),
       extensionEnabled,
     }
+  })
+  ipcMain.handle('tasks:agents', () => {
+    const scope = String(db.getPref('sylo.subagents.agent_scope', 'user') || 'user').trim()
+    return listSubagentAgents({
+      bundledDir: join(SYLO_REPO_ROOT, 'packages/sylo-subagents/agents'),
+      userAgentsDir: join(hostAgentDir(), 'agents'),
+      projectCwd: effectivePiCwdForWorkspace(activeWorkspaceId()),
+      scope: scope === 'both' || scope === 'project' ? scope : 'user',
+    })
   })
 
   ipcMain.handle('schedules:list', (_e, workspaceId: unknown) => {

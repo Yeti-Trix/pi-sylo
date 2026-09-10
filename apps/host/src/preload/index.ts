@@ -58,6 +58,23 @@ contextBridge.exposeInMainWorld('sylo', {
           }
         | null
       >,
+    getSubagentModels: (id: string) =>
+      ipcRenderer.invoke('conversations:getSubagentModels', id) as Promise<
+        | {
+            chat: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>
+            global: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>
+            allThinking: string
+            chatThinking: string | null
+          }
+        | null
+      >,
+    setSubagentModels: (
+      id: string,
+      pins: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>,
+    ) =>
+      ipcRenderer.invoke('conversations:setSubagentModels', id, pins) as Promise<
+        { ok: true } | { ok: false; error: string }
+      >,
     delete: (id: string) => ipcRenderer.invoke('conversations:delete', id),
   },
   workspaces: {
@@ -1225,6 +1242,10 @@ contextBridge.exposeInMainWorld('sylo', {
         orphanedCount: number
         extensionEnabled: boolean
       }>,
+    agents: () =>
+      ipcRenderer.invoke('tasks:agents') as Promise<
+        Array<{ name: string; description: string; source: 'builtin' | 'user' | 'project' }>
+      >,
     onLifecycle: (cb: (payload: unknown) => void) => {
       const ch = (_e: unknown, payload: unknown) => cb(payload)
       ipcRenderer.on('subagents:lifecycle', ch)

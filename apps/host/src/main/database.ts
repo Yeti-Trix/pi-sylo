@@ -42,6 +42,11 @@ export interface ConversationRow {
   image_model_provider: string | null
   /** Per-chat thinking-level override (off/minimal/low/medium/high/[xhigh|max]; null = Pi default). */
   thinking_level: string | null
+  /**
+   * Per-chat subagent model pins as JSON `{ "<agent>": { provider, modelId } }`.
+   * null or absent keys inherit the global Settings → Subagents pins.
+   */
+  subagent_models_json: string | null
 }
 
 /** Sylo workspace: Pi cwd segment + chat grouping + optional per-workspace excluded capabilities. */
@@ -285,6 +290,9 @@ function migrateLegacySchema(d: Database.Database, userDataPath: string): void {
   }
   if (!tableHasColumn(d, 'conversations', 'thinking_level')) {
     d.exec('ALTER TABLE conversations ADD COLUMN thinking_level TEXT')
+  }
+  if (!tableHasColumn(d, 'conversations', 'subagent_models_json')) {
+    d.exec('ALTER TABLE conversations ADD COLUMN subagent_models_json TEXT')
   }
 
 
@@ -702,13 +710,13 @@ export function listConversations(workspaceId?: string): ConversationRow[] {
   if (workspaceId === undefined) {
     return getDb()
       .prepare(
-        'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level FROM conversations ORDER BY updated_at DESC',
+        'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, subagent_models_json FROM conversations ORDER BY updated_at DESC',
       )
       .all() as ConversationRow[]
   }
   return getDb()
     .prepare(
-      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level FROM conversations WHERE workspace_id = ? ORDER BY updated_at DESC',
+      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, subagent_models_json FROM conversations WHERE workspace_id = ? ORDER BY updated_at DESC',
     )
     .all(workspaceId) as ConversationRow[]
 }
@@ -717,7 +725,7 @@ export function listConversations(workspaceId?: string): ConversationRow[] {
 export function listConversationsUpdatedBefore(updatedBeforeMs: number): ConversationRow[] {
   return getDb()
     .prepare(
-      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level FROM conversations WHERE updated_at < ? ORDER BY updated_at ASC',
+      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, subagent_models_json FROM conversations WHERE updated_at < ? ORDER BY updated_at ASC',
     )
     .all(updatedBeforeMs) as ConversationRow[]
 }
@@ -741,7 +749,7 @@ export function findLatestEmptyConversationId(workspaceId: string): string | und
 export function getConversation(id: string): ConversationRow | undefined {
   return getDb()
     .prepare(
-      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level FROM conversations WHERE id = ?',
+      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, subagent_models_json FROM conversations WHERE id = ?',
     )
     .get(id) as ConversationRow | undefined
 }
@@ -755,7 +763,7 @@ export function createConversation(title = '', workspaceId?: string): Conversati
       'INSERT INTO conversations (id, title, created_at, updated_at, workspace_id, pi_session_relpath) VALUES (?, ?, ?, ?, ?, NULL)',
     )
     .run(id, title, now, now, wid)
-  return { id, title, created_at: now, updated_at: now, workspace_id: wid, pi_session_relpath: null, model_provider: null, model_id: null, image_model_id: null, image_model_provider: null, thinking_level: null }
+  return { id, title, created_at: now, updated_at: now, workspace_id: wid, pi_session_relpath: null, model_provider: null, model_id: null, image_model_id: null, image_model_provider: null, thinking_level: null, subagent_models_json: null }
 }
 
 export function setConversationWorkspace(id: string, workspaceId: string): void {
@@ -801,6 +809,13 @@ export function setConversationModel(id: string, model: ConversationModelOverrid
       now,
       id,
     )
+}
+
+/** Persist per-chat subagent model pins. Empty/null clears them back to the global pins. */
+export function setConversationSubagentModels(id: string, json: string | null): void {
+  getDb()
+    .prepare('UPDATE conversations SET subagent_models_json = ?, updated_at = ? WHERE id = ?')
+    .run(json && json.trim() ? json.trim() : null, Date.now(), id)
 }
 
 const WORKSPACE_COLUMNS = `id, name, pi_cwd, path_segment, disabled_skill_paths_json,

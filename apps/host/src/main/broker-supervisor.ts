@@ -185,6 +185,10 @@ export interface BrokerConfig {
   initialSessionCwd: string
   modelProvider: string
     modelId: string
+  /** Per-chat thinking level; empty means Pi default. Published so child subagents can inherit it. */
+  thinkingLevel?: string
+  /** Serialized `{ "<agent>": { provider, modelId, thinkingLevel? } }` — global pins plus the chat's own. */
+  subagentModelsByAgent?: string
   /** Sylo ~/.sylo/disabled.json — broker filters these from capability snapshots. */
   disabledSkillPaths?: string[]
   disabledExtensionPaths?: string[]
@@ -293,6 +297,7 @@ export class BrokerSupervisor {
       initialSessionCwd: cfg.initialSessionCwd,
       modelProvider: cfg.modelProvider,
             modelId: cfg.modelId,
+      subagentModelsByAgent: cfg.subagentModelsByAgent ?? '',
       disabledSkillPaths: cfg.disabledSkillPaths ?? [],
       disabledExtensionPaths: cfg.disabledExtensionPaths ?? [],
       disabledTools: cfg.disabledTools ?? [],
@@ -347,6 +352,7 @@ export class BrokerSupervisor {
         SYLO_PI_AGENT_DIR: this.cfg.agentDir,
         SYLO_MODEL_PROVIDER: this.cfg.modelProvider,
                 SYLO_MODEL_ID: this.cfg.modelId,
+        SYLO_THINKING_LEVEL: this.cfg.thinkingLevel ?? '',
         ...(this.cfg.skillSurfaceExtension ?
           { SYLO_SKILL_SURFACE_EXTENSION: this.cfg.skillSurfaceExtension }
         : {}),
@@ -357,6 +363,26 @@ export class BrokerSupervisor {
               this.cfg.syloDbPath,
               'sylo.subagents.agent_scope',
               'user',
+            ),
+            // Empty pair means "follow the chat model"; see subagentModelCliArgs.
+            SYLO_SUBAGENTS_MODEL_PROVIDER: readSyloPrefString(
+              this.cfg.syloDbPath,
+              'sylo.subagents.model_provider',
+              '',
+            ),
+            SYLO_SUBAGENTS_MODEL_ID: readSyloPrefString(
+              this.cfg.syloDbPath,
+              'sylo.subagents.model_id',
+              '',
+            ),
+            // JSON `{ "<agent>": { provider, modelId } }` — overrides the pair above per agent.
+            // Resolved by the host (global pins + the focused chat's own), not read here,
+            // so the chat-level override and the Settings default have one merge point.
+            SYLO_SUBAGENTS_MODEL_BY_AGENT: this.cfg.subagentModelsByAgent ?? '',
+            SYLO_SUBAGENTS_THINKING: readSyloPrefString(
+              this.cfg.syloDbPath,
+              'sylo.subagents.thinking_level',
+              '',
             ),
           }
         : {}),
@@ -463,6 +489,8 @@ export class BrokerSupervisor {
       /** Per-chat main model override (empty = keep current). */
       modelProvider?: string
       modelId?: string
+      /** Resolved subagent pins for the switched-to chat; empty string clears them. */
+      subagentModelsByAgent?: string
             /** Per-chat image (fallback) model override (empty = keep current). */
       imageModelId?: string
       imageModelProvider?: string
@@ -503,6 +531,7 @@ export class BrokerSupervisor {
           alwaysApplySkillPaths: options?.alwaysApplySkillPaths,
           modelProvider: options?.modelProvider,
           modelId: options?.modelId,
+          subagentModelsByAgent: options?.subagentModelsByAgent,
           imageModelId: options?.imageModelId,
           imageModelProvider: options?.imageModelProvider,
           thinkingLevel: options?.thinkingLevel,

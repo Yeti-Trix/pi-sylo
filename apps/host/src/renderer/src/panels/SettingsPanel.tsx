@@ -11,6 +11,11 @@ import {
   SYLO_MODEL_PROVIDERS,
   SYLO_MODEL_PROVIDER_LABELS,
 } from '../../../shared/chatgpt-codex'
+import {
+  parseSubagentPins,
+  SUBAGENT_THINKING_LEVELS,
+  type SubagentModelPin,
+} from '../../../shared/subagent-model-pin'
 import { cn } from '../lib/cn'
 import { normalizeOllamaOriginUi, OllamaModelSelect } from './ollama-ui'
 import { WeeklySweepCard } from './WeeklySweepCard'
@@ -54,6 +59,100 @@ async function revealDirectory(
   }
 }
 
+type SubagentAgentInfo = { name: string; description: string; source: 'builtin' | 'user' | 'project' }
+
+/** Provider + model pair and optional thinking, shared by the all-subagents default and each per-agent override. */
+function SubagentModelFields({
+  idPrefix,
+  label,
+  inheritLabel,
+  thinkingInheritLabel,
+  pin,
+  onChange,
+  ollamaTags,
+}: {
+  idPrefix: string
+  label: string
+  inheritLabel: string
+  thinkingInheritLabel: string
+  pin: SubagentModelPin
+  onChange: (next: SubagentModelPin) => void
+  ollamaTags: string[]
+}): React.ReactElement {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <select
+        className={cn(select, 'min-w-[160px] flex-none')}
+        value={pin.provider}
+        // Model ids do not carry across providers, so switching clears the pair.
+        onChange={(e) => onChange({ ...pin, provider: e.target.value, modelId: '' })}
+        aria-label={`${label} provider`}
+      >
+        <option value="">{inheritLabel}</option>
+        {SYLO_MODEL_PROVIDERS.map((p) => (
+          <option key={p} value={p}>
+            {SYLO_MODEL_PROVIDER_LABELS[p]}
+          </option>
+        ))}
+      </select>
+
+      {pin.provider === '' ?
+        null
+      : pin.provider === 'ollama' ?
+        <OllamaModelSelect
+          id={`${idPrefix}-ollama-model`}
+          className="min-w-[180px] flex-1"
+          modelId={pin.modelId}
+          setModelId={(v) => onChange({ ...pin, modelId: v })}
+          ollamaTags={ollamaTags}
+          emptyOptionLabel="Select a model…"
+        />
+      : pin.provider === CHATGPT_CODEX_PROVIDER ?
+        <select
+          id={`${idPrefix}-chatgpt-model`}
+          className={cn(select, 'min-w-[180px] flex-1')}
+          value={pin.modelId}
+          onChange={(e) => onChange({ ...pin, modelId: e.target.value })}
+          aria-label={`${label} model`}
+        >
+          <option value="">Select a model…</option>
+          {CHATGPT_CODEX_MODELS.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name}
+            </option>
+          ))}
+        </select>
+      : <input
+          id={`${idPrefix}-model-id`}
+          className={cn(input, 'min-w-[180px] flex-1')}
+          value={pin.modelId}
+          onChange={(e) => onChange({ ...pin, modelId: e.target.value })}
+          placeholder="Model id"
+          aria-label={`${label} model`}
+        />
+      }
+
+      <select
+        id={`${idPrefix}-thinking`}
+        className={cn(select, 'w-auto min-w-[140px] flex-none')}
+        value={pin.thinkingLevel ?? ''}
+        onChange={(e) => {
+          const thinkingLevel = e.target.value
+          onChange(thinkingLevel ? { ...pin, thinkingLevel } : { provider: pin.provider, modelId: pin.modelId })
+        }}
+        aria-label={`${label} thinking`}
+      >
+        <option value="">{thinkingInheritLabel}</option>
+        {SUBAGENT_THINKING_LEVELS.map((lvl) => (
+          <option key={lvl} value={lvl}>
+            think: {lvl}
+          </option>
+        ))}
+      </select>
+    </div>
+  )
+}
+
 export function SettingsPanel({
   onChanged,
   diagnostics,
@@ -81,6 +180,12 @@ export function SettingsPanel({
   const [concurrentTurns, setConcurrentTurns] = useState(diagnostics.concurrentTurns)
   const [chatOnly, setChatOnly] = useState(diagnostics.chatOnly)
   const [allowProjectAgents, setAllowProjectAgents] = useState(false)
+  const [subagentProvider, setSubagentProvider] = useState('')
+  const [subagentModelId, setSubagentModelId] = useState('')
+  const [subagentThinking, setSubagentThinking] = useState('')
+  const [subagentModelSaving, setSubagentModelSaving] = useState(false)
+  const [subagentAgents, setSubagentAgents] = useState<SubagentAgentInfo[]>([])
+  const [agentPins, setAgentPins] = useState<Record<string, SubagentModelPin>>({})
   const [subagentDiag, setSubagentDiag] = useState<{
     runningCount: number
     orphanedCount: number
@@ -191,8 +296,25 @@ export function SettingsPanel({
     void (async () => {
       const scope = (await window.sylo.prefs.get('sylo.subagents.agent_scope', 'user')) as string
       setAllowProjectAgents(scope.trim() === 'both')
+      const p = (await window.sylo.prefs.get('sylo.subagents.model_provider', '')) as string
+      const m = (await window.sylo.prefs.get('sylo.subagents.model_id', '')) as string
+      const t = (await window.sylo.prefs.get('sylo.subagents.thinking_level', '')) as string
+      setSubagentProvider(p.trim())
+      setSubagentModelId(m.trim())
+      setSubagentThinking(t.trim())
+      setAgentPins(
+        parseSubagentPins((await window.sylo.prefs.get('sylo.subagents.model_by_agent', '')) as string),
+      )
     })()
   }, [])
+
+  // Re-listed on scope change: allowing project agents can add personas to pin.
+  useEffect(() => {
+    void window.sylo.tasks
+      .agents()
+      .then(setSubagentAgents)
+      .catch(() => setSubagentAgents([]))
+  }, [allowProjectAgents])
 
   useEffect(() => {
     void window.sylo.tasks.diagnostics().then(setSubagentDiag).catch(() => setSubagentDiag(null))
@@ -514,6 +636,66 @@ export function SettingsPanel({
     }
     // Chat caption + AgentSession read the running broker; prefs alone do not hot-swap the model.
     await window.sylo.broker.restart()
+    onChanged()
+  }
+
+  const saveSubagentModel = async () => {
+    const defaultPin = {
+      provider: subagentProvider.trim(),
+      modelId: subagentModelId.trim(),
+      thinkingLevel: subagentThinking.trim(),
+    }
+    // A provider with no model would spawn the Pi CLI against a model id that provider does
+    // not serve, so every model pin is all-or-nothing. Thinking can stand alone.
+    const incomplete: string[] = []
+    if (defaultPin.provider && !defaultPin.modelId) incomplete.push('All subagents')
+    const pinned: Record<string, SubagentModelPin> = {}
+    for (const agent of subagentAgents) {
+      const pin = agentPins[agent.name]
+      const provider = pin?.provider.trim() ?? ''
+      const modelId = pin?.modelId.trim() ?? ''
+      const thinkingLevel = pin?.thinkingLevel?.trim() ?? ''
+      if (!provider && !thinkingLevel) continue
+      if (provider && !modelId) {
+        incomplete.push(agent.name)
+        continue
+      }
+      pinned[agent.name] = thinkingLevel ? { provider, modelId, thinkingLevel } : { provider, modelId }
+    }
+    if (incomplete.length > 0) {
+      window.alert(
+        `Pick a model for: ${incomplete.join(', ')} — or set the provider back to the inherit option.`,
+      )
+      return
+    }
+
+    const usesChatgpt =
+      defaultPin.provider === CHATGPT_CODEX_PROVIDER ||
+      Object.values(pinned).some((p) => p.provider === CHATGPT_CODEX_PROVIDER)
+    if (usesChatgpt) {
+      const st = await window.sylo.chatgpt.status()
+      if (!st.connected) {
+        window.alert('Sign in with ChatGPT under Model (Pi) first — subagents use the same login.')
+        return
+      }
+    }
+
+    setSubagentModelSaving(true)
+    await window.sylo.prefs.set('sylo.subagents.model_provider', defaultPin.provider)
+    await window.sylo.prefs.set(
+      'sylo.subagents.model_id',
+      defaultPin.provider ? defaultPin.modelId : '',
+    )
+    await window.sylo.prefs.set('sylo.subagents.thinking_level', defaultPin.thinkingLevel)
+    await window.sylo.prefs.set(
+      'sylo.subagents.model_by_agent',
+      Object.keys(pinned).length > 0 ? JSON.stringify(pinned) : '',
+    )
+    if (!defaultPin.provider) setSubagentModelId('')
+    setAgentPins(pinned)
+    // The subagent extension reads these from the broker's env, which is frozen at fork.
+    await window.sylo.broker.restart()
+    setSubagentModelSaving(false)
     onChanged()
   }
 
@@ -1382,6 +1564,81 @@ export function SettingsPanel({
           Off by default. When enabled, the agent may use repo-local personas after you confirm a prompt for
           untrusted projects. Restart broker applies immediately when toggled.
         </p>
+
+        <div className="mt-3 flex flex-col gap-2.5 rounded-md border border-[color-mix(in_srgb,var(--sylo-border)_70%,transparent)] px-3 py-2.5">
+          <span className={fieldLabel}>Subagent model</span>
+          <p className={caption}>
+            Each subagent spawns its own Pi session, so it does not have to share the chat&apos;s model or
+            thinking. Pin a local model here to keep delegation off your cloud quota, or a cloud model to
+            make it faster than local hardware allows. Defaults to whatever the chat is using.
+          </p>
+          <label className="flex flex-col gap-1">
+            <span className={fieldLabel}>All subagents</span>
+            <SubagentModelFields
+              idPrefix="sylo-subagent-default"
+              label="All subagents"
+              inheritLabel="Follow the chat model"
+              thinkingInheritLabel="Follow the chat thinking"
+              pin={{
+                provider: subagentProvider,
+                modelId: subagentModelId,
+                thinkingLevel: subagentThinking || undefined,
+              }}
+              onChange={(next) => {
+                setSubagentProvider(next.provider)
+                setSubagentModelId(next.modelId)
+                setSubagentThinking(next.thinkingLevel ?? '')
+              }}
+              ollamaTags={ollamaTags}
+            />
+          </label>
+
+          {subagentAgents.length > 0 ?
+            <div className="flex flex-col gap-2 border-t border-border pt-2.5">
+              <span className={fieldLabel}>Per agent</span>
+              <p className={caption}>
+                Overrides the row above for one persona — a small local model for{' '}
+                <code>scout</code> recon, something stronger for <code>planner</code> or{' '}
+                <code>reviewer</code>. Left on inherit, an agent uses the setting above.
+              </p>
+              {subagentAgents.map((agent) => (
+                <div key={agent.name} className="flex flex-col gap-1">
+                  <span className="text-[0.82rem] text-text-primary">
+                    <code className="font-mono text-[0.86em]">{agent.name}</code>
+                    {agent.source !== 'builtin' ?
+                      <span className={cn(mutedText, ' text-[0.74rem]')}> · {agent.source}</span>
+                    : null}
+                  </span>
+                  <SubagentModelFields
+                    idPrefix={`sylo-subagent-${agent.name}`}
+                    label={agent.name}
+                    inheritLabel="Use the setting above"
+                    thinkingInheritLabel={
+                      subagentThinking ? `Use the setting above (${subagentThinking})` : 'Use the setting above'
+                    }
+                    pin={agentPins[agent.name] ?? { provider: '', modelId: '' }}
+                    onChange={(next) =>
+                      setAgentPins((prev) => ({ ...prev, [agent.name]: next }))
+                    }
+                    ollamaTags={ollamaTags}
+                  />
+                </div>
+              ))}
+            </div>
+          : null}
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className={btnGhostSm}
+              onClick={() => void saveSubagentModel()}
+              disabled={subagentModelSaving}
+            >
+              {subagentModelSaving ? 'Restarting broker…' : 'Save subagent models'}
+            </button>
+            <span className={caption}>Restarts the broker so the next run picks these up.</span>
+          </div>
+        </div>
         <div className="mt-3 rounded-md border border-[color-mix(in_srgb,var(--sylo-border)_70%,transparent)] px-3 py-2.5">
           <p className={cn(caption, 'mb-1.5 font-medium text-text-primary')}>Diagnostics</p>
           <ul className={cn(caption, 'm-0 list-inside list-disc space-y-1')}>

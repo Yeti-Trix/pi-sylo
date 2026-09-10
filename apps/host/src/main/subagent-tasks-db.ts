@@ -277,6 +277,7 @@ export function updateAgentTaskProgress(
   id: string,
   patch: {
     partialText?: string
+    partialThinking?: string
     toolName?: string
     toolPreview?: string
   },
@@ -296,6 +297,7 @@ export function updateAgentTaskProgress(
     }
   }
   if (patch.partialText !== undefined) spec.lastPartialText = patch.partialText
+  if (patch.partialThinking !== undefined) spec.lastPartialThinking = patch.partialThinking
   if (patch.toolName !== undefined) spec.lastToolName = patch.toolName
   if (patch.toolPreview !== undefined) spec.lastToolPreview = patch.toolPreview
 
