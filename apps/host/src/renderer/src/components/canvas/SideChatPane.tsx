@@ -67,6 +67,8 @@ export function SideChatPane({
   const streamBufRef = useRef('')
   const [streamText, setStreamText] = useState('')
   const listRef = useRef<HTMLDivElement | null>(null)
+  /** Textarea ref for Cursor-style auto-grow (1 line at rest → 4 lines max). */
+  const taRef = useRef<HTMLTextAreaElement | null>(null)
   const [pickerOpen, setPickerOpen] = useState(false)
   const [override, setOverride] = useState<SideOverride>(SIDE_NULL_OVERRIDE)
   /** Host-reported effective model for the child (per-chat ?? global ?? default). */
@@ -158,6 +160,14 @@ export function SideChatPane({
       dead = true
     }
   }, [childId])
+
+  // Auto-grow the composer with content (1 line at rest → 4 lines, then scroll).
+  useEffect(() => {
+    const el = taRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(el.scrollHeight, 96)}px`
+  }, [input])
 
   // Ollama tags for the picker's model dropdown (lazy — first open only).
   useEffect(() => {
@@ -398,7 +408,8 @@ export function SideChatPane({
           {override.model_id?.trim() || effModel?.modelId || 'model'}
         </button>
         <textarea
-          className="max-h-[120px] min-h-9 flex-1 resize-none border-0 bg-transparent px-0 py-1 font-[inherit] text-[0.9rem] leading-[1.5] text-text-primary placeholder:text-text-muted outline-none"
+          ref={taRef}
+          className="max-h-[96px] min-h-9 flex-1 resize-none border-0 bg-transparent px-0 py-1 font-[inherit] text-[0.9rem] leading-[1.5] text-text-primary placeholder:text-text-muted outline-none"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {

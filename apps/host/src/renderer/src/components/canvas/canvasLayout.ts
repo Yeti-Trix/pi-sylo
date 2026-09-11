@@ -22,3 +22,11 @@ export function clampCanvasSize(size: number): number {
   )
   return Math.min(max, Math.max(min, Math.round(size)))
 }
+// Workbench (canvas docked): the CHAT pane is the fixed-width side and the
+// canvas takes the remaining space — Cursor-style proportions.
+export const CHAT_PANE_SIZE_DEFAULT = 600
+export const CHAT_PANE_SIZE_MIN = 380
+export const CHAT_PANE_SIZE_MAX = 960
+export function clampChatPaneSize(v: number): number {
+  return Math.min(CHAT_PANE_SIZE_MAX, Math.max(CHAT_PANE_SIZE_MIN, Math.round(v)))
+}

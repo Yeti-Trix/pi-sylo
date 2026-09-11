@@ -1087,7 +1087,7 @@ export const chatInputRow =
   'mx-5 mb-3 mt-1 flex items-end gap-2 rounded-xl border border-border bg-[#1e1e1e] px-3 py-2.5'
 
 export const chatInputTextarea =
-  'max-h-[160px] min-h-9 flex-1 resize-none border-0 bg-transparent px-0 py-1 font-[inherit] text-[0.92rem] leading-[1.5] text-text-primary placeholder:text-text-muted focus:outline-none'
+  'max-h-[96px] min-h-9 flex-1 resize-none border-0 bg-transparent px-0 py-1 font-[inherit] text-[0.92rem] leading-[1.5] text-text-primary placeholder:text-text-muted focus:outline-none'
 
 export const chatInputSendBtn =
   'flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center self-end rounded-full border-none bg-white p-0 text-[#111111] transition-[background,opacity] duration-[120ms] hover:bg-[#e2e2e2] disabled:cursor-not-allowed disabled:opacity-40'

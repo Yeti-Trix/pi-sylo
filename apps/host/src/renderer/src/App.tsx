@@ -40,8 +40,8 @@ import type { AppTabKind } from './components/canvas/canvasTypes'
 import { APP_TAB_KIND_LABEL, tabKind } from './components/canvas/canvasTypes'
 import { storedSrcForTab } from './components/canvas/BrowserPane'
 import {
-  CANVAS_SIZE_DEFAULT,
-  clampCanvasSize,
+  CHAT_PANE_SIZE_DEFAULT,
+  clampChatPaneSize,
 } from './components/canvas/canvasLayout'
 import { SYLO_SKILL_SURFACE_CAPABILITY_DESCRIPTOR } from './skill-surface/hostCapabilityDescriptor'
 import { SkillSurfaceSandbox } from './skill-surface/iframe-host'
@@ -984,7 +984,7 @@ export function App(): React.ReactElement {
   // the canvas show gates registered inside the hook (they read the ref, not
   // a stale closure).
   const activeWorkspaceCwdRef = useRef<string>('')
-  const [canvasSize, setCanvasSize] = useState(CANVAS_SIZE_DEFAULT)
+  const [chatPaneSize, setChatPaneSize] = useState(CHAT_PANE_SIZE_DEFAULT)
   const canvasResizeRef = useRef<{
     pointerId: number
     startX: number
@@ -1644,8 +1644,10 @@ export function App(): React.ReactElement {
     await refreshPrefsDiag()
     const savedCanvasOpen = (await window.sylo.prefs.get('sylo.canvas.open', false)) === true
     setCanvasOpen(savedCanvasOpen)
-    const savedCanvasSize = Number(await window.sylo.prefs.get('sylo.canvas.size', CANVAS_SIZE_DEFAULT))
-    setCanvasSize(clampCanvasSize(savedCanvasSize))
+        const savedChatPaneWidth = Number(
+      await window.sylo.prefs.get('sylo.chat.workbench_width', CHAT_PANE_SIZE_DEFAULT),
+    )
+    setChatPaneSize(clampChatPaneSize(savedChatPaneWidth))
     await refreshWorkspaces()
     await refreshBrokerFromMain()
   }, [refreshPrefsDiag, refreshWorkspaces, refreshBrokerFromMain])
@@ -1939,9 +1941,11 @@ export function App(): React.ReactElement {
         await window.sylo.prefs.get('sylo.ui.sidebar_width', SIDEBAR_WIDTH_DEFAULT),
       )
       setSidebarWidth(clampSidebarWidth(savedSidebarWidth))
-      setCanvasOpen((await window.sylo.prefs.get('sylo.canvas.open', false)) === true)
-      const savedCanvasSize = Number(await window.sylo.prefs.get('sylo.canvas.size', CANVAS_SIZE_DEFAULT))
-      setCanvasSize(clampCanvasSize(savedCanvasSize))
+            setCanvasOpen((await window.sylo.prefs.get('sylo.canvas.open', false)) === true)
+      const savedChatPaneWidth = Number(
+        await window.sylo.prefs.get('sylo.chat.workbench_width', CHAT_PANE_SIZE_DEFAULT),
+      )
+      setChatPaneSize(clampChatPaneSize(savedChatPaneWidth))
       await refreshSkillRoutes()
       const layoutPref = await window.sylo.prefs.get('sylo.nav.layout', DEFAULT_SKILL_NAV_LAYOUT)
       setNavLayout(normalizeNavLayoutPref(layoutPref))
@@ -2246,14 +2250,8 @@ export function App(): React.ReactElement {
     activeWorkspaceCwdRef.current = activeWorkspaceForSettings.resolvedPiCwd ?? ''
   }, [activeWorkspaceForSettings.resolvedPiCwd])
 
-  // Keep the docked canvas within the (viewport-relative) clamp when the
-  // window is resized smaller, so a previously-dragged-wide canvas doesn't
-  // overflow the new viewport. The drag handler already clamps on pointer move.
-  useEffect(() => {
-    const onResize = () => setCanvasSize((s) => clampCanvasSize(s))
-    window.addEventListener('resize', onResize)
-    return () => window.removeEventListener('resize', onResize)
-  }, [])
+    // (Workbench panes are flex siblings — the window-resize canvas clamp of the
+  // old fixed-width dock is gone.)
 
   useEffect(() => {
     const u1 = window.sylo.broker.onStatus((p) => {
@@ -3677,12 +3675,12 @@ export function App(): React.ReactElement {
     e.currentTarget.releasePointerCapture(e.pointerId)
   }
 
-  const endCanvasResize = useCallback((clientX: number) => {
+    const endCanvasResize = useCallback((clientX: number) => {
     const drag = canvasResizeRef.current
     if (!drag) return
-    const next = clampCanvasSize(drag.startSize + (drag.startX - clientX))
-    setCanvasSize(next)
-    void window.sylo.prefs.set('sylo.canvas.size', next)
+    const next = clampChatPaneSize(drag.startSize + (drag.startX - clientX))
+    setChatPaneSize(next)
+    void window.sylo.prefs.set('sylo.chat.workbench_width', next)
     canvasResizeRef.current = null
     document.body.style.cursor = ''
     document.body.style.userSelect = ''
@@ -3693,7 +3691,7 @@ export function App(): React.ReactElement {
     canvasResizeRef.current = {
       pointerId: e.pointerId,
       startX: e.clientX,
-      startSize: canvasSize,
+      startSize: chatPaneSize,
     }
     document.body.style.cursor = 'col-resize'
     document.body.style.userSelect = 'none'
@@ -3703,7 +3701,7 @@ export function App(): React.ReactElement {
   const onCanvasResizePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const drag = canvasResizeRef.current
     if (!drag || e.pointerId !== drag.pointerId) return
-    setCanvasSize(clampCanvasSize(drag.startSize + (drag.startX - e.clientX)))
+    setChatPaneSize(clampChatPaneSize(drag.startSize + (drag.startX - e.clientX)))
   }
 
   const onCanvasResizePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -4386,8 +4384,8 @@ export function App(): React.ReactElement {
         {tab === 'chat' && (
           <>
             {canvasOpen ?
-              <div className={chatWorkbench}>
-                <div className={cn(chatPane, 'min-w-0 flex-1')}>
+                            <div className={chatWorkbench}>
+                <div className={cn(chatPane, 'min-w-0 shrink-0')} style={{ width: chatPaneSize }}>
                   <div
                     ref={chatAreaRef}
                     className={chatArea}
@@ -4564,8 +4562,7 @@ export function App(): React.ReactElement {
                   terminals={terminals}
                   sideChatParentId={activeId ?? null}
                   onUpdatePayload={(p) => updateActiveCanvasSnapshot(() => p)}
-                  className="shrink-0"
-                  style={{ width: canvasSize }}
+                                    className="min-w-0 flex-1"
                   sketchBackupRef={sketchBackupRef}
                   onCollapse={collapseCanvas}
                   onPopOut={openCanvasPopout}

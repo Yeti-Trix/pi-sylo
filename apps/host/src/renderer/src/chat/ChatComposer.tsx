@@ -105,6 +105,15 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
   const flushQueueLockRef = useRef(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
+  // Composer grows with content: 1 line at rest, up to 4 lines, then internal
+  // scroll (Cursor-style). Runs on every input change.
+  useEffect(() => {
+    const el = textareaRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(el.scrollHeight, 96)}px`
+  }, [input])
+
   useImperativeHandle(ref, () => ({
     prefill: (text: string) => {
       setInput(text)
