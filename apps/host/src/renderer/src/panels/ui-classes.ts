@@ -196,6 +196,12 @@ export const capSubheadTitle = 'text-[0.88rem] font-semibold'
 
 export const capSubheadHint = 'text-[0.78rem] text-text-secondary'
 
+// Divider between the first-party published Sylo packages and everything else
+// in the Personal packages list (added 2026-09-11).
+export const capPkgGroupDivider = 'mt-5 flex items-center gap-3'
+export const capPkgGroupDividerLabel = 'text-[0.72rem] font-semibold uppercase tracking-wider text-text-secondary/85'
+export const capPkgGroupDividerLine = 'h-px min-w-6 flex-1 bg-border'
+
 
 
 export const capInlineForm = 'mt-2 flex flex-wrap items-center gap-2'

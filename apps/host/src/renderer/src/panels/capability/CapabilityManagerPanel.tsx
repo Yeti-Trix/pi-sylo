@@ -74,6 +74,9 @@ import {
   capSubhead,
   capSubheadHint,
   capSubheadTitle,
+  capPkgGroupDivider,
+  capPkgGroupDividerLabel,
+  capPkgGroupDividerLine,
   capOrigin,
   capSkillRowPath,
   fieldLabel,
@@ -530,6 +533,23 @@ export function CapabilityManagerPanel({
     return m
   }, [installedInventoryRows, enabledPkgs])
 
+  // Names already shown in the pinned Sylo strip (dedupe the regular ranking).
+  const syloPinnedNames = useMemo(
+    () => new Set((piDevResult?.syloPinned ?? []).map((x) => x.name)),
+    [piDevResult],
+  )
+
+  // Host-plugin rows keyed by install-folder basename, so a package that has
+  // its own Personal-packages card is not also listed in the host-plugins group.
+  const hostPluginByDirBase = useMemo(() => {
+    const m = new Map<string, (typeof hostPlugins)[number]>()
+    for (const p of hostPlugins) {
+      const base = (p.dir.split(/[\\/]/).pop() ?? '').toLowerCase()
+      if (base) m.set(base, p)
+    }
+    return m
+  }, [hostPlugins])
+
     /**
    * Individual package slices per installed inventory entry. npm/git packages group
    * by their package id (node_modules | npm | git mirror segment); local-path bundles
@@ -788,6 +808,27 @@ export function CapabilityManagerPanel({
     // effect fills it right after render, same timing as the previous per-bundle behavior.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [installedInventoryRows, bundleItemsBySource, enabledPkgs, capabilities?.brokerOk])
+
+  // Packages whose install folder matches a Sylo host-plugin row render their Enable
+  // switch on that host-plugin card (top group) instead of a separate card below.
+  const hostDirBases = useMemo(
+    () => new Set(hostPlugins.map((p) => (p.dir.split(/[\\/]/).pop() ?? '').toLowerCase())),
+    [hostPlugins],
+  )
+  const visibleItemCards = useMemo(
+    () => installedItemCards.filter((c) => !hostDirBases.has(c.bundleLabel.toLowerCase())),
+    [installedItemCards, hostDirBases],
+  )
+
+  // Inventory rows keyed by install-folder basename, for the host-plugin switch.
+  const invByDirBase = useMemo(() => {
+    const m = new Map<string, (typeof installedInventoryRows)[number]>()
+    for (const inv of installedInventoryRows) {
+      const base = bundleFolderBasename(inv.installedPath || '', inv.source).toLowerCase()
+      if (base && !m.has(base)) m.set(base, inv)
+    }
+    return m
+  }, [installedInventoryRows])
 
   // Fill the snapshot right after render so the next refresh (e.g. after a broker
   // restart unloads a package) still shows the last-known rows until the broker
@@ -1189,12 +1230,24 @@ export function CapabilityManagerPanel({
               <div className={capSubhead}>
                 <span className={capSubheadTitle}>Sylo host plugins</span>
                 <span className={cn(mutedText, capSubheadHint)}>
-                  Loaded by the Sylo app itself — Settings cards, phone-app tabs, RPC tools. Always on while
-                  installed; no toggle needed.
+                  Loaded by the Sylo app itself — Settings cards, phone-app tabs, RPC tools. The switch loads the package for the agent; packages without a host-plugin card load from the list below.
                 </span>
               </div>
               <ul className={rowList}>
-                {hostPlugins.map((p) => (
+                {hostPlugins.map((p) => {
+                  const dirBase = (p.dir.split(/[\\/]/).pop() ?? '').toLowerCase()
+                  const inv = invByDirBase.get(dirBase)
+                  const primary = inv ? knownPackagePrimarySpec(inv.source) : null
+                  const strip = primary ? alsoStripForPackageToggle(primary) : undefined
+                  const on = inv ? specsEquivalentTo(inv.source).some((x) => enabledPkgs.has(x)) : false
+                  const busy = inv ? cardBusy === inv.source : false
+                  const bundle = inv ? bundleItemsBySource.get(inv.source) : undefined
+                  const skillPaths = bundle
+                    ? [...bundle.values()]
+                        .flatMap((s) => s.skills.map((sk) => sk.path))
+                        .filter(Boolean)
+                    : []
+                  return (
                   <li key={p.id} className={capSkillRow}>
                     <div className={rowHeadline}>
                       <span
@@ -1212,6 +1265,22 @@ export function CapabilityManagerPanel({
                       />
                       <code className={capPkgCardName}>{p.id}</code>
                       <span className={capPkgCardHint}>{p.version ? `v${p.version}` : p.name}</span>
+                      {primary ? (
+                        <CapEnableSwitch
+                          checked={on}
+                          disabled={!!installBusy || busy}
+                          ariaLabel={
+                            on ?
+                              'Package loaded for agent — click to stop loading (files stay on disk)'
+                              : 'Package not loaded — click to add to packages[] for the agent'
+                          }
+                          label="Enable"
+                          className="mr-0"
+                          onClick={() =>
+                            void onTogglePackage(primary, !on, strip ?? undefined, { skillPaths })
+                          }
+                        />
+                      ) : null}
                       <span className={rowSpacer} />
                       <OriginBadge origin={p.source === 'npm' ? 'npm-package' : 'sylo-repo'} />
                     </div>
@@ -1223,7 +1292,8 @@ export function CapabilityManagerPanel({
                       </p>
                     : null}
                   </li>
-                ))}
+                  )
+                })}
               </ul>
             </div>
           )}
@@ -1232,15 +1302,28 @@ export function CapabilityManagerPanel({
               No packages installed yet — install from the catalog below, then Restart broker.
             </p>
           )}
-                    {installedItemCards.map(
-            ({ cardKey, inv, title, titleHint, originTag, siblingCount, bundleLabel, brokerStaleBanner, merged, on }) => {
+                    {visibleItemCards.map(
+            ({ cardKey, inv, title, titleHint, originTag, siblingCount, bundleLabel, brokerStaleBanner, merged, on }, cardIdx) => {
         const primary = knownPackagePrimarySpec(inv.source)
         const strip = alsoStripForPackageToggle(primary)
         const busy = cardBusy === inv.source
         const mergedHasAny = merged.extensions.length > 0 || merged.skills.length > 0
+        // Group boundary: first-party published Sylo packages (npm-installed sylo-*)
+        // sit above everything else; a labeled divider marks the transition.
+        const isNpmSyloCard = /^sylo-/i.test(title) && inv.source.startsWith('npm:')
+        const prevCard = cardIdx > 0 ? installedItemCards[cardIdx - 1] : null
+        const prevIsNpmSylo =
+          !!prevCard && /^sylo-/i.test(prevCard.title) && prevCard.inv.source.startsWith('npm:')
+        const showGroupDivider = !isNpmSyloCard && prevIsNpmSylo
         return (
+                    <React.Fragment key={cardKey}>
+            {showGroupDivider && (
+              <div className={capPkgGroupDivider}>
+                <span className={capPkgGroupDividerLabel}>other packages</span>
+                <span className={capPkgGroupDividerLine} />
+              </div>
+            )}
                     <details
-            key={cardKey}
             className={capPkgCard}
             open={pkgCardOpenBySource[cardKey] === true}
             onToggle={(e) => {
@@ -1362,6 +1445,7 @@ export function CapabilityManagerPanel({
               )}
             </div>
           </details>
+        </React.Fragment>
         )
       })}
         </div>
@@ -1512,11 +1596,9 @@ export function CapabilityManagerPanel({
             if (syloPinned.length === 0) return null
             return (
               <div className="mb-3">
-                <div className={capSubhead}>
-                  <span className={capSubheadTitle}>Sylo packages</span>
-                  <span className={cn(mutedText, capSubheadHint)}>
-                    First-party <code>sylo-*</code> packages pinned above the pi.dev ranking.
-                  </span>
+                <div className={capPkgGroupDivider} title="First-party sylo-* packages pinned above the pi.dev ranking">
+                  <span className={capPkgGroupDividerLabel}>Sylo packages</span>
+                  <span className={capPkgGroupDividerLine} />
                 </div>
                 <ul className={capCatalogList}>
                   {syloPinned.map((row) => {
@@ -1537,6 +1619,10 @@ export function CapabilityManagerPanel({
                     )
                   })}
                 </ul>
+                <div className={capPkgGroupDivider}>
+                  <span className={capPkgGroupDividerLabel}>pi.dev ranking</span>
+                  <span className={capPkgGroupDividerLine} />
+                </div>
               </div>
             )
           })()}
@@ -1546,6 +1632,7 @@ export function CapabilityManagerPanel({
                 const canonFolder = folderIdFromSpec(
                   knownPackagePrimarySpec(normalizeNpmInstallSpec(row.installSpec)),
                 )
+                    if (syloPinnedNames.has(row.name)) return null
                 const installedOnDisk = piDevRowLoadedByCanonFolder.has(canonFolder)
                 const loadedForAgent = piDevRowLoadedByCanonFolder.get(canonFolder) === true
                 return (
