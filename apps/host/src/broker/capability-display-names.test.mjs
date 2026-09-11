@@ -39,5 +39,9 @@ describe('deriveExtensionDisplayName', () => {
       deriveExtensionDisplayName('C:/repo/out/broker/sylo-builtin-tools-guard.js'),
       'sylo-builtin-tools-guard',
     )
+    assert.equal(
+      deriveExtensionDisplayName('C:/repo/packages/sylo-ask-question/extensions/index.ts'),
+      'sylo-ask-question',
+    )
   })
 })

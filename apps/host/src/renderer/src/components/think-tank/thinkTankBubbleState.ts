@@ -69,6 +69,19 @@ export function applyThinkTankBubbleEvent(
     return list
   }
 
+  // A run that errors or finishes leaves no one to close the turn it was mid-way through,
+  // and a bubble left in `streaming` keeps rendering as live with a running elapsed timer.
+  if (type === 'error' || type === 'complete') {
+    const note = type === 'error' ? '_(Interrupted)_' : '_(No output)_'
+    let changed = false
+    const next = list.map((b) => {
+      if (b.sessionId !== sessionId || b.status !== 'streaming') return b
+      changed = true
+      return { ...b, status: 'failed' as const, body: b.body || note }
+    })
+    return changed ? next : list
+  }
+
   if (type === 'turn') {
     const messageId = String(raw.messageId ?? '')
     const seatId = String(raw.seatId ?? '')

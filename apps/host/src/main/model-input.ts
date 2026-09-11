@@ -3,9 +3,17 @@ import { dirname, join } from 'node:path'
 
 export type ModelInputTypes = ('text' | 'image')[]
 
+/** The subset of Pi's model definition Sylo writes; unknown keys are preserved on patch. */
+type ModelEntry = {
+  id: string
+  input?: ModelInputTypes
+  contextWindow?: number
+  maxTokens?: number
+}
+
 type ModelsJsonProvider = {
-  models?: ({ id: string; input?: ModelInputTypes } | string)[]
-  modelOverrides?: Record<string, { input?: ModelInputTypes }>
+  models?: (ModelEntry | string)[]
+  modelOverrides?: Record<string, Partial<Omit<ModelEntry, 'id'>>>
 }
 
 type ModelsJsonRoot = {
@@ -80,12 +88,38 @@ export function readModelInputConfig(
   return { input: ['text'], explicit: false, visionCapable: false }
 }
 
-/** Persist Pi `models.json` `input` for a provider/model id. */
-export function writeModelInputTypes(
+/** Read Pi `models.json` `contextWindow` for a provider/model id (null = Pi's own default). */
+export function readModelContextWindow(
   agentDir: string,
   provider: string,
   modelId: string,
-  visionCapable: boolean,
+): number | null {
+  const prov = readModelsJson(agentDir)?.providers?.[provider]
+  if (!prov) return null
+  const override = prov.modelOverrides?.[modelId]?.contextWindow
+  if (typeof override === 'number' && override > 0) return override
+  for (const entry of prov.models ?? []) {
+    if (typeof entry === 'string' || entry.id !== modelId) continue
+    return typeof entry.contextWindow === 'number' && entry.contextWindow > 0
+      ? entry.contextWindow
+      : null
+  }
+  return null
+}
+
+/**
+ * Merge `patch` into a provider/model entry in `models.json`, creating it if absent.
+ *
+ * Patched keys are dropped from `modelOverrides` so the `models[]` entry is the one
+ * that wins in Pi. Only the patched keys are removed — an override that carries an
+ * unrelated key survives, which keeps the `input` and `contextWindow` writers from
+ * clobbering each other.
+ */
+function patchModelEntry(
+  agentDir: string,
+  provider: string,
+  modelId: string,
+  patch: Partial<Omit<ModelEntry, 'id'>>,
 ): { ok: true } | { ok: false; error: string } {
   const id = modelId.trim()
   if (!id) return { ok: false, error: 'Model id is required' }
@@ -94,37 +128,40 @@ export function writeModelInputTypes(
   let root: ModelsJsonRoot = readModelsJson(agentDir) ?? {}
   const providers = { ...(root.providers ?? {}) }
   const prov: ModelsJsonProvider = { ...(providers[provider] ?? {}) }
-  const input: ModelInputTypes = visionCapable ? ['text', 'image'] : ['text']
 
-  const rawList = prov.models ?? []
-  const models: ({ id: string; input?: ModelInputTypes } | string)[] = [...rawList]
+  const models: (ModelEntry | string)[] = [...(prov.models ?? [])]
   let found = false
   for (let i = 0; i < models.length; i++) {
     const entry = models[i]
     if (typeof entry === 'string') {
       if (entry.trim() === id) {
-        models[i] = { id, input }
+        models[i] = { id, ...patch }
         found = true
         break
       }
       continue
     }
     if (entry.id === id) {
-      models[i] = { ...entry, id, input }
+      models[i] = { ...entry, id, ...patch }
       found = true
       break
     }
   }
-  if (!found) models.push({ id, input })
+  if (!found) models.push({ id, ...patch })
 
   prov.models = models
   const overrides = { ...(prov.modelOverrides ?? {}) }
-  delete overrides[id]
-  if (Object.keys(overrides).length > 0) {
-    prov.modelOverrides = overrides
-  } else {
-    delete prov.modelOverrides
+  const existing = overrides[id]
+  if (existing) {
+    const remaining = { ...existing }
+    for (const key of Object.keys(patch) as (keyof Omit<ModelEntry, 'id'>)[]) {
+      delete remaining[key]
+    }
+    if (Object.keys(remaining).length > 0) overrides[id] = remaining
+    else delete overrides[id]
   }
+  if (Object.keys(overrides).length > 0) prov.modelOverrides = overrides
+  else delete prov.modelOverrides
 
   providers[provider] = prov
   root = { ...root, providers }
@@ -136,6 +173,72 @@ export function writeModelInputTypes(
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
   }
+}
+
+/** Persist Pi `models.json` `input` for a provider/model id. */
+export function writeModelInputTypes(
+  agentDir: string,
+  provider: string,
+  modelId: string,
+  visionCapable: boolean,
+): { ok: true } | { ok: false; error: string } {
+  return patchModelEntry(agentDir, provider, modelId, {
+    input: visionCapable ? ['text', 'image'] : ['text'],
+  })
+}
+
+/**
+ * Pi's own fallback cap (`provider-composer`: `definition.maxTokens ?? 16384`).
+ *
+ * A model that Pi never composed — one absent from `models.json` — reaches Ollama with no
+ * `max_tokens`, and Ollama then generates until the context window fills. A degenerate loop
+ * measured 35,366 tokens in a single reply at 73 tok/s before anything stopped it.
+ */
+export const DEFAULT_MODEL_MAX_TOKENS = 16384
+
+/** Read Pi `models.json` `maxTokens` for a provider/model id (null = unset). */
+export function readModelMaxTokens(
+  agentDir: string,
+  provider: string,
+  modelId: string,
+): number | null {
+  const prov = readModelsJson(agentDir)?.providers?.[provider]
+  if (!prov) return null
+  const override = prov.modelOverrides?.[modelId]?.maxTokens
+  if (typeof override === 'number' && override > 0) return override
+  for (const entry of prov.models ?? []) {
+    if (typeof entry === 'string' || entry.id !== modelId) continue
+    return typeof entry.maxTokens === 'number' && entry.maxTokens > 0 ? entry.maxTokens : null
+  }
+  return null
+}
+
+/** Persist Pi `models.json` `maxTokens` for a provider/model id. */
+export function writeModelMaxTokens(
+  agentDir: string,
+  provider: string,
+  modelId: string,
+  maxTokens: number,
+): { ok: true } | { ok: false; error: string } {
+  if (!Number.isFinite(maxTokens) || maxTokens <= 0) {
+    return { ok: false, error: 'Max tokens must be a positive number' }
+  }
+  return patchModelEntry(agentDir, provider, modelId, { maxTokens: Math.floor(maxTokens) })
+}
+
+/** Persist Pi `models.json` `contextWindow` for a provider/model id. */
+export function writeModelContextWindow(
+  agentDir: string,
+  provider: string,
+  modelId: string,
+  contextWindow: number,
+): { ok: true } | { ok: false; error: string } {
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return { ok: false, error: 'Context window must be a positive number' }
+  }
+  return patchModelEntry(agentDir, provider, modelId, {
+    contextWindow: Math.floor(contextWindow),
+  })
 }
 
 function stripJsonComments(input: string): string {

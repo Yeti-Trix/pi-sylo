@@ -16,7 +16,11 @@ import {
 } from '../shared/sylo-capability-paths.js'
 import { migrateSubagentTasksSchema } from './subagent-tasks-db.js'
 import { deleteWebAccessRunsForConversation, migrateWebAccessSchema } from './web-access-db.js'
-import { deleteThinkTankSessionsForConversation, migrateThinkTankSchema } from './think-tank-db.js'
+import {
+  deleteThinkTankSessionsForConversation,
+  finalizeOrphanThinkTankSessions,
+  migrateThinkTankSchema,
+} from './think-tank-db.js'
 import { dropLegacyScheduledPromptsFromMainDb } from './workspace-db.js'
 
 export type MessageRole = 'user' | 'assistant' | 'system'
@@ -38,6 +42,11 @@ export interface ConversationRow {
   image_model_provider: string | null
   /** Per-chat thinking-level override (off/minimal/low/medium/high/[xhigh|max]; null = Pi default). */
   thinking_level: string | null
+  /**
+   * Per-chat subagent model pins as JSON `{ "<agent>": { provider, modelId } }`.
+   * null or absent keys inherit the global Settings → Subagents pins.
+   */
+  subagent_models_json: string | null
   /** Retention v2: ms timestamp when the chat was archived (auto or manual); NULL = active. */
   archived_at?: number | null
 }
@@ -138,6 +147,9 @@ export function canonicalDefaultWorkspacePiProjectPath(): string {
   return path.join(homedir(), 'Documents', 'GitHub', 'sylo-user')
 }
 
+/** Oldest workspace is the stable primary. `sort_order` is sidebar display order only. */
+const WORKSPACE_PRIMARY_SQL = 'created_at ASC, id ASC'
+
 /**
  * Resolve the sylo-user (primary workspace) project directory from the
  * workspace DB row's `pi_cwd`. Respects operator edits in the Workspaces UI
@@ -153,9 +165,7 @@ export function resolveSyloUserDir(): string {
   try {
     if (db) {
       const row = db
-        .prepare(
-          'SELECT pi_cwd FROM workspaces ORDER BY sort_order ASC, created_at ASC LIMIT 1',
-        )
+        .prepare(`SELECT pi_cwd FROM workspaces ORDER BY ${WORKSPACE_PRIMARY_SQL} LIMIT 1`)
         .get() as { pi_cwd: string | null } | undefined
       const cwd = row?.pi_cwd?.trim()
       if (cwd && fs.existsSync(cwd)) return cwd
@@ -221,6 +231,7 @@ export function openDatabase(userDataPath: string, syloRepoRoot?: string): Datab
   initOperatorEnv()
   dropLegacyPersonalTablesFromMainDb(d)
   migrateThinkTankSchema()
+  finalizeOrphanThinkTankSessions('Interrupted by app restart')
     dropLegacyScheduledPromptsFromMainDb(d)
   // Dev sylo workspace is no longer auto-created; the operator adds workspaces
   // manually (including the pi-sylo repo when developing Sylo itself).
@@ -282,6 +293,9 @@ function migrateLegacySchema(d: Database.Database, userDataPath: string): void {
   }
   if (!tableHasColumn(d, 'conversations', 'thinking_level')) {
     d.exec('ALTER TABLE conversations ADD COLUMN thinking_level TEXT')
+  }
+  if (!tableHasColumn(d, 'conversations', 'subagent_models_json')) {
+    d.exec('ALTER TABLE conversations ADD COLUMN subagent_models_json TEXT')
   }
   // Side chats (apps pane, Phase 7): child conversations scoped to a parent
   // chat. Hidden from the sidebar (listConversations filters them out); a
@@ -368,7 +382,7 @@ function migrateLegacySchema(d: Database.Database, userDataPath: string): void {
 function migrateDefaultWorkspaceToDocumentsDir(d: Database.Database, userDataPath: string): void {
   if (!tableExists(d, 'workspaces')) return
   const row = d
-    .prepare('SELECT id, pi_cwd FROM workspaces ORDER BY sort_order ASC, created_at ASC LIMIT 1')
+    .prepare(`SELECT id, pi_cwd FROM workspaces ORDER BY ${WORKSPACE_PRIMARY_SQL} LIMIT 1`)
     .get() as { id: string; pi_cwd: string | null } | undefined
   if (!row) return
   const docs = homedir() + '\\Documents'
@@ -470,7 +484,7 @@ function bootstrapWorkspacesIfEmpty(d: Database.Database, userDataPath: string):
 function backfillConversationWorkspaces(d: Database.Database): void {
   if (!tableExists(d, 'workspaces')) return
   const def = (d
-    .prepare('SELECT id FROM workspaces ORDER BY sort_order ASC, created_at ASC LIMIT 1')
+    .prepare(`SELECT id FROM workspaces ORDER BY ${WORKSPACE_PRIMARY_SQL} LIMIT 1`)
     .get() as { id: string } | undefined)?.id
   if (!def) return
   d.prepare('UPDATE conversations SET workspace_id = ? WHERE workspace_id IS NULL').run(def)
@@ -568,7 +582,7 @@ export function refreshOperatorEnv(): void {
 /** First workspace by sort order — target for chat moves when deleting a workspace. */
 export function defaultWorkspaceId(): string {
   const row = getDb()
-    .prepare('SELECT id FROM workspaces ORDER BY sort_order ASC, created_at ASC LIMIT 1')
+    .prepare(`SELECT id FROM workspaces ORDER BY ${WORKSPACE_PRIMARY_SQL} LIMIT 1`)
     .get() as { id: string } | undefined
   if (!row) throw new Error('no workspace')
   return row.id
@@ -712,13 +726,13 @@ export function listConversations(workspaceId?: string): ConversationRow[] {
   if (workspaceId === undefined) {
     return getDb()
       .prepare(
-        'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level FROM conversations WHERE parent_conversation_id IS NULL AND archived_at IS NULL ORDER BY updated_at DESC',
+        'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, subagent_models_json FROM conversations WHERE parent_conversation_id IS NULL AND archived_at IS NULL ORDER BY updated_at DESC',
       )
       .all() as ConversationRow[]
   }
   return getDb()
     .prepare(
-      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level FROM conversations WHERE workspace_id = ? AND parent_conversation_id IS NULL AND archived_at IS NULL ORDER BY updated_at DESC',
+      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, subagent_models_json FROM conversations WHERE workspace_id = ? AND parent_conversation_id IS NULL AND archived_at IS NULL ORDER BY updated_at DESC',
     )
     .all(workspaceId) as ConversationRow[]
 }
@@ -727,7 +741,7 @@ export function listConversations(workspaceId?: string): ConversationRow[] {
 export function listConversationsUpdatedBefore(updatedBeforeMs: number): ConversationRow[] {
   return getDb()
     .prepare(
-      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level FROM conversations WHERE updated_at < ? AND parent_conversation_id IS NULL AND archived_at IS NULL ORDER BY updated_at ASC',
+      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, subagent_models_json FROM conversations WHERE updated_at < ? AND parent_conversation_id IS NULL AND archived_at IS NULL ORDER BY updated_at ASC',
     )
     .all(updatedBeforeMs) as ConversationRow[]
 }
@@ -753,7 +767,7 @@ export function findLatestEmptyConversationId(workspaceId: string): string | und
 export function getConversation(id: string): ConversationRow | undefined {
   return getDb()
     .prepare(
-      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level FROM conversations WHERE id = ?',
+      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, subagent_models_json FROM conversations WHERE id = ?',
     )
     .get(id) as ConversationRow | undefined
 }
@@ -767,7 +781,7 @@ export function createConversation(title = '', workspaceId?: string): Conversati
       'INSERT INTO conversations (id, title, created_at, updated_at, workspace_id, pi_session_relpath) VALUES (?, ?, ?, ?, ?, NULL)',
     )
     .run(id, title, now, now, wid)
-  return { id, title, created_at: now, updated_at: now, workspace_id: wid, pi_session_relpath: null, model_provider: null, model_id: null, image_model_id: null, image_model_provider: null, thinking_level: null }
+  return { id, title, created_at: now, updated_at: now, workspace_id: wid, pi_session_relpath: null, model_provider: null, model_id: null, image_model_id: null, image_model_provider: null, thinking_level: null, subagent_models_json: null }
 }
 
 export function setConversationWorkspace(id: string, workspaceId: string): void {
@@ -895,6 +909,13 @@ export function setConversationModel(id: string, model: ConversationModelOverrid
     )
 }
 
+/** Persist per-chat subagent model pins. Empty/null clears them back to the global pins. */
+export function setConversationSubagentModels(id: string, json: string | null): void {
+  getDb()
+    .prepare('UPDATE conversations SET subagent_models_json = ?, updated_at = ? WHERE id = ?')
+    .run(json && json.trim() ? json.trim() : null, Date.now(), id)
+}
+
 const WORKSPACE_COLUMNS = `id, name, pi_cwd, path_segment, disabled_skill_paths_json,
     disabled_extension_paths_json, disabled_tools_json, enabled_skill_paths_json,
     always_apply_skill_paths_json, github_remote_url, github_backup_enabled,
@@ -946,6 +967,21 @@ export function getWorkspace(id: string): WorkspaceRow | undefined {
   return getDb()
     .prepare(`SELECT ${WORKSPACE_COLUMNS} FROM workspaces WHERE id = ?`)
     .get(id) as WorkspaceRow | undefined
+}
+
+/** Persist sidebar order. `orderedIds` must be a permutation of every workspace id. */
+export function reorderWorkspaces(orderedIds: string[]): void {
+  const existing = listWorkspaces().map((w) => w.id)
+  if (existing.length === 0) return
+  const unique = [...new Set(orderedIds.filter((id) => typeof id === 'string' && id))]
+  if (unique.length !== existing.length || unique.some((id) => !existing.includes(id))) {
+    throw new Error('workspace_reorder_incomplete')
+  }
+  const d = getDb()
+  const stmt = d.prepare('UPDATE workspaces SET sort_order = ? WHERE id = ?')
+  d.transaction((ids: string[]) => {
+    ids.forEach((id, index) => stmt.run(index, id))
+  })(unique)
 }
 
 export function updateWorkspace(id: string, patch: { name?: string; pi_cwd?: string }): void {
@@ -1018,6 +1054,51 @@ export function workspaceDisabledDecoded(row: WorkspaceRow): {
     extensionPaths: normalizePathListForDisabledJson(ex),
     disabledTools: normalizeDisabledToolsJson(dt),
   }
+}
+
+/** Skill paths this workspace pins inline into the agent system prompt. */
+export function workspaceAlwaysApplySkillPaths(row: WorkspaceRow): string[] {
+  let raw: unknown = []
+  try {
+    raw = JSON.parse(row.always_apply_skill_paths_json || '[]') as unknown
+  } catch {
+    raw = []
+  }
+  return normalizeSkillPathListForPolicyJson(raw)
+}
+
+/**
+ * Pin or unpin a skill for a workspace. A pinned skill's full SKILL.md is inlined into
+ * the system prompt on every turn; unpinned skills stay one-line pointers the agent can
+ * read on demand. Pinning also implies enabled, so it clears any local exclusion.
+ */
+export function patchWorkspaceAlwaysApplySkill(opts: {
+  workspaceId: string
+  path: string
+  pinned: boolean
+}): string[] | null {
+  const row = getWorkspace(opts.workspaceId)
+  if (!row) return null
+  const key = normalizeSkillCapabilityPath(opts.path)
+  if (!key) return workspaceAlwaysApplySkillPaths(row)
+
+  const set = new Set(workspaceAlwaysApplySkillPaths(row))
+  if (opts.pinned) set.add(key)
+  else set.delete(key)
+  const paths = Array.from(set).sort((a, b) => a.localeCompare(b))
+  getDb()
+    .prepare('UPDATE workspaces SET always_apply_skill_paths_json = ? WHERE id = ?')
+    .run(JSON.stringify(paths), opts.workspaceId)
+
+  if (opts.pinned) {
+    patchWorkspaceDisabledCapability({
+      workspaceId: opts.workspaceId,
+      kind: 'skill',
+      path: key,
+      excluded: false,
+    })
+  }
+  return paths
 }
 
 export function patchWorkspaceDisabledCapability(
@@ -1239,38 +1320,15 @@ export function updateMessageContent(id: string, content: string, status: Messag
   getDb().prepare('UPDATE messages SET content = ?, status = ? WHERE id = ?').run(content, status, id)
 }
 
-/** Persist Pi broker telemetry (stored in tool_calls_json as [{ ts, event }]). */
-export function appendToolCallsJson(id: string, chunk: unknown, ts?: number): void {
-  const row = getDb().prepare('SELECT tool_calls_json FROM messages WHERE id = ?').get(id) as
-    | { tool_calls_json: string | null }
-    | undefined
-  const prev = row?.tool_calls_json ? (JSON.parse(row.tool_calls_json) as unknown[]) : []
-  const stamp = ts ?? Date.now()
-  prev.push({ ts: stamp, event: chunk })
-  getDb()
-    .prepare('UPDATE messages SET tool_calls_json = ? WHERE id = ?')
-    .run(JSON.stringify(prev), id)
-}
-
 /**
- * Batch-append multiple tool telemetry entries in a single SELECT + parse + UPDATE.
- * Avoids the O(n²) cost of calling appendToolCallsJson per event on long agent runs
- * where tool_calls_json grows to multiple MB — each call would re-parse and
- * re-serialize the entire blob.
+ * Persist Pi broker telemetry (stored in tool_calls_json as [{ ts, event }]).
+ *
+ * The caller owns the in-memory entry list and passes the already-serialized blob,
+ * so a streaming turn never re-reads and re-parses its own multi-MB telemetry on
+ * every flush. See tool-telemetry.ts for how the list is condensed.
  */
-export function appendToolCallsJsonBatch(
-  id: string,
-  entries: Array<{ ts: number; event: unknown }>,
-): void {
-  if (entries.length === 0) return
-  const row = getDb().prepare('SELECT tool_calls_json FROM messages WHERE id = ?').get(id) as
-    | { tool_calls_json: string | null }
-    | undefined
-  const prev = row?.tool_calls_json ? (JSON.parse(row.tool_calls_json) as unknown[]) : []
-  for (const entry of entries) prev.push(entry)
-  getDb()
-    .prepare('UPDATE messages SET tool_calls_json = ? WHERE id = ?')
-    .run(JSON.stringify(prev), id)
+export function writeToolCallsJson(id: string, json: string): void {
+  getDb().prepare('UPDATE messages SET tool_calls_json = ? WHERE id = ?').run(json, id)
 }
 
 export function getPref<T>(key: string, fallback: T): T {

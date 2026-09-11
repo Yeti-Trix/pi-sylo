@@ -1,7 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
+import { SYLO_MODEL_PROVIDERS, SYLO_MODEL_PROVIDER_LABELS, CHATGPT_CODEX_PROVIDER, CHATGPT_CODEX_MODELS } from '../../../shared/chatgpt-codex'
 import { cn } from '../lib/cn'
 import { modelBarPill, mutedText } from '../panels/ui-classes'
 import { normalizeOllamaOriginUi, OllamaModelSelect } from '../panels/ollama-ui'
+import { ChatSubagentModelsModal } from './ChatSubagentModelsModal'
 
 /**
  * Per-chat model selector shown in the chat status row. Each chat stores an
@@ -14,16 +16,7 @@ import { normalizeOllamaOriginUi, OllamaModelSelect } from '../panels/ollama-ui'
  * broker (switchSession re-resolves the model — no full restart).
  */
 
-const PROVIDERS = ['ollama', 'anthropic', 'groq', 'openai', 'openrouter'] as const
-type Provider = (typeof PROVIDERS)[number]
-
-const PROVIDER_LABELS: Record<Provider, string> = {
-  ollama: 'Ollama',
-  anthropic: 'Anthropic',
-  groq: 'Groq',
-  openai: 'OpenAI',
-  openrouter: 'OpenRouter',
-}
+const PROVIDERS = SYLO_MODEL_PROVIDERS
 
 type GlobalDefaults = {
   provider: string
@@ -86,6 +79,7 @@ export function ChatModelBar({
   // image-fallback dropdown lists only vision models.
   const [visionTags, setVisionTags] = useState<string[]>([])
   const [visionTagsLoading, setVisionTagsLoading] = useState(false)
+  const [subagentModalOpen, setSubagentModalOpen] = useState(false)
 
   // Load global defaults (prefs) once.
   useEffect(() => {
@@ -134,13 +128,17 @@ export function ChatModelBar({
   // actually binds — not a possibly-empty prefs value.
   const effProvider = (override.model_provider ?? effective?.provider ?? '').trim()
   const effModelId = (override.model_id ?? effective?.modelId ?? '').trim()
-  const effImageProvider = (override.image_model_provider ?? effective?.imageModelProvider ?? 'ollama').trim()
+  // Empty means "never set", not "some other provider" — the image fallback is Ollama-only,
+  // and treating blank as unset is what left this as a free-text field on ChatGPT chats.
+  const effImageProvider =
+    (override.image_model_provider ?? effective?.imageModelProvider ?? '').trim() || 'ollama'
   const isOllama = effProvider === 'ollama'
   const isGlobal = override.model_provider === null
 
-  // Fetch ollama tags when the effective provider is ollama and we have an origin.
+  // Fetched for any chosen provider, not just Ollama: the image fallback selector below
+  // lists Ollama vision models even when the main model is ChatGPT OAuth.
   useEffect(() => {
-    if (!isOllama || !globalDefaults) {
+    if (isGlobal || !globalDefaults) {
       setOllamaTags([])
       return
     }
@@ -158,14 +156,16 @@ export function ChatModelBar({
       cancelled = true
       clearTimeout(t)
     }
-  }, [isOllama, globalDefaults])
+  }, [isGlobal, globalDefaults])
 
   // Probe vision capability for each Ollama tag so the image-fallback selector
   // can list only vision-capable models. Keyed on ollamaTags (fetched once), so
   // this runs once per tag set — not on every chat switch. Concurrency-limited
   // to avoid flooding Ollama `/api/show`.
   useEffect(() => {
-    if (!globalDefaults || ollamaTags.length === 0) {
+    // Only the image-fallback picker consumes this, and it appears only when the main model
+    // cannot see images. Probing otherwise is a per-tag `/api/show` round trip for nothing.
+    if (!globalDefaults || ollamaTags.length === 0 || mainVisionCapable !== false) {
       setVisionTags([])
       setVisionTagsLoading(false)
       return
@@ -199,7 +199,7 @@ export function ChatModelBar({
     return () => {
       cancelled = true
     }
-  }, [globalDefaults, ollamaTags])
+  }, [globalDefaults, ollamaTags, mainVisionCapable])
 
   // Probe whether the effective main model supports vision.
   useEffect(() => {
@@ -341,7 +341,7 @@ export function ChatModelBar({
           <option value={GLOBAL_SENTINEL}>Global ({globalProviderLabel})</option>
           {PROVIDERS.map((p) => (
             <option key={p} value={p}>
-              {PROVIDER_LABELS[p]}
+              {SYLO_MODEL_PROVIDER_LABELS[p]}
             </option>
           ))}
         </select>
@@ -357,6 +357,24 @@ export function ChatModelBar({
               id="sylo-chat-model-select"
               className={cn(modelBarPill, 'h-7 min-w-0 max-w-[220px] flex-1 py-0.5 text-[0.72rem]')}
             />
+          ) : effProvider === CHATGPT_CODEX_PROVIDER ? (
+            <select
+              className={cn(modelBarPill, 'h-7 min-w-0 max-w-[220px] flex-1 py-0.5 text-[0.72rem]')}
+              value={modelSelectValue}
+              onChange={(e) => onModelChange(e.target.value)}
+              disabled={!agentReady}
+              aria-label="ChatGPT Codex model"
+            >
+              <option value="">Model…</option>
+              {CHATGPT_CODEX_MODELS.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+              {modelSelectValue && !CHATGPT_CODEX_MODELS.some((m) => m.id === modelSelectValue) ?
+                <option value={modelSelectValue}>{modelSelectValue}</option>
+              : null}
+            </select>
           ) : (
             <input
               className={cn(modelBarPill, 'h-7 max-w-[200px] py-0.5 text-[0.72rem]')}
@@ -406,7 +424,7 @@ export function ChatModelBar({
             >
               image ↦
             </span>
-            {effImageProvider === 'ollama' ? (
+            {effImageProvider === 'ollama' && ollamaTags.length > 0 ? (
                             <OllamaModelSelect
                 modelId={imageSelectValue}
                 setModelId={(v) => onImageModelChange(v)}
@@ -433,8 +451,27 @@ export function ChatModelBar({
           </>
         ) : null}
 
+        {conversationId ?
+          <button
+            type="button"
+            className="h-7 shrink-0 cursor-pointer rounded-md border border-border bg-transparent px-1.5 text-[0.72rem] leading-none text-text-primary hover:border-accent/50 hover:bg-bg-tertiary"
+            onClick={() => setSubagentModalOpen(true)}
+            aria-label="Subagent models for this chat"
+            title="Subagent models and thinking — pick a model and think level per role for this chat"
+          >
+            subagents
+          </button>
+        : null}
+
         {saving ? <span className={cn(mutedText, 'text-[0.7rem]')}>saving…</span> : null}
       </div>
+
+      {subagentModalOpen && conversationId ? (
+        <ChatSubagentModelsModal
+          conversationId={conversationId}
+          onClose={() => setSubagentModalOpen(false)}
+        />
+      ) : null}
     </div>
   )
 }

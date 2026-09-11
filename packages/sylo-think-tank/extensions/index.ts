@@ -11,12 +11,19 @@ import {
 import registerSeatImageFallback from './seat-image-fallback.ts'
 import syloThinkTankSeatTools from './seat-tools.ts'
 import { SYLO_THINK_TANK_SEAT_RUN_ENV } from './spawn-seat.ts'
-import { thinkTankRpc } from './sylo-host.ts'
+import { thinkTankRpc, THINK_TANK_STOPPED_BY_OPERATOR } from './sylo-host.ts'
 import { thinkTankTopicTitle } from './topic.ts'
 
 function formatThinkTankRunError(err: unknown): string {
   const detail = err instanceof Error ? err.message : String(err)
   const lower = detail.toLowerCase()
+  if (detail.startsWith(THINK_TANK_STOPPED_BY_OPERATOR)) {
+    return (
+      `${detail}\n\n` +
+      'The operator stopped this run deliberately. The tool is working — do not retry it or ' +
+      'treat this as a broker fault. Ask what they want changed, or continue without the think tank.'
+    )
+  }
   if (lower.includes('unknown think tank agent')) {
     return (
       `Think tank run failed: ${detail}\n\n` +

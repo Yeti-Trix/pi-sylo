@@ -16,7 +16,7 @@ Optional fields in `~/.pi/agent/agents/*.md` (or project `.pi/agents/*.md` when 
 
 | Field | Purpose |
 |-------|---------|
-| `timeout_seconds` | Suggested wall-clock limit (default 600 s in the extension). Document for recon agents (e.g. 300). Enforcement follows extension defaults until per-agent overrides land. |
+| `timeout_seconds` | Wall-clock kill (scout ships 300). Default is 600 s for cloud models and 1800 s for local/Ollama. |
 | `outputFormat` | Hint for structured sections in the agent reply (scout/planner/reviewer templates use markdown headings). |
 
 Bundled agents (scout, planner, worker, reviewer) ship with output sections in their body text.

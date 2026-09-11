@@ -112,6 +112,20 @@ import {
   type PackageBundleSlice,
 } from './helpers'
 
+/**
+ * Compare skill paths in the renderer. The shared `normalizeSkillCapabilityPath` cannot be
+ * used here because it imports `node:path`, so match the parts that matter for comparison:
+ * separator style, a trailing `SKILL.md`, and case (Windows paths are case-insensitive).
+ */
+function skillPathKey(p: string): string {
+  const s = (typeof p === 'string' ? p : '').trim().replace(/\\/g, '/')
+  if (!s) return ''
+  return s
+    .replace(/\/SKILL\.md$/i, '')
+    .replace(/\/+$/, '')
+    .toLowerCase()
+}
+
 // ── Catalog row (shared by the pinned sylo-* strip and the main pi.dev list) ─
 
 type CatalogRow = {
@@ -236,6 +250,8 @@ export function CapabilityManagerPanel({
   const [skillsSectionOpen, setSkillsSectionOpen] = useState(false)
   const [includeCursorSkills, setIncludeCursorSkills] = useState(false)
   const [includeCursorBusy, setIncludeCursorBusy] = useState(false)
+  /** Normalized skill paths pinned inline into this workspace's system prompt. */
+  const [pinnedSkillPaths, setPinnedSkillPaths] = useState<Set<string>>(() => new Set())
   const [expandedSkillPath, setExpandedSkillPath] = useState<string | null>(null)
   const [extensionsSectionOpen, setExtensionsSectionOpen] = useState(false)
   // Personal packages (moved Downloaded-packages card) is the primary inventory surface — keep this section expanded by default;
@@ -616,6 +632,36 @@ export function CapabilityManagerPanel({
     setExcludeAgentNotice('Pi built-in tool settings saved. Broker restarted.')
   }
 
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const r = await window.sylo.capabilities.pinnedSkills.get(exclusionWorkspaceId || undefined)
+      if (cancelled) return
+      setPinnedSkillPaths(new Set((r.ok ? r.paths : []).map(skillPathKey)))
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [exclusionWorkspaceId])
+
+  const togglePinnedSkill = async (path: string, pinned: boolean) => {
+    const r = await window.sylo.capabilities.pinnedSkills.set(
+      exclusionWorkspaceId || undefined,
+      path,
+      pinned,
+    )
+    if (!r.ok) {
+      setExcludeAgentNotice(`Could not update pinned skills: ${r.error}`)
+      return
+    }
+    setPinnedSkillPaths(new Set(r.paths.map(skillPathKey)))
+    setExcludeAgentNotice(
+      pinned ?
+        'Skill pinned — its full SKILL.md is now added to the system prompt every turn. Applies on the next message.'
+      : 'Skill unpinned — it stays available as a pointer the agent can read on demand. Applies on the next message.',
+    )
+  }
+
   const setIncludeCursorSkillsPref = async (enabled: boolean) => {
     if (includeCursorBusy) return
     setIncludeCursorBusy(true)
@@ -808,6 +854,10 @@ export function CapabilityManagerPanel({
           setExcludeAgentNotice(
             `Built-in sylo-subagents disabled. subagent delegation will be unavailable. ${restartNote}`,
           )
+        } else if (builtinExtKind === 'ask-question' && excluded) {
+          setExcludeAgentNotice(
+            `Built-in sylo-ask-question disabled. In-chat multiple-choice questions will be unavailable. ${restartNote}`,
+          )
         } else {
           setExcludeAgentNotice(restartNote)
         }
@@ -828,6 +878,10 @@ export function CapabilityManagerPanel({
         } else if (builtinExtKind === 'subagents' && excluded) {
           setExcludeAgentNotice(
             `Built-in sylo-subagents disabled. subagent delegation will be unavailable. ${restartNote}`,
+          )
+        } else if (builtinExtKind === 'ask-question' && excluded) {
+          setExcludeAgentNotice(
+            `Built-in sylo-ask-question disabled. In-chat multiple-choice questions will be unavailable. ${restartNote}`,
           )
         } else {
           setExcludeAgentNotice(restartNote)
@@ -1619,6 +1673,8 @@ export function CapabilityManagerPanel({
                     skillSurfaceLintByPath={skillSurfaceLintByPath}
                     exclusionWorkspaceId={exclusionWorkspaceId}
                     skillRemoveBusy={skillRemoveBusy}
+                    pinned={pinnedSkillPaths.has(skillPathKey(s.path ?? ''))}
+                    onTogglePin={(path, pinned) => void togglePinnedSkill(path, pinned)}
                     onPatchExclude={(path, excluded) =>
                       void patchStandaloneExclude('skill', path, excluded)
                     }

@@ -4,6 +4,8 @@ import {
   SubagentRunBlock,
   SubagentRunBlockPending,
 } from '../components/subagent/SubagentRunBlock'
+import { AskQuestionBlock } from './AskQuestionBlock'
+import { SYLO_ASK_QUESTION_TOOL } from '../../../shared/ask-question'
 import { LogicForgeIoReviewAction } from '../components/logicforge/LogicForgeIoReviewAction'
 import { logicForgeMatchRunDir } from '../components/logicforge/logicForgeMatchRunDir'
 import { mapSubagentBatchesToMessage } from '../components/subagent/matchSubagentBatches'
@@ -52,6 +54,7 @@ import {
 import {
   assistantTurnDurationMs,
   buildAssistantSegments,
+  compactionSegmentLabel,
   formatDurationMs,
   gapsForOrderedChatSegments,
   labelLeadChatGap,
@@ -308,9 +311,7 @@ function InlineAssistantSegment({
           >
             ⧉
           </span>
-          <span className={chatSegmentLabel}>
-            {isLive ? 'Compacting context…' : 'Context compacted'}
-          </span>
+          <span className={chatSegmentLabel}>{compactionSegmentLabel(segment)}</span>
           {tokenLabel ?
             <span className={chatSegmentMeta}>{tokenLabel}</span>
           : null}
@@ -325,6 +326,10 @@ function InlineAssistantSegment({
           <p className={cn(mutedText, 'text-[0.78rem] leading-[1.45]')}>
             {isLive ?
               'Pi is summarizing older turns to free context window space.'
+            : segment.aborted ?
+              'Older history was not summarized. The full conversation is still in context.'
+            : segment.errorMessage ?
+              segment.errorMessage
             : 'Older turns were summarized. Recent messages are kept; facts from before this boundary may be missing.'}
           </p>
           <p className={cn(mutedText, 'mt-1 text-[0.74rem]')}>
@@ -609,24 +614,28 @@ function InterleavedAssistantBody({
       : seg.kind === 'tool' ? seg.endTs === null
       : seg.kind === 'compaction' ? seg.live
       : false
-    // Cursor-style collapse: while the turn streams, live segments (thinking in
-    // progress, running tools) are open and completed ones close. Once the
-    // final message is in, EVERYTHING defaults collapsed — including a trailing
-    // reasoning block that never saw a flush event — and a manual expand via
-    // the chevron (override) still wins.
-    const autoOpen = isStreaming ? isLive : false
+    // Cursor-style collapse once the turn is done. While streaming, tools stay
+    // collapsed (summary already previews args; subagent payloads are huge) and
+    // reasoning still opens. Ask-question tools render as a dedicated card.
+    const autoOpen = isStreaming && isLive && seg.kind !== 'tool'
     const key = `${messageId}:${seg.id}`
-    pieces.push(
-      <InlineAssistantSegment
-        key={`seg-${seg.id}-${i}`}
-        segment={seg}
-        autoOpen={autoOpen}
-        override={overrides[key]}
-        messageStreaming={isStreaming}
-        onToggle={(next) => onToggle(key, next)}
-        resolveImageUrl={resolveImageUrl}
-      />,
-    )
+    const isAskQuestion = seg.kind === 'tool' && seg.toolName === SYLO_ASK_QUESTION_TOOL
+    if (!isAskQuestion) {
+      pieces.push(
+        <InlineAssistantSegment
+          key={`seg-${seg.id}-${i}`}
+          segment={seg}
+          autoOpen={autoOpen}
+          override={overrides[key]}
+          messageStreaming={isStreaming}
+          onToggle={(next) => onToggle(key, next)}
+          resolveImageUrl={resolveImageUrl}
+        />,
+      )
+    }
+    if (isAskQuestion) {
+      pieces.push(<AskQuestionBlock key={`ask-question-${seg.id}`} segment={seg} />)
+    }
     if (seg.kind === 'tool' && seg.toolName === 'subagent') {
       const batch = subagentBatchBySegment.get(seg.id)
       if (batch) {

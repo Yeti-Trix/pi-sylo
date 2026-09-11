@@ -248,6 +248,22 @@ declare global {
             }
           | null
         >
+        /** Per-chat subagent pins plus the global pins they layer over. */
+        getSubagentModels: (
+          id: string,
+        ) => Promise<
+          | {
+              chat: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>
+              global: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>
+              allThinking: string
+              chatThinking: string | null
+            }
+          | null
+        >
+        setSubagentModels: (
+          id: string,
+          pins: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>,
+        ) => Promise<{ ok: true } | { ok: false; error: string }>
         delete: (id: string) => Promise<void>
       }
       /** Thinking (reasoning) effort supported for a provider/model per Pi. */
@@ -280,8 +296,11 @@ declare global {
             resolved_pi_cwd: string
             /** Primary only: its folder was missing on disk at app startup. */
             folder_missing: boolean
+            /** Stable primary (oldest workspace), independent of sidebar order. */
+            is_primary: boolean
           }[]
         >
+        reorder: (orderedIds: string[]) => Promise<{ ok: true } | { ok: false; error: string }>
         /** Ensures Dev sylo workspace exists (dev repo clone) and returns its id. */
         devWorkspaceId: () => Promise<string | null>
         defaultPathForName: (name: string) => Promise<string>
@@ -672,6 +691,14 @@ declare global {
         onTool: (
           cb: (p: { conversationId: string; messageId: string; event: unknown; ts: number }) => void,
         ) => () => void
+        onAskQuestion: (cb: (p: Record<string, unknown>) => void) => () => void
+      }
+      askQuestion: {
+        submit: (payload: {
+          requestId?: string
+          toolCallId?: string
+          answers: unknown
+        }) => Promise<{ ok: true } | { ok: false; error: string }>
       }
       capabilities: {
         settings: () => Promise<Record<string, unknown>>
@@ -714,6 +741,17 @@ declare global {
               }
             | { ok: false; error: string }
           >
+        }
+        /** Skills pinned inline into this workspace's system prompt. */
+        pinnedSkills: {
+          get: (
+            workspaceId?: string,
+          ) => Promise<{ ok: true; paths: string[] } | { ok: false; error: string }>
+          set: (
+            workspaceId: string | undefined,
+            skillPath: string,
+            pinned: boolean,
+          ) => Promise<{ ok: true; paths: string[] } | { ok: false; error: string }>
         }
         skillParamsMeta: (
           skillPath: string,
@@ -870,6 +908,23 @@ declare global {
           baseOrigin: string,
           modelId: string,
         ) => Promise<{ ok: true; vision: boolean } | { ok: false; error: string }>
+        contextStatus: (
+          baseOrigin: string,
+          modelId: string,
+        ) => Promise<
+          | {
+              ok: true
+              status: {
+                modelId: string
+                effective: number | null
+                declared: number | null
+                measured: boolean
+                verdict: 'unknown' | 'ok' | 'missing' | 'truncating' | 'wasting' | 'cramped'
+                message: string
+              }
+            }
+          | { ok: false; error: string }
+        >
         patchBaseUrl: (
           baseOrigin: string,
           ensureModelId?: string,
@@ -897,6 +952,24 @@ declare global {
         ) => Promise<{ ok: true; hasKey: boolean; keyPreview: string | null } | { ok: false; error: string }>
         /** key: '' removes the entry; null/missing key keeps it. */
         set: (provider: string, key: string) => Promise<{ ok: true } | { ok: false; error: string }>
+      }
+      /** ChatGPT Plus/Pro (OpenAI Codex OAuth) — tokens in Pi's auth.json. */
+      chatgpt: {
+        status: () => Promise<{ connected: boolean; accountId: string | null }>
+        login: () => Promise<{ ok: true } | { ok: false; error: string; cancelled?: boolean }>
+        cancel: () => Promise<{ ok: true }>
+        logout: () => Promise<{ ok: true } | { ok: false; error: string }>
+        onLoginEvent: (
+          cb: (event: {
+            type: 'device_code' | 'auth_url' | 'progress' | 'info'
+            userCode?: string
+            verificationUri?: string
+            expiresInSeconds?: number
+            url?: string
+            instructions?: string
+            message?: string
+          }) => void,
+        ) => () => void
       }
       /** OpenRouter (free-tier) model list from the public endpoint. */
       openrouter: {
@@ -1662,6 +1735,9 @@ declare global {
           orphanedCount: number
           extensionEnabled: boolean
         }>
+        agents: () => Promise<
+          Array<{ name: string; description: string; source: 'builtin' | 'user' | 'project' }>
+        >
         onLifecycle: (cb: (payload: unknown) => void) => () => void
       }
       // ── Agent checkpoints (per-turn undo; storage in app data only) ──

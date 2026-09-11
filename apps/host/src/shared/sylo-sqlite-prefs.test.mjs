@@ -15,7 +15,7 @@ describe('resolveSyloSqlitePathForTest', () => {
 
   test('expands userData root to sylo-data/sylo.sqlite', () => {
     assert.equal(
-      resolveSyloSqlitePathForTest('C:/appdata/host')!.replace(/\\/g, '/'),
+      String(resolveSyloSqlitePathForTest('C:/appdata/host')).replace(/\\/g, '/'),
       'C:/appdata/host/sylo-data/sylo.sqlite',
     )
   })

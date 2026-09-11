@@ -1,7 +1,23 @@
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 
+import { ChatMarkdown } from '../../ChatMarkdown'
 import { cn } from '../../lib/cn'
-import { btnDangerSm, btnPrimarySm, mutedText } from '../ui-classes'
+import { detailsOpenFromToggleEvent } from '../capability/helpers'
+import {
+  btnDangerSm,
+  btnPrimarySm,
+  chatMsgBody,
+  chatSegmentBody,
+  chatSegmentChevron,
+  chatSegmentIcon,
+  chatSegmentLabel,
+  chatSegmentMeta,
+  chatSegmentPulse,
+  chatSegmentRootClass,
+  chatSegmentSummary,
+  chatSegmentThinkingText,
+  mutedText,
+} from '../ui-classes'
 import { ChainStepper } from './ChainStepper'
 import {
   formatDuration,
@@ -11,6 +27,8 @@ import {
   parseTaskSpec,
   statusLabel,
   statusTone,
+  taskModelLabel,
+  taskThinkingText,
 } from './task-helpers'
 import type { AgentTaskRow } from './task-types'
 
@@ -32,6 +50,20 @@ export function TaskDetailDrawer({
 }): React.ReactElement {
   const [retryBusy, setRetryBusy] = useState(false)
   const [cancelBusy, setCancelBusy] = useState(false)
+  const [thinkingOverride, setThinkingOverride] = useState<boolean | undefined>(undefined)
+  const wasThinkingLive = useRef(false)
+  const thinkingLiveNow =
+    !!task && task.status === 'running' && parseTaskSpec(task.spec_json).lastThinkingLive === true
+
+  useEffect(() => {
+    setThinkingOverride(undefined)
+    wasThinkingLive.current = false
+  }, [task?.id])
+
+  useEffect(() => {
+    if (thinkingLiveNow && !wasThinkingLive.current) setThinkingOverride(undefined)
+    wasThinkingLive.current = thinkingLiveNow
+  }, [thinkingLiveNow])
 
   if (!task) {
     return (
@@ -53,6 +85,10 @@ export function TaskDetailDrawer({
     typeof result?.resultText === 'string' ? result.resultText
     : typeof result?.error === 'string' ? result.error
     : task.result_summary
+  const output = (task.status === 'running' ? preview : null) || resultText
+  const thinking = taskThinkingText(task)
+  const thinkingLive = task.status === 'running' && spec.lastThinkingLive === true
+  const model = taskModelLabel(task)
 
   const usage = result?.usage as
     | { input?: number; output?: number; cost?: number; turns?: number }
@@ -68,6 +104,11 @@ export function TaskDetailDrawer({
       <div className="border-b border-border px-3.5 py-3">
         <div className="flex flex-wrap items-center gap-2">
           <h3 className="m-0 text-[0.95rem] font-semibold text-text-primary">{task.agent_name}</h3>
+          {model ?
+            <span className="font-mono text-[0.74rem] text-text-secondary" title="Model this run used">
+              {model}
+            </span>
+          : null}
           <span
             className={cn(
               'rounded-full border px-2 py-0.5 text-[0.68rem] font-medium uppercase tracking-[0.03em]',
@@ -98,41 +139,49 @@ export function TaskDetailDrawer({
           </div>
         : null}
 
-        {preview && task.status === 'running' ?
-          <section className="mb-4">
-            <p className={cn(mutedText, 'mb-1.5 text-[0.78rem] font-medium uppercase tracking-[0.04em]')}>
-              Live output
-            </p>
-            <pre className="m-0 max-h-[220px] overflow-auto whitespace-pre-wrap rounded-md border border-border bg-bg-primary p-2.5 font-mono text-[0.78rem] leading-[1.45] text-text-primary">
-              {preview}
-            </pre>
-          </section>
+        {thinking ?
+          <details
+            className={cn(chatSegmentRootClass('thinking', {}), 'mb-3')}
+            open={thinkingOverride ?? task.status === 'running'}
+            onToggle={(e) => setThinkingOverride(detailsOpenFromToggleEvent(e))}
+          >
+            <summary className={chatSegmentSummary}>
+              <span
+                className={cn(
+                  chatSegmentIcon,
+                  'text-[rgb(107_159_255/0.9)]',
+                  thinkingLive && chatSegmentPulse,
+                )}
+                aria-hidden="true"
+              >
+                ◆
+              </span>
+              <span className={chatSegmentLabel}>{thinkingLive ? 'Reasoning…' : 'Reasoning'}</span>
+              {thinkingLive ?
+                <span className={cn(chatSegmentMeta, chatSegmentPulse)}>live</span>
+              : null}
+              <span className={chatSegmentChevron} aria-hidden="true" />
+            </summary>
+            <div className={chatSegmentBody}>
+              <pre className={chatSegmentThinkingText}>{thinking}</pre>
+            </div>
+          </details>
         : null}
 
         {spec.lastToolName ?
-          <section className="mb-4">
-            <p className={cn(mutedText, 'mb-1.5 text-[0.78rem] font-medium uppercase tracking-[0.04em]')}>
-              Last tool
-            </p>
-            <p className="mb-0 text-[0.82rem] text-text-primary">
-              <code className="font-mono text-[0.8rem]">{spec.lastToolName}</code>
-              {spec.lastToolPreview ?
-                <span className="text-text-secondary"> — {spec.lastToolPreview}</span>
-              : null}
-            </p>
-          </section>
+          <p className={cn(mutedText, 'mb-3 text-[0.78rem]')}>
+            <code className="font-mono text-[0.8rem] text-text-primary">{spec.lastToolName}</code>
+            {spec.lastToolPreview ?
+              <span> — {spec.lastToolPreview}</span>
+            : null}
+          </p>
         : null}
 
-        {resultText ?
-          <section className="mb-4">
-            <p className={cn(mutedText, 'mb-1.5 text-[0.78rem] font-medium uppercase tracking-[0.04em]')}>
-              Result
-            </p>
-            <pre className="m-0 max-h-[320px] overflow-auto whitespace-pre-wrap rounded-md border border-border bg-bg-primary p-2.5 font-mono text-[0.78rem] leading-[1.45] text-text-primary">
-              {resultText}
-            </pre>
-          </section>
-        : task.status === 'running' ?
+        {output ?
+          <div className={cn(chatMsgBody, 'mb-4')}>
+            <ChatMarkdown text={output} />
+          </div>
+        : task.status === 'running' && !thinking && !spec.lastToolName ?
           <p className={cn(mutedText, 'm-0 text-[0.82rem]')}>Waiting for subagent output…</p>
         : null}
 

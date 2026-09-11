@@ -128,7 +128,7 @@ export type BrokerOutMessage =
       query?: string
       limit?: number
     }
-  | {
+    | {
       type: 'sylo_schedule_rpc'
       turnId?: string
       requestId: string
@@ -144,6 +144,14 @@ export type BrokerOutMessage =
       catchup_on_startup?: boolean
       id?: string
       patch?: Record<string, unknown>
+    }
+  | {
+      type: 'sylo_ask_question'
+      turnId?: string
+      requestId: string
+      toolCallId: string
+      title?: string
+      questions: unknown
     }
     | {
       type: 'sylo-tasks:changed'
@@ -185,6 +193,10 @@ export interface BrokerConfig {
   initialSessionCwd: string
   modelProvider: string
     modelId: string
+  /** Per-chat thinking level; empty means Pi default. Published so child subagents can inherit it. */
+  thinkingLevel?: string
+  /** Serialized `{ "<agent>": { provider, modelId, thinkingLevel? } }` — global pins plus the chat's own. */
+  subagentModelsByAgent?: string
   /** Sylo ~/.sylo/disabled.json — broker filters these from capability snapshots. */
   disabledSkillPaths?: string[]
   disabledExtensionPaths?: string[]
@@ -192,6 +204,12 @@ export interface BrokerConfig {
   disabledTools?: { extensionPath: string; toolName: string }[]
   /** When true, broker lists/applies skills under the session workspace `.cursor/skills`. */
   includeCursorSkills?: boolean
+  /**
+   * Skill paths pinned into the system prompt for this workspace. Everything else is
+   * referenced by a one-line pointer the model can `read` on demand, so each pinned
+   * skill costs its full SKILL.md on every turn.
+   */
+  alwaysApplySkillPaths?: string[]
   /** Sylo pref — Pi built-in tools (read/bash/…) for the agent session. */
   piBuiltinTools?: PiBuiltinToolsPref
   /** Sylo pref — plain chat (no tools sent to the model). */
@@ -210,6 +228,8 @@ export interface BrokerConfig {
   subagentsExtension?: string
   /** Repo path to @sylo/sylo-scheduler (schedule_* tools + sylo_schedule_rpc IPC) */
   schedulerExtension?: string
+  /** Repo path to @sylo/sylo-ask-question (sylo_ask_question + host wait) */
+  askQuestionExtension?: string
   /** Enabled Sylo optional package extension paths (repo-bundled Pi packages). */
   optionalExtensionPaths?: string[]
   /** Absolute path to sylo-web-access config JSON for the broker child (optional). */
@@ -291,16 +311,19 @@ export class BrokerSupervisor {
       initialSessionCwd: cfg.initialSessionCwd,
       modelProvider: cfg.modelProvider,
             modelId: cfg.modelId,
+      subagentModelsByAgent: cfg.subagentModelsByAgent ?? '',
       disabledSkillPaths: cfg.disabledSkillPaths ?? [],
       disabledExtensionPaths: cfg.disabledExtensionPaths ?? [],
       disabledTools: cfg.disabledTools ?? [],
       includeCursorSkills: cfg.includeCursorSkills ?? false,
+      alwaysApplySkillPaths: cfg.alwaysApplySkillPaths ?? [],
       piBuiltinTools: cfg.piBuiltinTools,
       builtinToolsGuardExtension: cfg.builtinToolsGuardExtension,
       imageFallbackExtension: cfg.imageFallbackExtension,
       skillSurfaceExtension: cfg.skillSurfaceExtension,
       subagentsExtension: cfg.subagentsExtension,
       schedulerExtension: cfg.schedulerExtension,
+      askQuestionExtension: cfg.askQuestionExtension,
       optionalExtensionPaths: cfg.optionalExtensionPaths,
       webAccessConfigPath: cfg.webAccessConfigPath,
       ttsConfigPath: cfg.ttsConfigPath,
@@ -344,6 +367,7 @@ export class BrokerSupervisor {
         SYLO_PI_AGENT_DIR: this.cfg.agentDir,
         SYLO_MODEL_PROVIDER: this.cfg.modelProvider,
                 SYLO_MODEL_ID: this.cfg.modelId,
+        SYLO_THINKING_LEVEL: this.cfg.thinkingLevel ?? '',
         ...(this.cfg.skillSurfaceExtension ?
           { SYLO_SKILL_SURFACE_EXTENSION: this.cfg.skillSurfaceExtension }
         : {}),
@@ -355,10 +379,33 @@ export class BrokerSupervisor {
               'sylo.subagents.agent_scope',
               'user',
             ),
+            // Empty pair means "follow the chat model"; see subagentModelCliArgs.
+            SYLO_SUBAGENTS_MODEL_PROVIDER: readSyloPrefString(
+              this.cfg.syloDbPath,
+              'sylo.subagents.model_provider',
+              '',
+            ),
+            SYLO_SUBAGENTS_MODEL_ID: readSyloPrefString(
+              this.cfg.syloDbPath,
+              'sylo.subagents.model_id',
+              '',
+            ),
+            // JSON `{ "<agent>": { provider, modelId } }` — overrides the pair above per agent.
+            // Resolved by the host (global pins + the focused chat's own), not read here,
+            // so the chat-level override and the Settings default have one merge point.
+            SYLO_SUBAGENTS_MODEL_BY_AGENT: this.cfg.subagentModelsByAgent ?? '',
+            SYLO_SUBAGENTS_THINKING: readSyloPrefString(
+              this.cfg.syloDbPath,
+              'sylo.subagents.thinking_level',
+              '',
+            ),
           }
         : {}),
         ...(this.cfg.schedulerExtension ?
           { SYLO_SCHEDULER_EXTENSION: this.cfg.schedulerExtension }
+        : {}),
+        ...(this.cfg.askQuestionExtension ?
+          { SYLO_ASK_QUESTION_EXTENSION: this.cfg.askQuestionExtension }
         : {}),
         ...(this.cfg.optionalExtensionPaths && this.cfg.optionalExtensionPaths.length > 0 ?
           { SYLO_OPTIONAL_EXTENSION_PATHS: JSON.stringify(this.cfg.optionalExtensionPaths) }
@@ -442,6 +489,7 @@ export class BrokerSupervisor {
       disabledExtensionPaths: this.cfg.disabledExtensionPaths ?? [],
       disabledTools: this.cfg.disabledTools ?? [],
       includeCursorSkills: this.cfg.includeCursorSkills ?? false,
+      alwaysApplySkillPaths: this.cfg.alwaysApplySkillPaths ?? [],
       piBuiltinTools: this.cfg.piBuiltinTools,
       chatOnly: this.cfg.chatOnly ?? false,
     }
@@ -458,9 +506,13 @@ export class BrokerSupervisor {
       disabledExtensionPaths?: string[]
       disabledTools?: { extensionPath: string; toolName: string }[]
       includeCursorSkills?: boolean
+      /** Skill paths pinned into the system prompt for the switched-to workspace. */
+      alwaysApplySkillPaths?: string[]
       /** Per-chat main model override (empty = keep current). */
       modelProvider?: string
       modelId?: string
+      /** Resolved subagent pins for the switched-to chat; empty string clears them. */
+      subagentModelsByAgent?: string
             /** Per-chat image (fallback) model override (empty = keep current). */
       imageModelId?: string
       imageModelProvider?: string
@@ -498,8 +550,10 @@ export class BrokerSupervisor {
           disabledExtensionPaths: options?.disabledExtensionPaths,
           disabledTools: options?.disabledTools,
           includeCursorSkills: options?.includeCursorSkills,
+          alwaysApplySkillPaths: options?.alwaysApplySkillPaths,
           modelProvider: options?.modelProvider,
           modelId: options?.modelId,
+          subagentModelsByAgent: options?.subagentModelsByAgent,
           imageModelId: options?.imageModelId,
           imageModelProvider: options?.imageModelProvider,
           thinkingLevel: options?.thinkingLevel,
@@ -580,9 +634,11 @@ export class BrokerSupervisor {
     this.child?.send({ type: 'cancel_subagent', runId: id })
   }
 
-  sendChildMessage(payload: Record<string, unknown>): void {
-    if (!this.child || this.child.killed) return
+  /** Returns false when there is no live child to receive the message. */
+  sendChildMessage(payload: Record<string, unknown>): boolean {
+    if (!this.child || this.child.killed) return false
     this.child.send(payload)
+    return true
   }
 
   /** Ask the broker for its loaded extensions/skills snapshot. Rejects on timeout / no child / broker error. */

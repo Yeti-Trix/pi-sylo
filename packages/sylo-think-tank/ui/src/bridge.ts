@@ -65,6 +65,12 @@ export type ThinkTankConfig = {
 
 export type OllamaListResult = { baseUrl: string; models: string[] }
 
+/** Pi provider id behind the "ChatGPT OAuth" label. */
+export const CHATGPT_OAUTH_PROVIDER = 'openai-codex'
+
+export type ChatgptModelRow = { id: string; name: string; vision: boolean }
+export type ChatgptListResult = { models: ChatgptModelRow[] }
+
 export const bridge = {
   configGet: () => rpc<ThinkTankConfig>('thinkTankConfigGet', {}),
   configSave: (values: Record<string, unknown>) =>
@@ -73,6 +79,7 @@ export const bridge = {
   pickReport: (sessionId: string, reportId: string) =>
     rpc<{ ok: boolean; selectedReportId: string }>('thinkTankPickReport', { sessionId, reportId }),
   listOllamaModels: () => rpc<OllamaListResult>('settingsOllamaListTags', {}),
+  listChatgptModels: () => rpc<ChatgptListResult>('settingsChatgptModels', {}),
 }
 
 export const BUNDLED_PERSONAS = [
@@ -87,7 +94,9 @@ export const BUNDLED_AGENTS = BUNDLED_PERSONAS.map((p) => p.id)
 export const MODEL_PROVIDERS = [
   { value: '', label: 'Pi default (no override)' },
   { value: 'ollama', label: 'Ollama' },
-  { value: 'openai', label: 'OpenAI' },
+  { value: 'openai-codex', label: 'ChatGPT OAuth' },
+  { value: 'openai', label: 'OpenAI API' },
   { value: 'anthropic', label: 'Anthropic' },
   { value: 'groq', label: 'Groq' },
+  { value: 'openrouter', label: 'OpenRouter' },
 ] as const

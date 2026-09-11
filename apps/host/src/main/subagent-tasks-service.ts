@@ -39,13 +39,17 @@ export function handleSubagentHostEvent(conversationId: string, event: SyloSubag
         agent: event.agent,
         task: event.task,
         stepIndex: event.stepIndex,
+        model: event.model,
       })
       break
     case 'subagent_run_update':
       store.updateAgentTaskProgress(event.runId, {
         partialText: event.partialText,
+        partialThinking: event.partialThinking,
+        thinkingLive: event.thinkingLive,
         toolName: event.toolName,
         toolPreview: event.toolPreview,
+        model: event.model,
       })
       break
     case 'subagent_run_end':
@@ -54,6 +58,8 @@ export function handleSubagentHostEvent(conversationId: string, event: SyloSubag
         resultSummary: event.resultText?.slice(0, 2000) ?? event.error?.slice(0, 2000),
         resultJson: {
           resultText: event.resultText,
+          thinking: event.thinking,
+          model: event.model,
           error: event.error,
           usage: event.usage,
         },

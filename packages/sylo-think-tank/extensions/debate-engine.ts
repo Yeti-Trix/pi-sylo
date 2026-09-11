@@ -32,6 +32,8 @@ import {
   newThinkTankMessageId,
   newThinkTankSessionId,
   notifyThinkTank,
+  onThinkTankCancel,
+  THINK_TANK_STOPPED_BY_OPERATOR,
   type ThinkTankStance,
 } from './sylo-host.ts'
 
@@ -298,6 +300,26 @@ export async function runThinkTankSession(args: {
 
   const agents = discoverThinkTankAgents(args.cwd)
   const sessionId = newThinkTankSessionId()
+
+  // An operator stop cancels the run rather than the assistant turn hosting it, so this tool
+  // call still gets to return a result the model can read.
+  const runAbort = new AbortController()
+  let stopReason: string | null = null
+  const stopRun = (reason: string) => {
+    if (stopReason) return
+    stopReason = reason
+    runAbort.abort()
+  }
+  const unsubscribeCancel = onThinkTankCancel(sessionId, stopRun)
+  if (args.signal) {
+    if (args.signal.aborted) runAbort.abort()
+    else args.signal.addEventListener('abort', () => runAbort.abort(), { once: true })
+  }
+  const runSignal = runAbort.signal
+  /** The run is over either way; name which stop it was so the tool result is legible. */
+  const abortError = () =>
+    new Error(stopReason ? `${THINK_TANK_STOPPED_BY_OPERATOR}: ${stopReason}` : 'Think tank run aborted')
+
   const topic = resolveThinkTankTopic({ topic: args.topic, context: args.context })
   assertThinkTankTopicUsable(topic)
   assertThinkTankCriticalGaps({ topic: args.topic, context: args.context })
@@ -337,7 +359,7 @@ export async function runThinkTankSession(args: {
     for (let cycle = 1; cycle <= maxCycles; cycle++) {
       cyclesCompleted = cycle
       for (const seat of seats) {
-        if (args.signal?.aborted) throw new Error('Think tank run aborted')
+        if (runSignal.aborted) throw abortError()
 
         if (isModeratorSeat(seat)) {
           try {
@@ -406,7 +428,7 @@ export async function runThinkTankSession(args: {
           prompt,
           mode: 'debate',
           seatContext,
-          signal: args.signal,
+          signal: runSignal,
           onProgress: (entry) => {
             notifyThinkTank({
               type: 'turn_workflow',
@@ -460,6 +482,8 @@ export async function runThinkTankSession(args: {
       if (cycle >= minCycles && allSeatsReady(stances)) break
     }
 
+    if (runSignal.aborted) throw abortError()
+
     notifyThinkTank({ type: 'phase', sessionId, phase: 'final_reports' })
 
     const reportDebugLog: ThinkTankRunResult['debug']['reports'] = []
@@ -481,7 +505,7 @@ export async function runThinkTankSession(args: {
           seatRole: isModeratorSeat(seat) ? 'moderator' : 'debater',
           cycle: cyclesCompleted,
         },
-        signal: args.signal,
+        signal: runSignal,
       })
       const validation = result.debug.reportValidation ?? { ok: false, reason: 'missing_validation' }
       reportDebugLog.push({
@@ -535,6 +559,7 @@ export async function runThinkTankSession(args: {
     notifyThinkTank({ type: 'error', sessionId, message })
     throw err
   } finally {
+    unsubscribeCancel()
     try {
       await fs.promises.unlink(tasksFile)
     } catch {

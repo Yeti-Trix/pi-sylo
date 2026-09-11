@@ -49,6 +49,8 @@ export function SkillRowCard({
   skillSurfaceLintByPath,
   exclusionWorkspaceId,
   skillRemoveBusy,
+  pinned,
+  onTogglePin,
   onPatchExclude,
   onRequestRemove,
   onOpenParams,
@@ -60,6 +62,9 @@ export function SkillRowCard({
   skillSurfaceLintByPath: Record<string, SkillSurfaceLintReport>
   exclusionWorkspaceId: string
   skillRemoveBusy: string | null
+  /** Pinned skills are inlined into the system prompt every turn instead of being a pointer. */
+  pinned: boolean
+  onTogglePin: (path: string, pinned: boolean) => void | Promise<void>
   onPatchExclude: (path: string, excluded: boolean) => void | Promise<void>
   onRequestRemove: (name: string, path: string) => void
   onOpenParams: (path: string, name: string) => void
@@ -193,6 +198,25 @@ export function SkillRowCard({
                   Edit params…
                 </button>
               : null}
+              <button
+                type="button"
+                className={cn(
+                  btnGhostSm,
+                  pinned && 'border-accent/50 bg-accent/10 text-accent',
+                )}
+                disabled={skill.excludedFromAgent}
+                aria-pressed={pinned}
+                title={
+                  skill.excludedFromAgent ?
+                    'Enable this skill before pinning it.'
+                  : pinned ?
+                    'Pinned: the full SKILL.md is added to the system prompt on every turn. Click to unpin.'
+                  : 'Pin the full SKILL.md into the system prompt every turn. Costs its whole length in context — leave unpinned unless the agent should always follow it.'
+                }
+                onClick={() => void onTogglePin(path, !pinned)}
+              >
+                {pinned ? 'Pinned' : 'Pin to prompt'}
+              </button>
               <CapEnableSwitch
                 checked={!skill.excludedFromAgent}
                 disabled={!path.trim() || skillRemoveBusy === path}

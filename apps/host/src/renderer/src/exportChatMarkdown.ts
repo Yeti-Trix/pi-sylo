@@ -22,6 +22,7 @@ import {
   buildAssistantSegments,
   buildSummaryBars,
   classifyStoredTelemetryRaw,
+  compactionSegmentLabel,
   extractToolRuns,
   findTurnEnvelope,
   formatDurationMs,
@@ -199,14 +200,18 @@ function segmentMarkdown(seg: AssistantSegment): string {
         ` · ${seg.tokensAfter.toLocaleString()} tokens after`
       : ''
     const lines = [
-      `#### Context compaction (${dur}${tokenLine})`,
+      `#### ${compactionSegmentLabel(seg)} (${dur}${tokenLine})`,
       '',
       `**Trigger:** ${compactionTriggerLabel(
         seg.reason === 'manual' || seg.reason === 'overflow' ? seg.reason : 'threshold',
       )}`,
       '',
     ]
-    if (seg.summary?.trim()) {
+    if (seg.aborted) {
+      lines.push('_Older history was not summarized; the full conversation stayed in context._')
+    } else if (seg.errorMessage) {
+      lines.push(mdEscapeInline(seg.errorMessage))
+    } else if (seg.summary?.trim()) {
       lines.push('**Summary:**', '', seg.summary.trim())
     } else {
       lines.push('_Compaction ran; no summary text was captured in telemetry._')

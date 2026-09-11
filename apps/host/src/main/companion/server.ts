@@ -490,6 +490,29 @@ function createCompanionHandler(opts: {
       return
     }
 
+    if (url.pathname === '/api/ask-question/submit' && req.method === 'POST') {
+      if (!requireAuth(req, res)) return
+      try {
+        const body = (await readJsonBody(req)) as {
+          requestId?: unknown
+          toolCallId?: unknown
+          answers?: unknown
+        }
+        json(
+          res,
+          200,
+          getCompanionHostApi().submitAskQuestion({
+            requestId: typeof body.requestId === 'string' ? body.requestId : undefined,
+            toolCallId: typeof body.toolCallId === 'string' ? body.toolCallId : undefined,
+            answers: body.answers,
+          }),
+        )
+      } catch (e) {
+        json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
+      }
+      return
+    }
+
     const abortMatch = /^\/api\/conversations\/([^/]+)\/abort$/.exec(url.pathname)
     if (abortMatch && req.method === 'POST') {
       if (!requireAuth(req, res)) return

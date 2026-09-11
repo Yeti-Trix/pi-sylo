@@ -160,6 +160,9 @@ export function insertThinkTankTurn(args: {
   reasoningTrace?: string | null
 }): void {
   const now = Date.now()
+  // The completed turn carries the full merged workflow; drop the streaming tail so a
+  // pending flush cannot overwrite it afterwards.
+  finalizeWorkflowBuffer(args.id, args.toolCallsJson != null)
   getDb()
     .prepare(
       `INSERT INTO think_tank_messages (
@@ -208,22 +211,84 @@ export function upsertThinkTankTurnDraft(args: {
     .run(args.id, args.sessionId, args.cycle, args.seatId, args.model ?? null, now)
 }
 
+/**
+ * Streamed workflow events are buffered in memory and written on an interval.
+ *
+ * A seat streams one event per token, and the whole `tool_calls_json` blob is rewritten on
+ * each write. One measured runaway turn reached 29,242 events and a 1.9 MB blob, so writing
+ * per event cost roughly 28 GB of SQLite traffic for a single turn. Batching turns that into
+ * one write per interval — a couple hundred writes instead of tens of thousands.
+ */
+const WORKFLOW_FLUSH_MS = 2_000
+
+type WorkflowBuffer = {
+  entries: unknown[]
+  dirty: boolean
+  timer: ReturnType<typeof setInterval> | null
+}
+
+const workflowBuffers = new Map<string, WorkflowBuffer>()
+
+function writeWorkflowBuffer(messageId: string, buffer: WorkflowBuffer): void {
+  if (!buffer.dirty) return
+  buffer.dirty = false
+  getDb()
+    .prepare(`UPDATE think_tank_messages SET tool_calls_json = ? WHERE id = ?`)
+    .run(JSON.stringify(buffer.entries), messageId)
+}
+
+/**
+ * Stop buffering a turn. `supersededByCaller` means the caller is about to write its own
+ * `tool_calls_json`; otherwise the buffered tail is the only copy and has to be flushed.
+ */
+function finalizeWorkflowBuffer(messageId: string, supersededByCaller: boolean): void {
+  const buffer = workflowBuffers.get(messageId)
+  if (!buffer) return
+  if (!supersededByCaller) writeWorkflowBuffer(messageId, buffer)
+  if (buffer.timer) clearInterval(buffer.timer)
+  workflowBuffers.delete(messageId)
+}
+
 export function appendThinkTankTurnWorkflow(messageId: string, ts: number, event: unknown): void {
-  const row = getDb()
-    .prepare(`SELECT tool_calls_json FROM think_tank_messages WHERE id = ?`)
-    .get(messageId) as { tool_calls_json: string | null } | undefined
-  if (!row) return
-  let prior: unknown[] = []
-  if (row.tool_calls_json) {
-    try {
-      const parsed = JSON.parse(row.tool_calls_json) as unknown
-      if (Array.isArray(parsed)) prior = parsed
-    } catch {
-      prior = []
+  let buffer = workflowBuffers.get(messageId)
+  if (!buffer) {
+    const row = getDb()
+      .prepare(`SELECT tool_calls_json FROM think_tank_messages WHERE id = ?`)
+      .get(messageId) as { tool_calls_json: string | null } | undefined
+    if (!row) return
+    let prior: unknown[] = []
+    if (row.tool_calls_json) {
+      try {
+        const parsed = JSON.parse(row.tool_calls_json) as unknown
+        if (Array.isArray(parsed)) prior = parsed
+      } catch {
+        prior = []
+      }
     }
+    buffer = { entries: prior, dirty: false, timer: null }
+    workflowBuffers.set(messageId, buffer)
   }
-  const next = JSON.stringify([...prior, { ts, event }])
-  getDb().prepare(`UPDATE think_tank_messages SET tool_calls_json = ? WHERE id = ?`).run(next, messageId)
+
+  buffer.entries.push({ ts, event })
+  buffer.dirty = true
+  if (!buffer.timer) {
+    const held = buffer
+    buffer.timer = setInterval(() => writeWorkflowBuffer(messageId, held), WORKFLOW_FLUSH_MS)
+    buffer.timer.unref?.()
+  }
+}
+
+/** Persist every buffered workflow tail — call before quit so a crash-free exit loses nothing. */
+export function flushThinkTankTurnWorkflow(): void {
+  for (const [messageId, buffer] of workflowBuffers) {
+    try {
+      writeWorkflowBuffer(messageId, buffer)
+    } catch {
+      /* a closed database on shutdown must not block quit */
+    }
+    if (buffer.timer) clearInterval(buffer.timer)
+  }
+  workflowBuffers.clear()
 }
 
 export function insertThinkTankReport(args: {
@@ -247,6 +312,50 @@ export function setThinkTankSessionStatus(sessionId: string, status: ThinkTankSe
   getDb().prepare(`UPDATE think_tank_sessions SET status = ? WHERE id = ?`).run(status, sessionId)
 }
 
+/** Statuses that mean a run is still expected to produce turns. */
+const THINK_TANK_LIVE_STATUSES = ['debating', 'final_reports'] as const
+
+/**
+ * Close draft turn rows for a session that has stopped.
+ *
+ * `turn_start` inserts a placeholder with an empty body that the matching `turn` fills in.
+ * When a seat never returns — cancel, error, crash — the placeholder survives, and an empty
+ * body is indistinguishable from a turn that is still streaming, so the chat keeps rendering
+ * it as live with a timer that ticks for as long as the row exists.
+ */
+export function finalizeThinkTankDraftTurns(sessionId: string, note: string): number {
+  const drafts = getDb()
+    .prepare(`SELECT id FROM think_tank_messages WHERE session_id = ? AND trim(body) = ''`)
+    .all(sessionId) as Array<{ id: string }>
+  for (const draft of drafts) finalizeWorkflowBuffer(draft.id, false)
+  const info = getDb()
+    .prepare(
+      `UPDATE think_tank_messages
+         SET body = ?, summary = ?
+       WHERE session_id = ? AND trim(body) = ''`,
+    )
+    .run(`_(${note})_`, note, sessionId)
+  return info.changes
+}
+
+/**
+ * Close sessions left mid-run by a crash or restart.
+ *
+ * Runs live in the broker child, so nothing survives a host restart to resume them; a session
+ * still marked `debating` at startup is by definition abandoned.
+ */
+export function finalizeOrphanThinkTankSessions(note: string): number {
+  const orphans = getDb()
+    .prepare(
+      `SELECT id FROM think_tank_sessions WHERE status IN (${THINK_TANK_LIVE_STATUSES.map(() => '?').join(', ')})`,
+    )
+    .all(...THINK_TANK_LIVE_STATUSES) as Array<{ id: string }>
+  for (const { id } of orphans) {
+    setThinkTankSessionError(id, note)
+  }
+  return orphans.length
+}
+
 /**
  * Finalize a think tank session without recording a selected debater report.
  *
@@ -255,6 +364,7 @@ export function setThinkTankSessionStatus(sessionId: string, status: ThinkTankSe
  * available as an optional programmatic API to mark a debater report as selected.
  */
 export function finalizeThinkTankSession(sessionId: string): void {
+  finalizeThinkTankDraftTurns(sessionId, 'No output')
   getDb()
     .prepare(
       `UPDATE think_tank_sessions SET status = 'complete', completed_at = ? WHERE id = ?`,
@@ -300,12 +410,14 @@ export function pickThinkTankReport(sessionId: string, reportId: string): Record
 }
 
 export function setThinkTankSessionError(sessionId: string, message: string): void {
+  finalizeThinkTankDraftTurns(sessionId, 'Interrupted')
   getDb()
     .prepare(`UPDATE think_tank_sessions SET status = 'error', error_message = ?, completed_at = ? WHERE id = ?`)
     .run(message.slice(0, 2000), Date.now(), sessionId)
 }
 
 export function setThinkTankSessionCancelled(sessionId: string, message: string): void {
+  finalizeThinkTankDraftTurns(sessionId, 'Stopped')
   getDb()
     .prepare(`UPDATE think_tank_sessions SET status = 'cancelled', error_message = ?, completed_at = ? WHERE id = ?`)
     .run(message.slice(0, 2000), Date.now(), sessionId)

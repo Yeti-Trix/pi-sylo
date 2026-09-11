@@ -47,6 +47,24 @@ export function normalizeSkillPathListForPolicyJson(paths: unknown): string[] {
   return out
 }
 
+/**
+ * Which skills a workspace pins inline into the system prompt.
+ *
+ * Unpinned skills still reach the agent as one-line pointers it can read on demand, so an
+ * empty pin set means the skills block stays small rather than meaning "no skills". Pi
+ * reports a skill by either its folder or its `SKILL.md`, hence the shared normalization.
+ */
+export function selectPinnedSkills<T extends { filePath?: string }>(
+  skills: readonly T[],
+  pinnedPaths: ReadonlySet<string>,
+): T[] {
+  if (pinnedPaths.size === 0) return []
+  return skills.filter((s) => {
+    const key = normalizeSkillCapabilityPath(s.filePath ?? '')
+    return key !== '' && pinnedPaths.has(key)
+  })
+}
+
 /** Normalize, dedupe, and sort paths for `~/.sylo/disabled.json`. */
 export function normalizePathListForDisabledJson(paths: unknown): string[] {
   if (!Array.isArray(paths)) return []

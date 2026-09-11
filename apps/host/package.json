@@ -24,13 +24,22 @@
     "test:sylo-sqlite-prefs": "esbuild src/shared/sylo-sqlite-prefs.test.mjs --bundle --platform=node --format=esm --outfile=out/test/sylo-sqlite-prefs.test.mjs --packages=external && node --test out/test/sylo-sqlite-prefs.test.mjs",
     "test:resolve-python": "esbuild src/shared/resolve-python.test.mjs --bundle --platform=node --format=esm --outfile=out/test/resolve-python.test.mjs --packages=external && node --test out/test/resolve-python.test.mjs",
     "test:capability-display-names": "esbuild src/broker/capability-display-names.test.mjs --bundle --platform=node --format=esm --outfile=out/test/capability-display-names.test.mjs --packages=external && node --test out/test/capability-display-names.test.mjs",
+    "test:chat-scroll": "esbuild src/renderer/src/chat/chatScrollIntent.ts --bundle --platform=node --format=esm --outfile=out/test/chatScrollIntent.mjs --packages=external && node --test src/renderer/src/chat/chatScrollIntent.test.mjs",
+    "test:sylo-surface-protocol": "esbuild src/shared/sylo-surface-protocol.ts --bundle --platform=node --format=esm --outfile=out/test/sylo-surface-protocol.mjs --packages=external && node --test src/shared/sylo-surface-protocol.test.mjs",
     "test:chat-title": "esbuild src/main/chat-title.test.mjs --bundle --platform=node --format=esm --outfile=out/test/chat-title.test.mjs --packages=external && node --test out/test/chat-title.test.mjs",
+    "test:tool-telemetry": "esbuild src/main/tool-telemetry.ts --bundle --platform=node --format=esm --outfile=out/test/tool-telemetry.mjs --packages=external && node --test src/main/tool-telemetry.test.mjs",
+    "test:ollama-context": "esbuild src/main/ollama-context.ts --bundle --platform=node --format=esm --outfile=out/test/ollama-context.mjs --packages=external && node --test src/main/ollama-context.test.mjs",
+    "build:ollama-context-tools": "esbuild src/main/ollama-context.ts --bundle --platform=node --format=esm --outfile=out/test/ollama-context.mjs --packages=external && esbuild src/main/model-input.ts --bundle --platform=node --format=esm --outfile=out/test/model-input.mjs --packages=external",
+    "sync:ollama-context": "npm run build:ollama-context-tools && node scripts/sync-ollama-context.mjs",
+    "test:pinned-skills": "esbuild src/shared/sylo-capability-paths.ts --bundle --platform=node --format=esm --outfile=out/test/sylo-capability-paths.mjs --packages=external && node --test src/shared/sylo-pinned-skills.test.mjs",
     "test:skill-scope": "esbuild src/shared/sylo-skill-scope.test.mjs --bundle --platform=node --format=esm --outfile=out/test/sylo-skill-scope.test.mjs --packages=external && node --test out/test/sylo-skill-scope.test.mjs",
     "test:workflow-timing": "esbuild src/renderer/src/workflowTimeline.ts --bundle --platform=node --format=esm --outfile=out/test/workflowTimeline.mjs && node --test src/renderer/workflowTimeline.test.mjs",
     "test:compaction-notice": "esbuild src/shared/compaction-notice.ts --bundle --platform=node --format=esm --outfile=out/test/compaction-notice.mjs --packages=external && node --test src/shared/compaction-notice.test.mjs",
     "test:schedule-recurrence": "esbuild src/shared/schedule-recurrence.ts --bundle --platform=node --format=esm --outfile=out/shared/schedule-recurrence.mjs --packages=external && node src/shared/schedule-recurrence.test.mjs",
     "diagnose:shell": "npm run build:broker && node scripts/diagnose-pi-shell.mjs",
-    "test:global-agents": "esbuild src/main/global-agents.test.mjs --bundle --platform=node --format=esm --outfile=out/test/global-agents.test.mjs --packages=external && node --test out/test/global-agents.test.mjs"
+    "test:global-agents": "esbuild src/main/global-agents.test.mjs --bundle --platform=node --format=esm --outfile=out/test/global-agents.test.mjs --packages=external && node --test out/test/global-agents.test.mjs",
+    "test:chatgpt-codex": "esbuild src/shared/chatgpt-codex.ts --bundle --platform=node --format=esm --outfile=out/test/chatgpt-codex.mjs --packages=external && node --test src/shared/chatgpt-codex.test.mjs",
+    "test:ask-question": "esbuild src/shared/ask-question.ts --bundle --platform=node --format=esm --outfile=out/test/ask-question.mjs --packages=external && node --test src/shared/ask-question.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.84.2",

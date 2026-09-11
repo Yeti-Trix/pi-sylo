@@ -1,7 +1,7 @@
 import React from 'react'
 
 import { cn } from '../../lib/cn'
-import { formatDuration, formatWhen, livePreviewText, statusLabel, statusTone } from './task-helpers'
+import { formatDuration, formatWhen, livePreviewText, statusLabel, statusTone, taskModelLabel } from './task-helpers'
 import type { AgentTaskRow } from './task-types'
 
 export function TaskRow({
@@ -17,6 +17,7 @@ export function TaskRow({
 }): React.ReactElement {
   const preview = livePreviewText(task)
   const duration = formatDuration(task.started_at, task.ended_at)
+  const model = taskModelLabel(task)
 
   return (
     <button
@@ -31,6 +32,7 @@ export function TaskRow({
     >
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-[0.88rem] font-semibold text-text-primary">{task.agent_name}</span>
+        {model ? <span className="font-mono text-[0.72rem] text-text-secondary">{model}</span> : null}
         <span
           className={cn(
             'rounded-full border px-2 py-0.5 text-[0.68rem] font-medium uppercase tracking-[0.03em]',

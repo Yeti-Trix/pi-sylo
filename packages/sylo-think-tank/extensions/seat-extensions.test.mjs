@@ -30,3 +30,17 @@ test('resolveSeatExtensionPaths includes all enabled optional extensions', async
   assert.ok(!paths.includes(disabled))
   assert.ok(paths.includes(subagents))
 })
+
+test('seat extensions keep the think-tank assignment-board tools', async () => {
+  // Regression: pruning sylo-think-tank from the seat list removed
+  // sylo_think_tank_task_* while the prompt still embedded the board, and the
+  // Moderator looped on empty markdown table rows instead of taking a turn.
+  const { resolveSeatExtensionPaths } = await import('./seat-extensions.ts')
+  const think = extPath('packages', 'sylo-think-tank', 'extensions', 'index.ts')
+
+  const paths = resolveSeatExtensionPaths({
+    SYLO_OPTIONAL_EXTENSION_PATHS: JSON.stringify([think]),
+  })
+
+  assert.ok(paths.includes(think))
+})

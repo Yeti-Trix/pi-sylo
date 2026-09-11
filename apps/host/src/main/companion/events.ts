@@ -5,6 +5,7 @@ export type CompanionEvent =
       payload: { conversationId: string; messageId: string; delta: string }
     }
   | { channel: 'chat:tool'; payload: Record<string, unknown> }
+  | { channel: 'chat:ask-question'; payload: Record<string, unknown> }
   | { channel: 'broker:status'; payload: Record<string, unknown> }
   | { channel: 'broker:error'; payload: Record<string, unknown> }
 

@@ -8,7 +8,7 @@ import sys
 
 
 async def run_fetch(url: str, screenshot: bool) -> dict:
-    from crawl4ai import AsyncWebCrawler, CacheMode, CrawlerRunConfig
+    from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 
     config = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS,
@@ -17,7 +17,15 @@ async def run_fetch(url: str, screenshot: bool) -> dict:
         screenshot_wait_for=1.0,
         page_timeout=45_000,
     )
-    async with AsyncWebCrawler() as crawler:
+    # Windows Chromium "headless" still flashes a window on the primary
+    # display and steals focus, which warps the mouse cursor there.
+    # Park the window off-screen so F2 fetch cannot do that.
+    browser = BrowserConfig(
+        headless=True,
+        verbose=False,
+        extra_args=["--window-position=-2400,-2400"],
+    )
+    async with AsyncWebCrawler(config=browser) as crawler:
         result = await crawler.arun(url=url, config=config)
 
     if not result.success:

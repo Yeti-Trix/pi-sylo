@@ -117,6 +117,22 @@ export function batchProgress(tasks: AgentTaskRow[]): { done: number; total: num
   return { done, total, running }
 }
 
+export function taskModelLabel(task: AgentTaskRow): string | null {
+  const spec = parseTaskSpec(task.spec_json)
+  if (spec.model?.trim()) return spec.model.trim()
+  const result = parseResultJson(task.result_json)
+  const model = result?.model
+  return typeof model === 'string' && model.trim() ? model.trim() : null
+}
+
+export function taskThinkingText(task: AgentTaskRow): string | null {
+  const spec = parseTaskSpec(task.spec_json)
+  if (spec.lastPartialThinking?.trim()) return spec.lastPartialThinking.trim()
+  const result = parseResultJson(task.result_json)
+  const thinking = result?.thinking
+  return typeof thinking === 'string' && thinking.trim() ? thinking.trim() : null
+}
+
 export function livePreviewText(task: AgentTaskRow): string | null {
   const spec = parseTaskSpec(task.spec_json)
   if (spec.lastPartialText?.trim()) return spec.lastPartialText.trim()

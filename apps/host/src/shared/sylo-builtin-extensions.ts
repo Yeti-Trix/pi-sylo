@@ -1,6 +1,11 @@
 import { PI_BUILTIN_TOOL_IDS, type PiBuiltinToolsPref } from './pi-builtin-tools.js'
 
-export type SyloBuiltinExtensionKind = 'skill-surface' | 'subagents' | 'scheduler' | 'tools-guard'
+export type SyloBuiltinExtensionKind =
+  | 'skill-surface'
+  | 'subagents'
+  | 'scheduler'
+  | 'ask-question'
+  | 'tools-guard'
 
 export function normalizePathForBuiltinMatch(path: string): string {
   return path.replace(/\\/g, '/').toLowerCase()
@@ -26,6 +31,12 @@ export function classifySyloBuiltinExtension(path: string): SyloBuiltinExtension
     norm.endsWith('/packages/sylo-scheduler/extensions/index.ts')
   ) {
     return 'scheduler'
+  }
+  if (
+    norm.includes('/packages/sylo-ask-question/') ||
+    norm.endsWith('/packages/sylo-ask-question/extensions/index.ts')
+  ) {
+    return 'ask-question'
   }
   if (norm.includes('sylo-builtin-tools-guard')) {
     return 'tools-guard'
@@ -53,6 +64,11 @@ export function syloBuiltinExtensionHint(kind: SyloBuiltinExtensionKind): string
       return (
         'Registers schedule_list/create/update/delete - workspace-scoped prompt schedules. ' +
         'Host fires due schedules as new chats; optional startup catchup.'
+      )
+    case 'ask-question':
+      return (
+        'Registers sylo_ask_question — Cursor-style multiple-choice questions inline in chat. ' +
+        'The agent waits until you pick answers and hit Submit. Prefer asking several questions in one call.'
       )
     case 'tools-guard':
       return (

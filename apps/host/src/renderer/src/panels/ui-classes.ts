@@ -658,6 +658,11 @@ export const sidebarWsSectionName = 'min-w-0 flex-1 truncate'
 
 export const sidebarWsSectionActive = 'text-text-primary'
 
+export const sidebarWsSectionDragging = 'opacity-55'
+
+export const sidebarWsDropLine =
+  'pointer-events-none absolute inset-x-2 z-10 h-0.5 rounded-full bg-accent'
+
 export const sidebarConvEmpty = 'px-2 py-1.5 text-[0.78rem] text-text-muted'
 
 
@@ -890,7 +895,7 @@ export const canvasResizeHandleCol =
 export const chatPane = 'flex min-h-0 min-w-0 flex-1 flex-col'
 
 export const chatArea =
-  'flex min-w-0 flex-1 flex-col gap-3 overflow-x-hidden overflow-y-auto overscroll-y-contain px-5 py-5 touch-pan-y [overflow-anchor:none]'
+  'flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-x-hidden overflow-y-auto overscroll-y-contain px-5 py-5 touch-pan-y [overflow-anchor:none]'
 
 export const chatMessageList = 'flex w-full min-w-0 flex-col gap-4'
 
@@ -998,6 +1003,25 @@ export function chatSegmentRootClass(
     kind === 'tool' && opts.isError && 'border-[rgb(241_106_80/0.5)] bg-[rgb(241_106_80/0.06)]',
   )
 }
+
+/** Cursor-style in-chat multiple-choice card */
+export const askQuestionCard =
+  'group mt-1.5 overflow-hidden rounded-[10px] border border-accent/28 bg-bg-primary'
+export const askQuestionHead =
+  'border-b border-border bg-accent/[0.07] px-3.5 py-2.5 text-[0.82rem] font-semibold text-text-primary'
+export const askQuestionSummary =
+  'flex cursor-pointer list-none items-center gap-2 bg-accent/[0.07] px-3.5 py-2.5 text-[0.82rem] text-text-primary select-none group-open:border-b group-open:border-border [&::-webkit-details-marker]:hidden [&::marker]:content-none'
+export const askQuestionBody = 'flex flex-col gap-3.5 px-3.5 py-3'
+export const askQuestionPrompt = 'm-0 text-[0.88rem] font-medium leading-[1.4] text-text-primary'
+export const askQuestionOptions = 'mt-1.5 flex flex-col gap-1'
+export const askQuestionOption =
+  'flex cursor-pointer items-start gap-2.5 rounded-md border border-transparent px-2 py-1.5 text-[0.84rem] leading-[1.4] text-text-primary transition-[background,border-color] duration-[120ms] hover:border-accent/25 hover:bg-accent/[0.06]'
+export const askQuestionOptionSelected = 'border-accent/40 bg-accent/[0.12]'
+export const askQuestionOptionDisabled = 'cursor-default hover:border-transparent hover:bg-transparent'
+export const askQuestionOtherInput =
+  'mt-1.5 box-border w-full rounded-md border border-border bg-bg-secondary px-2.5 py-1.5 text-[0.82rem] text-text-primary focus:border-accent/55 focus:shadow-[0_0_0_3px_rgb(107_159_255/0.18)] focus:outline-none'
+export const askQuestionFooter = 'flex items-center justify-end gap-2 border-t border-border px-3.5 py-2.5'
+
 
 /** Composer + status foot */
 export const chatStatusSubfoot =

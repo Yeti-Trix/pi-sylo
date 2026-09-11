@@ -44,6 +44,7 @@ export type SkillRouteBridgeOp =
   | 'webAccessConfigSave'
   | 'webAccessBraveQuota'
   | 'settingsOllamaListTags'
+  | 'settingsChatgptModels'
     | 'logicforgeParseRulesGet'
   | 'logicforgeParseRulesSave'
   | 'logicforgeParseRulesReset'
@@ -165,6 +166,7 @@ const ROUTE_OPS: ReadonlySet<string> = new Set([
   'webAccessConfigSave',
   'webAccessBraveQuota',
   'settingsOllamaListTags',
+  'settingsChatgptModels',
     'logicforgeParseRulesGet',
   'logicforgeParseRulesSave',
   'logicforgeParseRulesReset',

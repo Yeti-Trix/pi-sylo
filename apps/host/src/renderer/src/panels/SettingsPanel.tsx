@@ -4,6 +4,18 @@ import React, { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 // personal plugin; renders nothing when the bundle is absent.
 const PersonalSettingsCard = lazy(() => import('./PersonalSettingsCard'))
 import { SYLO_DEFAULT_MODEL_ID } from '../../../shared/sylo-model-defaults'
+import {
+  CHATGPT_CODEX_DEFAULT_MODEL,
+  CHATGPT_CODEX_MODELS,
+  CHATGPT_CODEX_PROVIDER,
+  SYLO_MODEL_PROVIDERS,
+  SYLO_MODEL_PROVIDER_LABELS,
+} from '../../../shared/chatgpt-codex'
+import {
+  parseSubagentPins,
+  SUBAGENT_THINKING_LEVELS,
+  type SubagentModelPin,
+} from '../../../shared/subagent-model-pin'
 import { cn } from '../lib/cn'
 import { normalizeOllamaOriginUi, OllamaModelSelect } from './ollama-ui'
 import { WeeklySweepCard } from './WeeklySweepCard'
@@ -47,6 +59,100 @@ async function revealDirectory(
   }
 }
 
+type SubagentAgentInfo = { name: string; description: string; source: 'builtin' | 'user' | 'project' }
+
+/** Provider + model pair and optional thinking, shared by the all-subagents default and each per-agent override. */
+function SubagentModelFields({
+  idPrefix,
+  label,
+  inheritLabel,
+  thinkingInheritLabel,
+  pin,
+  onChange,
+  ollamaTags,
+}: {
+  idPrefix: string
+  label: string
+  inheritLabel: string
+  thinkingInheritLabel: string
+  pin: SubagentModelPin
+  onChange: (next: SubagentModelPin) => void
+  ollamaTags: string[]
+}): React.ReactElement {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <select
+        className={cn(select, 'min-w-[160px] flex-none')}
+        value={pin.provider}
+        // Model ids do not carry across providers, so switching clears the pair.
+        onChange={(e) => onChange({ ...pin, provider: e.target.value, modelId: '' })}
+        aria-label={`${label} provider`}
+      >
+        <option value="">{inheritLabel}</option>
+        {SYLO_MODEL_PROVIDERS.map((p) => (
+          <option key={p} value={p}>
+            {SYLO_MODEL_PROVIDER_LABELS[p]}
+          </option>
+        ))}
+      </select>
+
+      {pin.provider === '' ?
+        null
+      : pin.provider === 'ollama' ?
+        <OllamaModelSelect
+          id={`${idPrefix}-ollama-model`}
+          className="min-w-[180px] flex-1"
+          modelId={pin.modelId}
+          setModelId={(v) => onChange({ ...pin, modelId: v })}
+          ollamaTags={ollamaTags}
+          emptyOptionLabel="Select a model…"
+        />
+      : pin.provider === CHATGPT_CODEX_PROVIDER ?
+        <select
+          id={`${idPrefix}-chatgpt-model`}
+          className={cn(select, 'min-w-[180px] flex-1')}
+          value={pin.modelId}
+          onChange={(e) => onChange({ ...pin, modelId: e.target.value })}
+          aria-label={`${label} model`}
+        >
+          <option value="">Select a model…</option>
+          {CHATGPT_CODEX_MODELS.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name}
+            </option>
+          ))}
+        </select>
+      : <input
+          id={`${idPrefix}-model-id`}
+          className={cn(input, 'min-w-[180px] flex-1')}
+          value={pin.modelId}
+          onChange={(e) => onChange({ ...pin, modelId: e.target.value })}
+          placeholder="Model id"
+          aria-label={`${label} model`}
+        />
+      }
+
+      <select
+        id={`${idPrefix}-thinking`}
+        className={cn(select, 'w-auto min-w-[140px] flex-none')}
+        value={pin.thinkingLevel ?? ''}
+        onChange={(e) => {
+          const thinkingLevel = e.target.value
+          onChange(thinkingLevel ? { ...pin, thinkingLevel } : { provider: pin.provider, modelId: pin.modelId })
+        }}
+        aria-label={`${label} thinking`}
+      >
+        <option value="">{thinkingInheritLabel}</option>
+        {SUBAGENT_THINKING_LEVELS.map((lvl) => (
+          <option key={lvl} value={lvl}>
+            think: {lvl}
+          </option>
+        ))}
+      </select>
+    </div>
+  )
+}
+
 export function SettingsPanel({
   onChanged,
   diagnostics,
@@ -74,6 +180,12 @@ export function SettingsPanel({
   const [concurrentTurns, setConcurrentTurns] = useState(diagnostics.concurrentTurns)
   const [chatOnly, setChatOnly] = useState(diagnostics.chatOnly)
   const [allowProjectAgents, setAllowProjectAgents] = useState(false)
+  const [subagentProvider, setSubagentProvider] = useState('')
+  const [subagentModelId, setSubagentModelId] = useState('')
+  const [subagentThinking, setSubagentThinking] = useState('')
+  const [subagentModelSaving, setSubagentModelSaving] = useState(false)
+  const [subagentAgents, setSubagentAgents] = useState<SubagentAgentInfo[]>([])
+  const [agentPins, setAgentPins] = useState<Record<string, SubagentModelPin>>({})
   const [subagentDiag, setSubagentDiag] = useState<{
     runningCount: number
     orphanedCount: number
@@ -89,6 +201,11 @@ export function SettingsPanel({
   const [ollamaVisionDetected, setOllamaVisionDetected] = useState<boolean | null>(null)
   const [visionProbeLoading, setVisionProbeLoading] = useState(false)
   const [visionProbeError, setVisionProbeError] = useState<string | null>(null)
+  type OllamaContextStatus = Extract<
+    Awaited<ReturnType<typeof window.sylo.ollama.contextStatus>>,
+    { ok: true }
+  >['status']
+  const [contextStatus, setContextStatus] = useState<OllamaContextStatus | null>(null)
   const [imageModelId, setImageModelId] = useState('')
   // OpenRouter (free tier): API key (auth.json) + live free-model list.
   const [orKeyInput, setOrKeyInput] = useState('')
@@ -99,6 +216,13 @@ export function SettingsPanel({
   const [orModelsSource, setOrModelsSource] = useState<'live' | 'fallback' | null>(null)
   const [orModelsLoading, setOrModelsLoading] = useState(false)
   const [orKeySaving, setOrKeySaving] = useState(false)
+  const [chatgptConnected, setChatgptConnected] = useState(false)
+  const [chatgptAccountId, setChatgptAccountId] = useState<string | null>(null)
+  const [chatgptBusy, setChatgptBusy] = useState(false)
+  const [chatgptError, setChatgptError] = useState<string | null>(null)
+  const [chatgptDeviceCode, setChatgptDeviceCode] = useState('')
+  const [chatgptDeviceUri, setChatgptDeviceUri] = useState('')
+  const [chatgptProgress, setChatgptProgress] = useState<string | null>(null)
   const [companionEnabled, setCompanionEnabled] = useState(false)
   const [companionBind, setCompanionBind] = useState<'loopback' | 'lan'>('loopback')
   const [companionPort, setCompanionPort] = useState(9241)
@@ -172,8 +296,25 @@ export function SettingsPanel({
     void (async () => {
       const scope = (await window.sylo.prefs.get('sylo.subagents.agent_scope', 'user')) as string
       setAllowProjectAgents(scope.trim() === 'both')
+      const p = (await window.sylo.prefs.get('sylo.subagents.model_provider', '')) as string
+      const m = (await window.sylo.prefs.get('sylo.subagents.model_id', '')) as string
+      const t = (await window.sylo.prefs.get('sylo.subagents.thinking_level', '')) as string
+      setSubagentProvider(p.trim())
+      setSubagentModelId(m.trim())
+      setSubagentThinking(t.trim())
+      setAgentPins(
+        parseSubagentPins((await window.sylo.prefs.get('sylo.subagents.model_by_agent', '')) as string),
+      )
     })()
   }, [])
+
+  // Re-listed on scope change: allowing project agents can add personas to pin.
+  useEffect(() => {
+    void window.sylo.tasks
+      .agents()
+      .then(setSubagentAgents)
+      .catch(() => setSubagentAgents([]))
+  }, [allowProjectAgents])
 
   useEffect(() => {
     void window.sylo.tasks.diagnostics().then(setSubagentDiag).catch(() => setSubagentDiag(null))
@@ -198,11 +339,10 @@ export function SettingsPanel({
     })()
   }, [])
 
+  // Loaded for every provider, not just Ollama: the image fallback below is always an
+  // Ollama vision model, so its picker needs the tag list even when the main model is
+  // ChatGPT OAuth or another remote provider.
   useEffect(() => {
-    if (modelProvider !== 'ollama') {
-      setOllamaListError(null)
-      return
-    }
     let cancelled = false
     const t = window.setTimeout(() => {
       void (async () => {
@@ -223,7 +363,7 @@ export function SettingsPanel({
       cancelled = true
       window.clearTimeout(t)
     }
-  }, [modelProvider, ollamaBaseUrl])
+  }, [ollamaBaseUrl])
 
   useEffect(() => {
     const id = modelId.trim()
@@ -284,8 +424,31 @@ export function SettingsPanel({
     }
   }, [modelProvider, modelId, ollamaBaseUrl, modelVisionExplicit])
 
+  // Ollama's /v1 endpoint ignores num_ctx, so models.json is the only place Pi's
+  // context window can be reconciled with reality. Surface a mismatch rather than
+  // letting it fail silently as truncation or premature compaction.
+  useEffect(() => {
+    const id = modelId.trim()
+    if (modelProvider !== 'ollama' || !id) {
+      setContextStatus(null)
+      return
+    }
+    let cancelled = false
+    const t = window.setTimeout(() => {
+      void (async () => {
+        const origin = normalizeOllamaOriginUi(ollamaBaseUrl)
+        const res = await window.sylo.ollama.contextStatus(origin, id)
+        if (cancelled) return
+        setContextStatus(res.ok ? res.status : null)
+      })()
+    }, 320)
+    return () => {
+      cancelled = true
+      window.clearTimeout(t)
+    }
+  }, [modelProvider, modelId, ollamaBaseUrl])
+
     const refreshOllamaTags = useCallback(async () => {
-    if (modelProvider !== 'ollama') return
     setOllamaListLoading(true)
     setOllamaListError(null)
     const r = await window.sylo.ollama.listTags(normalizeOllamaOriginUi(ollamaBaseUrl))
@@ -296,7 +459,7 @@ export function SettingsPanel({
       setOllamaTags([])
       setOllamaListError(r.error)
     }
-  }, [modelProvider, ollamaBaseUrl])
+  }, [ollamaBaseUrl])
 
   const refreshOrAuth = useCallback(async () => {
     const r = await window.sylo.piAuth.get('openrouter')
@@ -328,12 +491,100 @@ export function SettingsPanel({
     void refreshOrModels()
   }, [modelProvider, refreshOrAuth, refreshOrModels])
 
+  const refreshChatgptStatus = useCallback(async () => {
+    const st = await window.sylo.chatgpt.status()
+    setChatgptConnected(st.connected)
+    setChatgptAccountId(st.accountId)
+  }, [])
+
+  useEffect(() => {
+    if (modelProvider !== CHATGPT_CODEX_PROVIDER) return
+    void refreshChatgptStatus()
+  }, [modelProvider, refreshChatgptStatus])
+
+  useEffect(() => {
+    return window.sylo.chatgpt.onLoginEvent((event) => {
+      if (event.type === 'device_code' && event.userCode && event.verificationUri) {
+        setChatgptDeviceCode(event.userCode)
+        setChatgptDeviceUri(event.verificationUri)
+        setChatgptProgress('Waiting for you to approve in the browser…')
+        setChatgptError(null)
+      } else if (event.type === 'auth_url' && event.url) {
+        setChatgptDeviceUri(event.url)
+        setChatgptProgress(event.instructions || 'Complete login in your browser…')
+      } else if ((event.type === 'progress' || event.type === 'info') && event.message) {
+        setChatgptProgress(event.message)
+      }
+    })
+  }, [])
+
+  const startChatgptLogin = useCallback(async () => {
+    setChatgptBusy(true)
+    setChatgptError(null)
+    setChatgptDeviceCode('')
+    setChatgptDeviceUri('')
+    setChatgptProgress('Starting ChatGPT sign-in…')
+    try {
+      const r = await window.sylo.chatgpt.login()
+      if (r.ok) {
+        setChatgptConnected(true)
+        setChatgptProgress(null)
+        await refreshChatgptStatus()
+        if (modelId.trim() === '') setModelId(CHATGPT_CODEX_DEFAULT_MODEL)
+      } else if (!r.cancelled) {
+        setChatgptError(r.error)
+        setChatgptProgress(null)
+      } else {
+        setChatgptProgress(null)
+      }
+    } catch (e) {
+      setChatgptError(e instanceof Error ? e.message : String(e))
+      setChatgptProgress(null)
+    } finally {
+      setChatgptBusy(false)
+      setChatgptDeviceCode('')
+      setChatgptDeviceUri('')
+    }
+  }, [modelId, refreshChatgptStatus])
+
+  const cancelChatgptLogin = useCallback(async () => {
+    await window.sylo.chatgpt.cancel()
+    setChatgptBusy(false)
+    setChatgptDeviceCode('')
+    setChatgptDeviceUri('')
+    setChatgptProgress(null)
+  }, [])
+
+  const logoutChatgpt = useCallback(async () => {
+    if (!window.confirm('Sign out of ChatGPT Plus in Sylo?')) return
+    const r = await window.sylo.chatgpt.logout()
+    if (!r.ok) {
+      window.alert(`Could not sign out: ${r.error}`)
+      return
+    }
+    setChatgptConnected(false)
+    setChatgptAccountId(null)
+  }, [])
+
     const saveModelPrefs = async () => {
     const origin = normalizeOllamaOriginUi(ollamaBaseUrl)
-    const trimmedId = modelId.trim()
+    let trimmedId = modelId.trim()
     const trimmedImageId = imageModelId.trim()
     // OpenRouter: persist the key to Pi's auth.json BEFORE saving prefs, so the
     // broker restart that follows always has the credential to work with.
+    if (modelProvider === CHATGPT_CODEX_PROVIDER) {
+      const st = await window.sylo.chatgpt.status()
+      if (!st.connected) {
+        window.alert(
+          'Sign in with ChatGPT Plus first. Sylo uses your ChatGPT subscription (Codex), not an OpenAI API key.',
+        )
+        return
+      }
+      if (trimmedId === '') {
+        trimmedId = CHATGPT_CODEX_DEFAULT_MODEL
+        setModelId(trimmedId)
+      }
+    }
     if (modelProvider === 'openrouter' && orKeyInput.trim() !== '') {
       setOrKeySaving(true)
       const w = await window.sylo.piAuth.set('openrouter', orKeyInput.trim())
@@ -351,7 +602,7 @@ export function SettingsPanel({
       setOrAuthError(null)
     }
     await window.sylo.prefs.set('sylo.model_provider', modelProvider)
-    await window.sylo.prefs.set('sylo.model_id', modelId)
+    await window.sylo.prefs.set('sylo.model_id', trimmedId)
     await window.sylo.prefs.set('sylo.image_model_id', trimmedImageId)
     await window.sylo.prefs.set(
       'sylo.image_model_provider',
@@ -388,6 +639,66 @@ export function SettingsPanel({
     onChanged()
   }
 
+  const saveSubagentModel = async () => {
+    const defaultPin = {
+      provider: subagentProvider.trim(),
+      modelId: subagentModelId.trim(),
+      thinkingLevel: subagentThinking.trim(),
+    }
+    // A provider with no model would spawn the Pi CLI against a model id that provider does
+    // not serve, so every model pin is all-or-nothing. Thinking can stand alone.
+    const incomplete: string[] = []
+    if (defaultPin.provider && !defaultPin.modelId) incomplete.push('All subagents')
+    const pinned: Record<string, SubagentModelPin> = {}
+    for (const agent of subagentAgents) {
+      const pin = agentPins[agent.name]
+      const provider = pin?.provider.trim() ?? ''
+      const modelId = pin?.modelId.trim() ?? ''
+      const thinkingLevel = pin?.thinkingLevel?.trim() ?? ''
+      if (!provider && !thinkingLevel) continue
+      if (provider && !modelId) {
+        incomplete.push(agent.name)
+        continue
+      }
+      pinned[agent.name] = thinkingLevel ? { provider, modelId, thinkingLevel } : { provider, modelId }
+    }
+    if (incomplete.length > 0) {
+      window.alert(
+        `Pick a model for: ${incomplete.join(', ')} — or set the provider back to the inherit option.`,
+      )
+      return
+    }
+
+    const usesChatgpt =
+      defaultPin.provider === CHATGPT_CODEX_PROVIDER ||
+      Object.values(pinned).some((p) => p.provider === CHATGPT_CODEX_PROVIDER)
+    if (usesChatgpt) {
+      const st = await window.sylo.chatgpt.status()
+      if (!st.connected) {
+        window.alert('Sign in with ChatGPT under Model (Pi) first — subagents use the same login.')
+        return
+      }
+    }
+
+    setSubagentModelSaving(true)
+    await window.sylo.prefs.set('sylo.subagents.model_provider', defaultPin.provider)
+    await window.sylo.prefs.set(
+      'sylo.subagents.model_id',
+      defaultPin.provider ? defaultPin.modelId : '',
+    )
+    await window.sylo.prefs.set('sylo.subagents.thinking_level', defaultPin.thinkingLevel)
+    await window.sylo.prefs.set(
+      'sylo.subagents.model_by_agent',
+      Object.keys(pinned).length > 0 ? JSON.stringify(pinned) : '',
+    )
+    if (!defaultPin.provider) setSubagentModelId('')
+    setAgentPins(pinned)
+    // The subagent extension reads these from the broker's env, which is frozen at fork.
+    await window.sylo.broker.restart()
+    setSubagentModelSaving(false)
+    onChanged()
+  }
+
   return (
     <div className={cn(panelShell, 'flex flex-col gap-3.5')}>
             <section className={card}>
@@ -401,11 +712,11 @@ export function SettingsPanel({
             <span className={fieldLabel}>Provider</span>
             <select className={select} value={modelProvider} onChange={(e) => setModelProvider(e.target.value)}>
               <option value="">Pi default (no Sylo override)</option>
-              <option value="ollama">Ollama</option>
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="groq">Groq</option>
-              <option value="openrouter">OpenRouter</option>
+              {SYLO_MODEL_PROVIDERS.map((p) => (
+                <option key={p} value={p}>
+                  {SYLO_MODEL_PROVIDER_LABELS[p]}
+                </option>
+              ))}
             </select>
           </label>
 
@@ -444,6 +755,49 @@ export function SettingsPanel({
                 <p className={errorText}>{ollamaListError}</p>
               : null}
             </>
+          : null}
+
+          {modelProvider === CHATGPT_CODEX_PROVIDER ?
+            <div className="flex flex-col gap-2.5 rounded-md border border-[color-mix(in_srgb,var(--sylo-border)_70%,transparent)] px-3 py-2.5">
+              <span className={fieldLabel}>ChatGPT OAuth</span>
+              <p className={caption}>
+                Signs into your ChatGPT subscription through OpenAI Codex (same path Hermes uses). This is not
+                the paid OpenAI API — no platform key, usage comes from your Plus/Pro quota.
+              </p>
+              {chatgptConnected ?
+                <p className={caption}>
+                  Signed in{chatgptAccountId ? <> — account <code>{chatgptAccountId}</code></> : null}.
+                  Choose a model below, then <strong>Save model settings</strong> so the broker switches over.
+                </p>
+              : <p className={caption}>Not signed in yet.</p>}
+              {chatgptError ? <p className={errorText}>{chatgptError}</p> : null}
+              {chatgptDeviceCode ?
+                <div className="flex flex-wrap items-center gap-3 rounded-md border border-border p-3">
+                  <code className="select-all text-2xl font-bold tracking-[0.2em]">{chatgptDeviceCode}</code>
+                  {chatgptDeviceUri ?
+                    <a className={cn(btnPrimary, 'ml-auto')} href={chatgptDeviceUri} target="_blank" rel="noreferrer">
+                      Open ChatGPT
+                    </a>
+                  : null}
+                </div>
+              : null}
+              {chatgptProgress ? <p className={caption}>{chatgptProgress}</p> : null}
+              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2">
+                {chatgptBusy ?
+                  <button type="button" className={btnGhostSm} onClick={() => void cancelChatgptLogin()}>
+                    Cancel sign-in
+                  </button>
+                : chatgptConnected ?
+                  <button type="button" className={btnGhostSm} onClick={() => void logoutChatgpt()}>
+                    Sign out
+                  </button>
+                : (
+                  <button type="button" className={btnPrimary} onClick={() => void startChatgptLogin()}>
+                    Sign in with ChatGPT
+                  </button>
+                )}
+              </div>
+            </div>
           : null}
 
                     {modelProvider === 'openrouter' ?
@@ -530,13 +884,39 @@ export function SettingsPanel({
 
           <label
             className="flex min-w-[140px] flex-col gap-1"
-            htmlFor={modelProvider === 'ollama' ? 'sylo-ollama-model-select' : 'sylo-model-id-input'}
+            htmlFor={
+              modelProvider === 'ollama' ? 'sylo-ollama-model-select'
+              : modelProvider === CHATGPT_CODEX_PROVIDER ? 'sylo-chatgpt-model-select'
+              : 'sylo-model-id-input'
+            }
           >
             <span className={fieldLabel}>
-              {modelProvider === 'ollama' ? 'Model' : 'Model id'} (must match Pi / ~/.pi/agent/models.json)
+              {modelProvider === 'ollama' || modelProvider === CHATGPT_CODEX_PROVIDER ?
+                'Model'
+              : 'Model id'}{' '}
+              (must match Pi / ~/.pi/agent/models.json)
             </span>
             {modelProvider === 'ollama' ?
               <OllamaModelSelect modelId={modelId} setModelId={setModelId} ollamaTags={ollamaTags} />
+            : modelProvider === CHATGPT_CODEX_PROVIDER ?
+              <select
+                id="sylo-chatgpt-model-select"
+                className={select}
+                value={modelId}
+                onChange={(e) => setModelId(e.target.value)}
+                aria-label="ChatGPT Codex model"
+              >
+                <option value="">Choose a Codex model…</option>
+                {modelId.trim() !== '' && !CHATGPT_CODEX_MODELS.some((m) => m.id === modelId) ?
+                  <option value={modelId}>{modelId} (custom)</option>
+                : null}
+                {CHATGPT_CODEX_MODELS.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name} — {m.id}
+                    {m.vision ? '' : ' (text only)'}
+                  </option>
+                ))}
+              </select>
             : <input
                 id="sylo-model-id-input"
                 className={input}
@@ -546,6 +926,32 @@ export function SettingsPanel({
               />
             }
           </label>
+
+          {contextStatus && contextStatus.verdict !== 'ok' && contextStatus.verdict !== 'unknown' ?
+            <div
+              className={cn(
+                'rounded-md border px-3 py-2.5 text-[0.82rem] leading-snug',
+                contextStatus.verdict === 'truncating' ?
+                  'border-red-500/45 bg-red-500/10 text-red-200'
+                : 'border-amber-500/40 bg-amber-500/10 text-amber-200',
+              )}
+            >
+              <div className="font-medium">
+                {contextStatus.verdict === 'truncating' ?
+                  'Context window too large — Ollama will silently drop tokens'
+                : contextStatus.verdict === 'wasting' ?
+                  'Context window under-declared — Pi compacts early'
+                : 'Context window is very small'}
+              </div>
+              <p className="mt-1 opacity-90">{contextStatus.message}</p>
+              <p className="mt-1 opacity-70">
+                {contextStatus.measured ?
+                  'Measured from the running model.'
+                : 'Estimated from the model card; load the model for an exact figure.'}{' '}
+                Saving these settings writes the detected window to ~/.pi/agent/models.json.
+              </p>
+            </div>
+          : null}
 
           {modelProvider === 'ollama' && modelId.trim() !== '' ?
             <div className="flex flex-col gap-1.5 rounded-md border border-[color-mix(in_srgb,var(--sylo-border)_70%,transparent)] px-3 py-2.5">
@@ -591,7 +997,9 @@ export function SettingsPanel({
               separate Ollama vision model and inject that text into the chat. Ignored when the main model
               already supports vision. Uses the same Ollama server URL as above.
             </p>
-            {modelProvider === 'ollama' ?
+            {/* Falls back to a free-text id only when Ollama returned no tags (server down or
+                unreachable), so an unreachable server can't strip the ability to set one. */}
+            {ollamaTags.length > 0 ?
               <OllamaModelSelect
                 id="sylo-ollama-image-model-select"
                 modelId={imageModelId}
@@ -607,6 +1015,14 @@ export function SettingsPanel({
                 placeholder="Ollama model id (e.g. qwen3-vl:8b) — empty to disable"
               />
             }
+            {ollamaTags.length === 0 ?
+              <p className={caption}>
+                {ollamaListLoading ?
+                  'Loading Ollama models…'
+                : `No models listed from ${normalizeOllamaOriginUi(ollamaBaseUrl)}/api/tags — enter an id manually or start Ollama.`
+                }
+              </p>
+            : null}
           </div>
         </div>
 
@@ -1148,6 +1564,81 @@ export function SettingsPanel({
           Off by default. When enabled, the agent may use repo-local personas after you confirm a prompt for
           untrusted projects. Restart broker applies immediately when toggled.
         </p>
+
+        <div className="mt-3 flex flex-col gap-2.5 rounded-md border border-[color-mix(in_srgb,var(--sylo-border)_70%,transparent)] px-3 py-2.5">
+          <span className={fieldLabel}>Subagent model</span>
+          <p className={caption}>
+            Each subagent spawns its own Pi session, so it does not have to share the chat&apos;s model or
+            thinking. Pin a local model here to keep delegation off your cloud quota, or a cloud model to
+            make it faster than local hardware allows. Defaults to whatever the chat is using.
+          </p>
+          <label className="flex flex-col gap-1">
+            <span className={fieldLabel}>All subagents</span>
+            <SubagentModelFields
+              idPrefix="sylo-subagent-default"
+              label="All subagents"
+              inheritLabel="Follow the chat model"
+              thinkingInheritLabel="Follow the chat thinking"
+              pin={{
+                provider: subagentProvider,
+                modelId: subagentModelId,
+                thinkingLevel: subagentThinking || undefined,
+              }}
+              onChange={(next) => {
+                setSubagentProvider(next.provider)
+                setSubagentModelId(next.modelId)
+                setSubagentThinking(next.thinkingLevel ?? '')
+              }}
+              ollamaTags={ollamaTags}
+            />
+          </label>
+
+          {subagentAgents.length > 0 ?
+            <div className="flex flex-col gap-2 border-t border-border pt-2.5">
+              <span className={fieldLabel}>Per agent</span>
+              <p className={caption}>
+                Overrides the row above for one persona — a small local model for{' '}
+                <code>scout</code> recon, something stronger for <code>planner</code> or{' '}
+                <code>reviewer</code>. Left on inherit, an agent uses the setting above.
+              </p>
+              {subagentAgents.map((agent) => (
+                <div key={agent.name} className="flex flex-col gap-1">
+                  <span className="text-[0.82rem] text-text-primary">
+                    <code className="font-mono text-[0.86em]">{agent.name}</code>
+                    {agent.source !== 'builtin' ?
+                      <span className={cn(mutedText, ' text-[0.74rem]')}> · {agent.source}</span>
+                    : null}
+                  </span>
+                  <SubagentModelFields
+                    idPrefix={`sylo-subagent-${agent.name}`}
+                    label={agent.name}
+                    inheritLabel="Use the setting above"
+                    thinkingInheritLabel={
+                      subagentThinking ? `Use the setting above (${subagentThinking})` : 'Use the setting above'
+                    }
+                    pin={agentPins[agent.name] ?? { provider: '', modelId: '' }}
+                    onChange={(next) =>
+                      setAgentPins((prev) => ({ ...prev, [agent.name]: next }))
+                    }
+                    ollamaTags={ollamaTags}
+                  />
+                </div>
+              ))}
+            </div>
+          : null}
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className={btnGhostSm}
+              onClick={() => void saveSubagentModel()}
+              disabled={subagentModelSaving}
+            >
+              {subagentModelSaving ? 'Restarting broker…' : 'Save subagent models'}
+            </button>
+            <span className={caption}>Restarts the broker so the next run picks these up.</span>
+          </div>
+        </div>
         <div className="mt-3 rounded-md border border-[color-mix(in_srgb,var(--sylo-border)_70%,transparent)] px-3 py-2.5">
           <p className={cn(caption, 'mb-1.5 font-medium text-text-primary')}>Diagnostics</p>
           <ul className={cn(caption, 'm-0 list-inside list-disc space-y-1')}>

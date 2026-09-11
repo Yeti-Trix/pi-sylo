@@ -36,6 +36,11 @@ __pycache__/
 # sylo-supervisor: last-known-good commit marker (local runtime artifact)
 .sylo-last-good
 
+# Operator-local custom packages (controls, onenote, personal tools).
+# Not part of the public distribution.
+/Custom/
+/custom/
+
 # Skill-surface fixtures are runtime-mirrored from INSTALLED skills by
 # scripts/sync-smoke-skills.mjs (prepare:dev / prestart). Only the skills that
 # ship with sylo-dev packages are committed; skills from operator-installed

@@ -17,19 +17,26 @@ export type SyloSubagentHostEvent =
       groupRunId: string
       parentRunId?: string
       stepIndex?: number
+      model?: string
     }
   | {
       type: 'subagent_run_update'
       runId: string
       partialText?: string
+      /** Tail of the child's reasoning channel, so a long silent think still shows progress. */
+      partialThinking?: string
+      thinkingLive?: boolean
       toolName?: string
       toolPreview?: string
+      model?: string
     }
   | {
       type: 'subagent_run_end'
       runId: string
       status: 'succeeded' | 'failed' | 'cancelled'
       resultText?: string
+      thinking?: string
+      model?: string
       error?: string
       usage?: {
         input: number
@@ -69,6 +76,10 @@ export type AgentTaskSpec = {
   groupRunId: string
   stepIndex?: number
   lastPartialText?: string
+  lastPartialThinking?: string
+  lastThinkingLive?: boolean
   lastToolName?: string
   lastToolPreview?: string
+  /** Provider/id the child was spawned with. */
+  model?: string
 }

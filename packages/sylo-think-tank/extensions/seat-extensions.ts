@@ -34,6 +34,13 @@ function pushExtension(paths: string[], candidate: string | undefined, disabled:
 /**
  * Same extension paths the Sylo broker loads (Capability manager enabled set),
  * passed to seat Pi subprocesses via `pi --extension`.
+ *
+ * Do not prune this list by package. Every seat prompt embeds the Moderator
+ * assignment board, and `sylo-think-tank` is what registers the tools that act
+ * on it (plus the vision fallback for text-only seat models) when
+ * SYLO_THINK_TANK_SEAT_RUN=1. Dropping it leaves the Moderator describing a
+ * board it cannot touch, which degenerates into emitting empty table rows.
+ * Recursion is already prevented by that env flag, not by withholding the path.
  */
 export function resolveSeatExtensionPaths(env: NodeJS.ProcessEnv = process.env): string[] {
   const disabled = disabledExtensionSet(env)

@@ -30,6 +30,7 @@ export type CompanionHostApi = {
     ollamaOrigin: string
     providers: string[]
     ollamaModels: { id: string; visionCapable: boolean }[]
+    chatgptModels?: { id: string; name: string; visionCapable: boolean }[]
   }>
   deleteConversation: (id: string) => boolean
   /** Conversation ids that currently have an in-flight agent turn (for status dots). */
@@ -65,6 +66,11 @@ export type CompanionHostApi = {
   personalRpc: (op: string, payload: unknown) => unknown | Promise<unknown>
   /** Plugin-declared companion manifest (tabs + landing), or null when absent. */
   personalManifest: () => unknown | Promise<unknown>
+  submitAskQuestion: (input: {
+    requestId?: string
+    toolCallId?: string
+    answers: unknown
+  }) => { ok: true } | { ok: false; error: string }
 }
 
 let api: CompanionHostApi | null = null
