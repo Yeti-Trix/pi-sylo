@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
+import { cn } from '../../lib/cn'
 import type { TerminalRegistry } from './useTerminalSessions'
 
 /**
@@ -40,16 +41,44 @@ const TERM_THEME = {
   brightWhite: '#ededed',
 } as const
 
+/** Caps for terminal → chat sharing (keeps the composer usable). */
+const SHARE_MAX_LINES = 300
+const SHARE_MAX_CHARS = 40_000
+
 export function TerminalPane({
   tabId,
   terminals,
   className,
+  onShareToChat,
 }: {
   tabId: string
   terminals: TerminalRegistry
   className?: string
+  /** Called with the pane's current buffer text when the operator clicks
+   *  "Share" — the host prefills the chat composer with it. */
+  onShareToChat?: (text: string) => void
 }): React.ReactElement {
   const hostRef = useRef<HTMLDivElement | null>(null)
+  /** Live xterm instance — lets the Share button read what the operator sees
+   *  (including alt-screen apps like vim, which never reach the registry's
+   *  byte buffer in a line-decodable form). */
+  const termRef = useRef<Terminal | null>(null)
+
+  const shareBuffer = () => {
+    const term = termRef.current
+    if (!term || !onShareToChat) return
+    const buf = term.buffer.active
+    const lines: string[] = []
+    for (let y = 0; y < buf.length; y++) {
+      const line = buf.getLine(y)
+      lines.push(line ? line.translateToString(true) : '')
+    }
+    while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop()
+    let text = lines.slice(-SHARE_MAX_LINES).join('\n')
+    if (text.length > SHARE_MAX_CHARS) text = text.slice(-SHARE_MAX_CHARS)
+    if (!text.trim()) return
+    onShareToChat(text)
+  }
 
   useEffect(() => {
     const host = hostRef.current
@@ -79,6 +108,7 @@ export function TerminalPane({
     // Replay everything the session has produced so far, then subscribe.
     if (session.buffer) term.write(session.buffer)
     const unsub = terminals.subscribe(tabId, (chunk) => term.write(chunk))
+    termRef.current = term
 
     term.onData((data) => terminals.write(tabId, data))
 
@@ -97,9 +127,43 @@ export function TerminalPane({
     return () => {
       unsub()
       ro.disconnect()
+      termRef.current = null
       term.dispose()
     }
   }, [tabId, terminals])
 
-  return <div ref={hostRef} className={className} style={{ minHeight: 0, minWidth: 0 }} />
+  return (
+    <div className={cn('group/term relative flex min-h-0 min-w-0', className)}>
+      <div ref={hostRef} className="min-h-0 min-w-0 flex-1" style={{ minHeight: 0, minWidth: 0 }} />
+      {onShareToChat ?
+        <button
+          type="button"
+          title="Send the terminal output to the chat composer"
+          aria-label="Share terminal output with the agent"
+          className={cn(
+            'absolute right-2 top-1.5 z-10 flex shrink-0 items-center gap-1 rounded border border-border bg-[#161616]/90',
+            'px-1.5 py-0.5 text-[0.66rem] leading-none text-text-secondary opacity-0 backdrop-blur-sm',
+            'transition-opacity duration-[120ms] hover:border-accent-muted hover:text-text-primary',
+            'focus-visible:opacity-100 group-hover/term:opacity-100',
+          )}
+          onClick={shareBuffer}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="h-3 w-3"
+            aria-hidden="true"
+          >
+            <path d="m12 19V5" />
+            <path d="m5 12 7-7 7 7" />
+          </svg>
+          Share
+        </button>
+      : null}
+    </div>
+  )
 }

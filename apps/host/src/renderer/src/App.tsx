@@ -720,6 +720,10 @@ export function App(): React.ReactElement {
   const sketchBackupRef = useRef<string | null>(null)
   /** Prefill text waiting for ChatComposer mount after switching to chat tab. */
   const pendingComposerPrefillRef = useRef<string | null>(null)
+  /** Bumped on every prefill request so the consumer effect re-runs even when
+   *  the chat tab (and conversation) is already active — otherwise a Share or
+   *  skill-route prefill fired from within chat silently never lands. */
+  const [composerPrefillTick, setComposerPrefillTick] = useState(0)
   const [sendingConvIds, setSendingConvIds] = useState<Set<string>>(() => new Set())
   /** Conversations with a completed turn the operator has not opened since. */
   const [unreadConvIds, setUnreadConvIds] = useState<Set<string>>(() => new Set())
@@ -2911,6 +2915,7 @@ export function App(): React.ReactElement {
 
   const prefillChatPrompt = useCallback((text: string) => {
     pendingComposerPrefillRef.current = text
+    setComposerPrefillTick((t) => t + 1)
     setTab('chat')
   }, [])
 
@@ -2928,6 +2933,7 @@ export function App(): React.ReactElement {
         await refreshConversations()
         setActiveId(c.id)
       }
+      setComposerPrefillTick((t) => t + 1)
       setTab('chat')
     },
     [refreshConversations, sidebarWorkspaceId],
@@ -2939,7 +2945,7 @@ export function App(): React.ReactElement {
     if (!pending) return
     pendingComposerPrefillRef.current = null
     composerRef.current?.prefill(pending)
-  }, [tab, activeId])
+  }, [tab, activeId, composerPrefillTick])
 
   const prefillNewSkill = useCallback(() => {
     prefillChatPrompt('/skill:sylo-skill-author ')
@@ -2961,6 +2967,17 @@ export function App(): React.ReactElement {
     setTab('chat')
   }
   const newChat = () => void newChatIn(sidebarWorkspaceId)
+
+  /** "Share" on a terminal pane: drop its buffer into the chat composer as a
+   *  fenced block so the agent can read what the operator is looking at. */
+  const shareTerminalToChat = useCallback(
+    (text: string) => {
+      prefillChatPrompt(
+        `Shared terminal output from the apps pane:\n\n\`\`\`\`text\n${text}\n\`\`\`\`\n`,
+      )
+    },
+    [prefillChatPrompt],
+  )
 
   const handleAttachUiFolder = useCallback(async () => {
     const p = await window.sylo.dialog.openDirectory({
@@ -4423,6 +4440,7 @@ export function App(): React.ReactElement {
                   onSelectTab={onCanvasSelectTab}
                   onCloseTab={closeCanvasTabWithSessions}
                   onCloseTabs={closeCanvasTabsWithSessions}
+                  onTerminalShare={shareTerminalToChat}
                   onAddTab={openAppsPaneTabWithSessions}
                   terminals={terminals}
                   sideChatParentId={activeId ?? null}

@@ -124,6 +124,8 @@ type Props = {
   /** Close many tabs at once (tab context menu: Close others / Close all
    *  terminals / Close all browsers). Parent disposes terminal sessions. */
   onCloseTabs?: (ids: string[]) => void
+  /** "Share" on a terminal pane: send its buffer text to the chat composer. */
+  onTerminalShare?: (text: string) => void
   /** `+` picker in the docked tab strip: open a new app-pane tab. */
   onAddTab?: (kind: AppTabKind) => void
   /** Terminal session registry (App-level). Terminal panes stay mounted
@@ -157,6 +159,7 @@ export function CanvasPanel({
   onSelectTab,
   onCloseTab,
   onCloseTabs,
+  onTerminalShare,
   onAddTab,
   terminals,
   sideChatParentId,
@@ -438,7 +441,7 @@ export function CanvasPanel({
                   }
                 }}
                 className={cn(
-                  'flex min-w-0 max-w-[150px] shrink-0 cursor-pointer items-center gap-1 rounded-md border px-2 py-0.5 text-[0.72rem] outline-none transition-colors',
+                  'flex min-w-0 max-w-[170px] shrink-0 cursor-pointer items-center gap-1 overflow-hidden rounded-md border px-2 py-0.5 text-[0.72rem] outline-none transition-colors',
                   active
                     ? 'border-transparent bg-[#2e2e2e] text-text-primary'
                     : 'border-transparent text-text-secondary hover:bg-[#1e1e1e] hover:text-text-primary',
@@ -458,7 +461,7 @@ export function CanvasPanel({
                 <span className="min-w-0 truncate">{label}</span>
                 {t.origin && k !== 'canvas' ?
                   <span
-                    className="shrink-0 text-[0.64rem] leading-none text-text-muted/80"
+                    className="min-w-0 shrink truncate text-[0.64rem] leading-none text-text-muted/80"
                     title={`Opened from chat: ${t.origin}`}
                   >
                     · {t.origin}
@@ -673,7 +676,12 @@ export function CanvasPanel({
                 t.id === activeTabId && activeKind === 'terminal' ? 'flex' : 'hidden',
               )}
             >
-              <TerminalPane tabId={t.id} terminals={terminals} className="min-h-0 min-w-0 flex-1" />
+              <TerminalPane
+                tabId={t.id}
+                terminals={terminals}
+                className="min-h-0 min-w-0 flex-1"
+                onShareToChat={onTerminalShare}
+              />
             </div>
           ))
       : null}
