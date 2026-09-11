@@ -86,7 +86,7 @@ jobs:
               }
 
               await github.graphql(
-                'mutation($p: ID!, $i: ID!, $f: ID!, $o: ID!) { updateProjectV2ItemFieldValue(input: ' +
+                'mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) { updateProjectV2ItemFieldValue(input: ' +
                 '{ projectId: $p, itemId: $i, fieldId: $f, value: { singleSelectOptionId: $o } }) ' +
                 '{ projectV2Item { id } } }',
                 { p: PROJECT_ID, i: itemId, f: statusField.id, o: inProgress.id }
