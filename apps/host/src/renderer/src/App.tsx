@@ -963,8 +963,11 @@ export function App(): React.ReactElement {
 
   const [renameConvModal, setRenameConvModal] = useState<{ id: string; draft: string } | null>(null)
   const [deleteConvModal, setDeleteConvModal] = useState<{ id: string; title: string } | null>(null)
-  /** Bulk confirm for "Delete all…" in the Archived section. */
-  const [deleteAllArchivedOpen, setDeleteAllArchivedOpen] = useState(false)
+    /** Archived multi-select (bulk v2): checkbox mode for per-chat restore/delete. */
+  const [archiveSelectMode, setArchiveSelectMode] = useState(false)
+  const [archiveSelected, setArchiveSelected] = useState<Set<string>>(() => new Set())
+  /** Bulk confirm dialog: 'all' = Delete all…, 'selected' = Delete (n)…. */
+  const [bulkDeleteKind, setBulkDeleteKind] = useState<null | 'all' | 'selected'>(null)
 
   const [agentWidgetPayload, setAgentWidgetPayload] = useState<{
     toolCallId: string
@@ -2200,17 +2203,17 @@ export function App(): React.ReactElement {
   }, [tab, activeId, canvasOpen])
 
   useEffect(() => {
-    if (!renameConvModal && !deleteConvModal && !deleteAllArchivedOpen) return
+        if (!renameConvModal && !deleteConvModal && !bulkDeleteKind) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setRenameConvModal(null)
         setDeleteConvModal(null)
-        setDeleteAllArchivedOpen(false)
+        setBulkDeleteKind(null)
       }
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [renameConvModal, deleteConvModal, deleteAllArchivedOpen])
+  }, [renameConvModal, deleteConvModal, bulkDeleteKind])
 
   useEffect(() => {
     if (!convContextMenu) return
@@ -3056,10 +3059,12 @@ export function App(): React.ReactElement {
     await refreshConversations()
   }
 
-  /** Bulk: permanently delete every archived chat in the workspace. */
-  const confirmDeleteAllArchived = async () => {
-    const ids = archivedConversations.map((c) => c.id)
-    setDeleteAllArchivedOpen(false)
+    /** Bulk: permanently delete archived chats — 'all' or the current selection. */
+  const confirmBulkDeleteArchived = async (kind: 'all' | 'selected') => {
+    setBulkDeleteKind(null)
+    const source =
+      kind === 'all' ? archivedConversations : archivedConversations.filter((c) => archiveSelected.has(c.id))
+    const ids = source.map((c) => c.id)
     if (ids.length === 0) return
     for (const id of ids) {
       try {
@@ -3072,6 +3077,39 @@ export function App(): React.ReactElement {
       activeIdRef.current = undefined
       setActiveId(undefined)
     }
+    setArchiveSelected(new Set())
+    await refreshConversations()
+  }
+
+  /** Multi-select mode for the Archived section (leaving the mode clears the selection). */
+  const toggleArchiveSelectMode = () => {
+    setArchiveSelectMode((on) => {
+      if (on) setArchiveSelected(new Set())
+      return !on
+    })
+  }
+
+  const toggleArchiveSelected = (id: string) => {
+    setArchiveSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  /** Bulk: unarchive the checked archived chats. */
+  const restoreSelectedArchived = async () => {
+    const ids = archivedConversations.filter((c) => archiveSelected.has(c.id)).map((c) => c.id)
+    if (ids.length === 0) return
+    for (const id of ids) {
+      try {
+        await window.sylo.conversations.setArchived(id, false)
+      } catch {
+        /* keep going — refresh reports reality */
+      }
+    }
+    setArchiveSelected(new Set())
     await refreshConversations()
   }
 
@@ -4108,36 +4146,117 @@ export function App(): React.ReactElement {
                     : `${archivedMatches.length}/${archivedConversations.length}`}
                 </span>
               </summary>
-              <div className="flex items-center gap-1.5 px-2 pb-1">
-                <button
-                  type="button"
-                  className="cursor-pointer rounded border-none bg-transparent px-1.5 py-0.5 text-[0.68rem] text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
-                  title="Unarchive every archived chat in this workspace"
-                  disabled={archivedMatches.length === 0}
-                  onClick={() => void restoreAllArchived()}
-                >
-                  Restore all
-                </button>
-                <button
-                  type="button"
-                  className="cursor-pointer rounded border-none bg-transparent px-1.5 py-0.5 text-[0.68rem] text-text-secondary hover:bg-[rgb(241_106_80/0.12)] hover:text-[#f6b3a4]"
-                  title="Permanently delete every archived chat in this workspace (files + messages)"
-                  disabled={archivedConversations.length === 0}
-                  onClick={() => setDeleteAllArchivedOpen(true)}
-                >
-                  Delete all…
-                </button>
+                            <div className="flex items-center gap-1.5 px-2 pb-1">
+                {archiveSelectMode ? (
+                  <>
+                    <button
+                      type="button"
+                      className="cursor-pointer rounded border-none bg-transparent px-1.5 py-0.5 text-[0.68rem] text-text-secondary hover:bg-bg-tertiary hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                      title="Unarchive the selected chats"
+                      disabled={archiveSelected.size === 0}
+                      onClick={() => void restoreSelectedArchived()}
+                    >
+                      Restore ({archiveSelected.size})
+                    </button>
+                    <button
+                      type="button"
+                      className="cursor-pointer rounded border-none bg-transparent px-1.5 py-0.5 text-[0.68rem] text-text-secondary hover:bg-[rgb(241_106_80/0.12)] hover:text-[#f6b3a4] disabled:cursor-not-allowed disabled:opacity-40"
+                      title="Permanently delete the selected archived chats (files + messages)"
+                      disabled={archiveSelected.size === 0}
+                      onClick={() => setBulkDeleteKind('selected')}
+                    >
+                      Delete ({archiveSelected.size})…
+                    </button>
+                    <button
+                      type="button"
+                      className="cursor-pointer rounded border-none bg-transparent px-1.5 py-0.5 text-[0.68rem] text-text-secondary hover:bg-bg-tertiary hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                      disabled={archivedMatches.length === 0}
+                      onClick={() => setArchiveSelected(new Set(archivedMatches.map((c) => c.id)))}
+                    >
+                      Select all
+                    </button>
+                    <button
+                      type="button"
+                      className="cursor-pointer rounded border-none bg-transparent px-1.5 py-0.5 text-[0.68rem] text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                      onClick={toggleArchiveSelectMode}
+                    >
+                      Done
+                    </button>
+                    <span className={cn(mutedText, 'text-[0.66rem]')}>
+                      {archiveSelected.size} selected
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className="cursor-pointer rounded border-none bg-transparent px-1.5 py-0.5 text-[0.68rem] text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                      title="Unarchive every archived chat in this workspace"
+                      disabled={archivedMatches.length === 0}
+                      onClick={() => void restoreAllArchived()}
+                    >
+                      Restore all
+                    </button>
+                    <button
+                      type="button"
+                      className="cursor-pointer rounded border-none bg-transparent px-1.5 py-0.5 text-[0.68rem] text-text-secondary hover:bg-[rgb(241_106_80/0.12)] hover:text-[#f6b3a4]"
+                      title="Permanently delete every archived chat in this workspace (files + messages)"
+                      disabled={archivedConversations.length === 0}
+                      onClick={() => setBulkDeleteKind('all')}
+                    >
+                      Delete all…
+                    </button>
+                    <button
+                      type="button"
+                      className="cursor-pointer rounded border-none bg-transparent px-1.5 py-0.5 text-[0.68rem] text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                      title="Select individual chats to restore or delete them in one go"
+                      onClick={toggleArchiveSelectMode}
+                    >
+                      Select
+                    </button>
+                  </>
+                )}
               </div>
-              {archivedMatches.map((c) => (
-                <div key={c.id} className={convRow} role="presentation">
+                            {archivedMatches.map((c) => (
+                <div key={c.id} className={cn(convRow, archiveSelectMode && archiveSelected.has(c.id) && 'bg-bg-tertiary')} role="presentation">
                   <div className={convRowMain}>
                     <button
                       type="button"
                       className={convRowSelect}
-                      title="Unarchive and open this chat"
-                      onClick={() => void unarchiveConversation(c.id)}
+                      title={archiveSelectMode ? 'Toggle selection' : 'Unarchive and open this chat'}
+                      onClick={() =>
+                        archiveSelectMode ? toggleArchiveSelected(c.id) : void unarchiveConversation(c.id)
+                      }
                     >
-                      <span className={cn(convStatusDot, convStatusDotRead)} aria-hidden="true" />
+                      {archiveSelectMode ? (
+                        <span
+                          role="checkbox"
+                          aria-checked={archiveSelected.has(c.id)}
+                          aria-label={`Select ${c.title || 'conversation'}`}
+                          className={cn(
+                            'flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border',
+                            archiveSelected.has(c.id)
+                              ? 'border-[rgb(241_106_80/0.7)] bg-[rgb(241_106_80/0.25)]'
+                              : 'border-border bg-bg-tertiary',
+                          )}
+                        >
+                          {archiveSelected.has(c.id) ? (
+                            <svg
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="3"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              className="h-2.5 w-2.5 text-[#f6b3a4]"
+                            >
+                              <path d="m5 12 5 5L20 7" />
+                            </svg>
+                          ) : null}
+                        </span>
+                      ) : (
+                        <span className={cn(convStatusDot, convStatusDotRead)} aria-hidden="true" />
+                      )}
                       <span className={cn(convRowSelectLabel, 'text-text-muted')}>
                         {c.title || '(untitled)'}
                       </span>
@@ -5854,13 +5973,13 @@ export function App(): React.ReactElement {
         )
       : null}
 
-      {deleteAllArchivedOpen ?
+        {bulkDeleteKind ?
         createPortal(
           <div
             className={modalOverlay}
             role="presentation"
             onMouseDown={(e) => {
-              if (e.target === e.currentTarget) setDeleteAllArchivedOpen(false)
+              if (e.target === e.currentTarget) setBulkDeleteKind(null)
             }}
           >
             <div
@@ -5871,19 +5990,29 @@ export function App(): React.ReactElement {
               onMouseDown={(e) => e.stopPropagation()}
             >
               <h3 id="sylo-delete-archived-all-title" className={modalTitle}>
-                Delete all archived chats?
+                {bulkDeleteKind === 'all' ? 'Delete all archived chats?' : 'Delete selected archived chats?'}
               </h3>
               <p className={modalBody}>
-                All <strong>{archivedConversations.length}</strong> archived chat
-                {archivedConversations.length === 1 ? '' : 's'} in this workspace will be removed permanently,
-                including their messages and session files. This cannot be undone.
+                {bulkDeleteKind === 'all' ? (
+                  <>
+                    All <strong>{archivedConversations.length}</strong> archived chat
+                    {archivedConversations.length === 1 ? '' : 's'} in this workspace will be removed
+                    permanently, including their messages and session files. This cannot be undone.
+                  </>
+                ) : (
+                  <>
+                    <strong>{archiveSelected.size}</strong> selected archived chat
+                    {archiveSelected.size === 1 ? '' : 's'} will be removed permanently, including their
+                    messages and session files. This cannot be undone.
+                  </>
+                )}
               </p>
               <div className={modalActions}>
-                <button type="button" className={btnGhost} onClick={() => setDeleteAllArchivedOpen(false)}>
+                <button type="button" className={btnGhost} onClick={() => setBulkDeleteKind(null)}>
                   Cancel
                 </button>
-                <button type="button" className={btnDanger} onClick={() => void confirmDeleteAllArchived()}>
-                  Delete {archivedConversations.length === 1 ? 'chat' : `all ${archivedConversations.length}`}
+                <button type="button" className={btnDanger} onClick={() => void confirmBulkDeleteArchived(bulkDeleteKind)}>
+                  Delete {bulkDeleteKind === 'all' ? (archivedConversations.length === 1 ? 'chat' : `all ${archivedConversations.length}`) : archiveSelected.size}
                 </button>
               </div>
             </div>

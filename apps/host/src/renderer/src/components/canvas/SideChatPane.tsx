@@ -1,7 +1,31 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { CHATGPT_CODEX_MODELS, CHATGPT_CODEX_PROVIDER, SYLO_MODEL_PROVIDERS, SYLO_MODEL_PROVIDER_LABELS } from '../../../../shared/chatgpt-codex'
 import { cn } from '../../lib/cn'
-import { btnGhostSm, chatInputSendBtn, chatStopBtnCompact, mutedText } from '../../panels/ui-classes'
+import { btnGhostSm, chatInputSendBtn, chatStopBtnCompact, modelBarPill, mutedText } from '../../panels/ui-classes'
+import { normalizeOllamaOriginUi, OllamaModelSelect } from '../../panels/ollama-ui'
 import { ChatMarkdown } from '../../ChatMarkdown'
+
+const GLOBAL_SENTINEL = '__sylo_global__'
+
+/** Per-chat model override shape (same semantics as ChatModelBar: null = inherit global). */
+type SideOverride = {
+  model_provider: string | null
+  model_id: string | null
+  image_model_id: string | null
+  image_model_provider: string | null
+  thinking_level: string | null
+}
+
+const SIDE_NULL_OVERRIDE: SideOverride = {
+  model_provider: null,
+  model_id: null,
+  image_model_id: null,
+  image_model_provider: null,
+  thinking_level: null,
+}
+
+const providerLabel = (p: string) =>
+  SYLO_MODEL_PROVIDER_LABELS[p as keyof typeof SYLO_MODEL_PROVIDER_LABELS] ?? p
 
 /**
  * Side chat pane (apps pane, Phase 7 + v2): one DB child conversation per tab,
@@ -9,8 +33,10 @@ import { ChatMarkdown } from '../../ChatMarkdown'
  * (`chat.send` on the child id) — the broker pool treats it like any other
  * chat. v2: the composer stays live while a turn runs — Enter STEERS the
  * active response (falls back to a chained send when the turn just ended);
- * Stop still aborts. Model override intentionally not built yet (needs the
- * ChatModelBar option machinery; child inherits the parent chat's model).
+ * Stop still aborts. Model override: a compact picker above the composer
+ * persists provider/model on the child conversation (null fields inherit the
+ * global default, same semantics as the main ChatModelBar); picks made before
+ * the child exists are stashed and applied on first send.
  *
  * The child conversation is created lazily on first send so closing the tab
  * without messaging leaves nothing behind. Deleting the parent chat
@@ -41,6 +67,13 @@ export function SideChatPane({
   const streamBufRef = useRef('')
   const [streamText, setStreamText] = useState('')
   const listRef = useRef<HTMLDivElement | null>(null)
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [override, setOverride] = useState<SideOverride>(SIDE_NULL_OVERRIDE)
+  /** Host-reported effective model for the child (per-chat ?? global ?? default). */
+  const [effModel, setEffModel] = useState<{ provider: string; modelId: string } | null>(null)
+  const [ollamaTags, setOllamaTags] = useState<string[]>([])
+  /** Model picked before the child exists — applied to the child on first send. */
+  const pendingModelRef = useRef<SideOverride | null>(null)
 
   const reload = useCallback(
     async (id: string) => {
@@ -65,6 +98,7 @@ export function SideChatPane({
     setChildId(null)
     setRows([])
     setStreamText('')
+    pendingModelRef.current = null
     if (!parentId) {
       setChildLoading(false)
       return
@@ -86,6 +120,93 @@ export function SideChatPane({
       dead = true
     }
   }, [parentId, reload])
+
+  // Model selection: the child's own per-chat override (host resolves effective
+  // = per-chat ?? global ?? SYLO default). With no child yet, show the global
+  // default; any pre-child pick is stashed and applied to the child on send.
+  useEffect(() => {
+    let dead = false
+    if (!childId) {
+      setOverride(SIDE_NULL_OVERRIDE)
+      void (async () => {
+        const gProvider = ((await window.sylo.prefs.get('sylo.model_provider', '')) as string).trim()
+        const gModelId = ((await window.sylo.prefs.get('sylo.model_id', '')) as string).trim()
+        if (!dead) setEffModel({ provider: gProvider, modelId: gModelId })
+      })()
+      return () => {
+        dead = true
+      }
+    }
+    void (async () => {
+      const m = await window.sylo.conversations.getModel(childId)
+      if (dead) return
+      if (!m) {
+        setOverride(SIDE_NULL_OVERRIDE)
+        setEffModel(null)
+        return
+      }
+      setOverride({
+        model_provider: m.model_provider?.trim() || null,
+        model_id: m.model_id?.trim() || null,
+        image_model_id: null,
+        image_model_provider: null,
+        thinking_level: null,
+      })
+      setEffModel({ provider: m.effective.provider, modelId: m.effective.modelId })
+    })()
+    return () => {
+      dead = true
+    }
+  }, [childId])
+
+  // Ollama tags for the picker's model dropdown (lazy — first open only).
+  useEffect(() => {
+    if (!pickerOpen || ollamaTags.length > 0) return
+    let dead = false
+    void (async () => {
+      const pref = ((await window.sylo.prefs.get('sylo.ollama_base_url', '')) as string).trim()
+      const origin = pref ? normalizeOllamaOriginUi(pref) : await window.sylo.ollama.inferBaseUrl()
+      const r = await window.sylo.ollama.listTags(origin)
+      if (!dead && r.ok) setOllamaTags(r.models)
+    })()
+    return () => {
+      dead = true
+    }
+  }, [pickerOpen, ollamaTags.length])
+
+  /** Persist the override on the child; stash it when the child doesn't exist yet. */
+  const persistModel = useCallback(
+    (next: SideOverride) => {
+      setOverride(next)
+      if (childId) void window.sylo.conversations.setModel(childId, next)
+      else pendingModelRef.current = next
+    },
+    [childId],
+  )
+
+  const onSideProviderChange = useCallback(
+    (raw: string) => {
+      const provider = raw === GLOBAL_SENTINEL ? null : raw
+      persistModel({
+        ...SIDE_NULL_OVERRIDE,
+        model_provider: provider,
+        model_id: provider === null ? null : override.model_id,
+      })
+    },
+    [override, persistModel],
+  )
+
+  const onSideModelChange = useCallback(
+    (raw: string) => {
+      const modelId = raw === '' ? null : raw
+      persistModel({
+        ...SIDE_NULL_OVERRIDE,
+        model_id: modelId,
+        model_provider: modelId === null ? null : (override.model_provider ?? effModel?.provider ?? 'ollama'),
+      })
+    },
+    [override, effModel, persistModel],
+  )
 
   // Turn events for the child conversation (registered once; filtered by id).
   useEffect(() => {
@@ -140,6 +261,12 @@ export function SideChatPane({
       if (!r.ok) return
       id = r.conversation.id
       setChildId(id)
+      // Apply a pre-child model pick before the first send resolves the model.
+      const pend = pendingModelRef.current
+      if (pend) {
+        pendingModelRef.current = null
+        await window.sylo.conversations.setModel(id, pend)
+      }
     }
     setInput('')
     streamBufRef.current = ''
@@ -161,6 +288,7 @@ export function SideChatPane({
   }, [input, parentId, sending, childId, reload])
 
   const noParent = !parentId
+  const shownProvider = (override.model_provider ?? effModel?.provider ?? '').trim()
 
   return (
     <div className={cn('flex min-h-0 min-w-0 flex-1 flex-col', className)}>
@@ -202,7 +330,73 @@ export function SideChatPane({
           </div>
         )}
       </div>
+      {pickerOpen && !noParent ? (
+        <div className="mx-3 mb-1 flex items-center gap-1.5 rounded-lg border border-border bg-[#1e1e1e] px-2.5 py-2">
+          <span className={cn(mutedText, 'shrink-0 text-[0.68rem]')}>Model</span>
+          <select
+            className={cn(modelBarPill, 'h-7 max-w-[150px] shrink-0 py-0 text-[0.7rem]')}
+            value={override.model_provider ?? GLOBAL_SENTINEL}
+            onChange={(e) => onSideProviderChange(e.target.value)}
+            aria-label="Side chat model provider"
+          >
+            <option value={GLOBAL_SENTINEL}>
+              Default{effModel ? ` (${providerLabel(effModel.provider)})` : ''}
+            </option>
+            {SYLO_MODEL_PROVIDERS.map((p) => (
+              <option key={p} value={p}>
+                {providerLabel(p)}
+              </option>
+            ))}
+          </select>
+          {override.model_provider ? (
+            override.model_provider === 'ollama' ? (
+              <OllamaModelSelect
+                modelId={override.model_id ?? ''}
+                setModelId={(v) => onSideModelChange(v)}
+                ollamaTags={ollamaTags}
+                emptyOptionLabel={`Default (${effModel?.modelId ?? 'model'})`}
+                id="sylo-side-chat-model-select"
+                className={cn(modelBarPill, 'h-7 min-w-0 max-w-[220px] flex-1 py-0 text-[0.7rem]')}
+              />
+            ) : override.model_provider === CHATGPT_CODEX_PROVIDER ? (
+              <select
+                className={cn(modelBarPill, 'h-7 min-w-0 max-w-[220px] flex-1 py-0 text-[0.7rem]')}
+                value={override.model_id ?? ''}
+                onChange={(e) => onSideModelChange(e.target.value)}
+                aria-label="Side chat model"
+              >
+                <option value="">Model…</option>
+                {CHATGPT_CODEX_MODELS.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+                {override.model_id && !CHATGPT_CODEX_MODELS.some((m) => m.id === override.model_id) ? (
+                  <option value={override.model_id}>{override.model_id}</option>
+                ) : null}
+              </select>
+            ) : (
+              <input
+                className={cn(modelBarPill, 'h-7 max-w-[200px] flex-1 py-0 text-[0.7rem]')}
+                value={override.model_id ?? ''}
+                onChange={(e) => onSideModelChange(e.target.value)}
+                placeholder={`Model id (default: ${effModel?.modelId ?? ''})`}
+                aria-label="Model id"
+              />
+            )
+          ) : null}
+        </div>
+      ) : null}
       <div className="mx-3 mb-3 mt-1 flex items-end gap-2 rounded-xl border border-border bg-[#1e1e1e] px-3 py-2.5">
+        <button
+          type="button"
+          className={cn(modelBarPill, 'h-9 max-w-[150px] shrink-0 cursor-pointer self-end truncate py-0 text-[0.7rem]')}
+          title={`Side chat model — ${override.model_id?.trim() || effModel?.modelId || 'default'}${shownProvider ? ` (${providerLabel(shownProvider)})` : ''}`}
+          aria-expanded={pickerOpen}
+          onClick={() => setPickerOpen((o) => !o)}
+        >
+          {override.model_id?.trim() || effModel?.modelId || 'model'}
+        </button>
         <textarea
           className="max-h-[120px] min-h-9 flex-1 resize-none border-0 bg-transparent px-0 py-1 font-[inherit] text-[0.9rem] leading-[1.5] text-text-primary placeholder:text-text-muted outline-none"
           value={input}
