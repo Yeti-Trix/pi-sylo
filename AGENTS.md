@@ -62,3 +62,9 @@ improvements are welcome and get reviewed before they land in a release:
 
 The maintainer reviews PRs and folds accepted changes into the next Sylo release. Larger
 features should start as an Issue for discussion first.
+## Work coordination — check the issue board FIRST
+
+Before starting ANY feature, fix, or refactor in this repo (any tool, any session):
+**check open issues/PRs and claim an issue first** — no unclaimed, untracked work.
+This prevents agent sessions from colliding in the same files. Full process:
+[docs/WORKFLOW.md](docs/WORKFLOW.md).

@@ -857,6 +857,7 @@ export function createSideConversation(
     image_model_id: null,
     image_model_provider: null,
     thinking_level: null,
+    subagent_models_json: null,
   }
 }
 
