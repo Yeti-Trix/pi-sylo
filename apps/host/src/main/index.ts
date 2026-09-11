@@ -1363,7 +1363,17 @@ function buildAppMenu(): Menu {
     }
     template.push({ label: sec.label, submenu })
   }
+  const developerSubmenu: MenuItemConstructorOptions[] = [
+    {
+      label: 'Restart broker',
+      click: () => {
+        clearSafeModePrefs()
+        registerBroker()
+      },
+    },
+  ]
   template.push(
+    { label: 'Developer', submenu: developerSubmenu },
     { label: 'Window', submenu: windowSubmenu },
     { label: 'Help', submenu: helpSubmenu },
   )

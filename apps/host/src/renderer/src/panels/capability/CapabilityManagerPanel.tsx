@@ -645,12 +645,6 @@ export function CapabilityManagerPanel({
     return guardExcluded && piBuiltinToolsEnforcementActive(piBuiltinTools)
   }, [capabilities, piBuiltinTools])
 
-  const savePiBuiltinToolsPrefs = async () => {
-    await window.sylo.prefs.set('sylo.pi_builtin_tools', piBuiltinTools)
-    setExcludeAgentNotice('Pi built-in tool settings saved. Restarting broker…')
-    await onRestartBroker()
-    setExcludeAgentNotice('Pi built-in tool settings saved. Broker restarted.')
-  }
 
   useEffect(() => {
     let cancelled = false
@@ -707,6 +701,7 @@ export function CapabilityManagerPanel({
 
   const setPiBuiltinMaster = (enabled: boolean) => {
     setPiBuiltinTools((prev) => ({ ...prev, enabled }))
+    void window.sylo.prefs.set('sylo.pi_builtin_tools', { ...piBuiltinTools, enabled })
   }
 
   const setPiBuiltinTool = (id: (typeof PI_BUILTIN_TOOL_IDS)[number], on: boolean) => {
@@ -714,6 +709,10 @@ export function CapabilityManagerPanel({
       ...prev,
       tools: { ...prev.tools, [id]: on },
     }))
+    void window.sylo.prefs.set('sylo.pi_builtin_tools', {
+      ...piBuiltinTools,
+      tools: { ...piBuiltinTools.tools, [id]: on },
+    })
   }
 
     /** Last non-empty broker snapshot per individual package — keeps rows visible after unload until broker restart. */
@@ -764,9 +763,9 @@ export function CapabilityManagerPanel({
       }
       const brokerStaleBanner =
         !on && liveHasAny
-          ? 'This package is off in settings, but the broker still has it loaded. Restart broker so the agent drops it (the list updates after restart).'
+          ? 'This package is off in settings, but the broker still has it loaded. Developer → Restart broker so the agent drops it (the list updates after restart).'
           : on && !liveHasAny && mergedHasAny && capabilities?.brokerOk
-            ? 'This package is on in settings, but the running broker has not loaded it yet. Restart broker so the agent picks it up.'
+            ? 'This package is on in settings, but the running broker has not loaded it yet. Developer → Restart broker so the agent picks it up.'
             : null
       const knHint =
         KNOWN_PACKAGES.find((k) => k.canonical === inv.source || k.aliases?.includes(inv.source))?.hint ?? null
@@ -981,7 +980,7 @@ export function CapabilityManagerPanel({
       const r = await window.sylo.package.installSpec(s, packageWorkspaceId)
       if (r.ok) {
         setInstallFlash(
-          `${s} — Pi CLI finished. Use Restart broker above when the lists look stale.`,
+          `${s} — Pi CLI finished. Use Developer → Restart broker when the lists look stale.`,
         )
         await syncCapabilitiesAfterPackageOp()
       } else {
@@ -1094,25 +1093,6 @@ export function CapabilityManagerPanel({
       {collisionBanner}
 
       <h2 className={capSectionTitle}>Capability manager</h2>
-      <div className={capActions}>
-        <button type="button" className={btnGhost} onClick={() => void onAttachUi()}>
-          Attach UI to Sylo…
-        </button>
-        <button type="button" className={btnGhost} onClick={onNewSkill}>
-          + New skill
-        </button>
-        <button
-          type="button"
-          className={btnGhost}
-          onClick={() => {
-            setInstallFlash(null)
-            setExcludeAgentNotice(null)
-            void onRestartBroker()
-          }}
-        >
-          Restart broker
-        </button>
-      </div>
 
       {installFlash && (
         <div className={cn(capBanner, capBannerWarn)} style={{ marginTop: 8 }}>
@@ -1187,14 +1167,6 @@ export function CapabilityManagerPanel({
               </li>
             ))}
           </ul>
-          <button
-            type="button"
-            className={btnPrimary}
-           
-            onClick={() => void savePiBuiltinToolsPrefs()}
-          >
-            Save &amp; restart broker
-          </button>
         </div>
       </details>
 
@@ -1506,8 +1478,8 @@ export function CapabilityManagerPanel({
             <a href="https://pi.dev/packages" target="_blank" rel="noreferrer">
               pi.dev
             </a>
-            . <strong>Install</strong> runs <code>pi install</code>. When it finishes, click <strong>Restart broker</strong>{' '}
-            above so installs show up; a <strong>Personal packages</strong> card appears below once Pi sees them on
+            . <strong>Install</strong> runs <code>pi install</code>. When it finishes, use <strong>Developer → Restart broker</strong>{' '}
+            so installs show up; a <strong>Personal packages</strong> card appears below once Pi sees them on
             disk.
           </p>
 
