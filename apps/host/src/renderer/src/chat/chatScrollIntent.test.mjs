@@ -9,6 +9,9 @@ import {
   isUserDrivenScrollUp,
   isUserScrollUpWheel,
   readChatScrollRect,
+  shouldAdjustChatRowOnSizeChange,
+  shouldRepinChatToEnd,
+  shouldUnpinChatFromEnd,
 } from '../../../../out/test/chatScrollIntent.mjs'
 
 describe('chatMessagesMatchConversation', () => {
@@ -95,5 +98,120 @@ describe('isUserScrollUpWheel', () => {
 
   test('scrolling down never counts', () => {
     assert.equal(isUserScrollUpWheel(40, 0), false)
+  })
+})
+
+describe('shouldRepinChatToEnd', () => {
+  test('stays pinned while already at the true end', () => {
+    assert.equal(
+      shouldRepinChatToEnd({
+        atEnd: true,
+        alreadyPinned: true,
+        scrollTop: 800,
+        lastScrollTop: 820,
+      }),
+      true,
+    )
+  })
+
+  test('an upward read-back that is still near the end does not re-pin', () => {
+    // User message sits just above a short reply. Scrolling up to it used
+    // to trip isAtEnd and yank the pane back to Latest.
+    assert.equal(
+      shouldRepinChatToEnd({
+        atEnd: true,
+        alreadyPinned: false,
+        scrollTop: 780,
+        lastScrollTop: 820,
+      }),
+      false,
+    )
+  })
+
+  test('scrolling down onto the true end re-pins', () => {
+    assert.equal(
+      shouldRepinChatToEnd({
+        atEnd: true,
+        alreadyPinned: false,
+        scrollTop: 840,
+        lastScrollTop: 800,
+      }),
+      true,
+    )
+  })
+
+  test('away from the end never re-pins', () => {
+    assert.equal(
+      shouldRepinChatToEnd({
+        atEnd: false,
+        alreadyPinned: false,
+        scrollTop: 400,
+        lastScrollTop: 200,
+      }),
+      false,
+    )
+  })
+})
+
+describe('shouldUnpinChatFromEnd', () => {
+  const base = {
+    atEnd: false,
+    scrollTop: 200,
+    lastScrollTop: 400,
+    now: 5_000,
+    suppressUntil: 0,
+  }
+
+  test('leaving the end on an upward step unpins even when height also changed', () => {
+    assert.equal(shouldUnpinChatFromEnd(base), true)
+  })
+
+  test('staying at the true end never unpins', () => {
+    assert.equal(shouldUnpinChatFromEnd({ ...base, atEnd: true }), false)
+  })
+
+  test('programmatic pins inside the suppress window are ignored', () => {
+    assert.equal(shouldUnpinChatFromEnd({ ...base, now: 900, suppressUntil: 1000 }), false)
+  })
+})
+
+describe('shouldAdjustChatRowOnSizeChange', () => {
+  const entirelyAbove = {
+    pinnedToEnd: false,
+    itemStart: 100,
+    itemSize: 200,
+    scrollOffset: 800,
+    isFirstMeasure: true,
+    scrollDirection: 'backward',
+  }
+
+  test('an older row entirely above the fold is compensated while reading history', () => {
+    // Without this, a 64k estimate shrinking to 200px flings the pane upward.
+    assert.equal(shouldAdjustChatRowOnSizeChange(entirelyAbove), true)
+  })
+
+  test('the on-screen user message is not compensated while reading history', () => {
+    assert.equal(
+      shouldAdjustChatRowOnSizeChange({
+        ...entirelyAbove,
+        itemStart: 700,
+        itemSize: 240,
+        scrollOffset: 800,
+      }),
+      false,
+    )
+  })
+
+  test('while pinned, a first measure that starts above the fold still compensates', () => {
+    assert.equal(
+      shouldAdjustChatRowOnSizeChange({
+        ...entirelyAbove,
+        pinnedToEnd: true,
+        itemStart: 700,
+        itemSize: 240,
+        scrollOffset: 800,
+      }),
+      true,
+    )
   })
 })

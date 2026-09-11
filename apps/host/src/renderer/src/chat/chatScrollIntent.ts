@@ -8,6 +8,14 @@
 /** Pixel-wheel delta smaller than this is trackpad jitter, not a read-back. */
 export const CHAT_WHEEL_UP_PX = 12
 
+/**
+ * Must be this close to the true end before stick-to-bottom can turn back on,
+ * and before the virtualizer treats a row resize as "still at Latest".
+ * A 120px band is wide enough that the user's own prompt (just above a
+ * short reply) still counts as the end — that is the jump-to-Latest yank.
+ */
+export const CHAT_AT_END_PX = 8
+
 /** True when the loaded messages belong to the conversation now on screen. */
 export function chatMessagesMatchConversation(
   activeId: string | undefined,
@@ -42,6 +50,63 @@ export function isUserScrollUpWheel(deltaY: number, deltaMode = 0): boolean {
   if (deltaY >= 0) return false
   if (deltaMode !== 0) return true
   return deltaY <= -CHAT_WHEEL_UP_PX
+}
+
+/**
+ * Re-enable stick-to-bottom only when already pinned, or when the user
+ * scrolled down onto the true end. Being merely near the end after an
+ * upward read-back must not re-pin.
+ */
+export function shouldRepinChatToEnd(opts: {
+  atEnd: boolean
+  alreadyPinned: boolean
+  scrollTop: number
+  lastScrollTop: number
+}): boolean {
+  if (!opts.atEnd) return false
+  if (opts.alreadyPinned) return true
+  return opts.scrollTop >= opts.lastScrollTop - 1
+}
+
+/**
+ * Leave stick-to-bottom as soon as the user has actually moved away from
+ * the end. Height must not gate this: a streaming reply changes
+ * scrollHeight on the same frame as a trackpad step, and ignoring that
+ * step is what left stick on so a later resize yanked back to Latest.
+ */
+export function shouldUnpinChatFromEnd(opts: {
+  atEnd: boolean
+  scrollTop: number
+  lastScrollTop: number
+  now: number
+  suppressUntil: number
+}): boolean {
+  if (opts.now <= opts.suppressUntil) return false
+  if (opts.atEnd) return false
+  return opts.scrollTop < opts.lastScrollTop - 1
+}
+
+/**
+ * Keep the reading position stable when an older row's estimate is wrong:
+ * compensate items that sit entirely above the fold. Do not compensate the
+ * on-screen row (the user prompt they just reached) — that is the
+ * jump-to-Latest. While pinned, also compensate a first measure that
+ * starts above the fold so the live tail does not drift.
+ */
+export function shouldAdjustChatRowOnSizeChange(opts: {
+  pinnedToEnd: boolean
+  itemStart: number
+  itemSize: number
+  scrollOffset: number
+  isFirstMeasure: boolean
+  scrollDirection: 'forward' | 'backward' | null
+}): boolean {
+  const entirelyAbove = opts.itemStart + opts.itemSize <= opts.scrollOffset
+  if (entirelyAbove) return true
+  if (opts.pinnedToEnd && opts.isFirstMeasure && opts.itemStart < opts.scrollOffset) {
+    return true
+  }
+  return false
 }
 
 /**

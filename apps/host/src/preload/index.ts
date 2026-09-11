@@ -108,6 +108,10 @@ contextBridge.exposeInMainWorld('sylo', {
       ipcRenderer.invoke('workspaces:create', name, piCwd ?? '', opts),
     update: (id: string, patch: { name?: string; pi_cwd?: string }, opts?: { createPiProjectDir?: boolean }) =>
       ipcRenderer.invoke('workspaces:update', id, patch, opts),
+    reorder: (orderedIds: string[]) =>
+      ipcRenderer.invoke('workspaces:reorder', orderedIds) as Promise<
+        { ok: true } | { ok: false; error: string }
+      >,
     /** Create the missing primary (user-data) workspace folder under `name`. */
     primaryProvision: (args: { name: string }) =>
       ipcRenderer.invoke('workspaces:primaryProvision', args) as Promise<

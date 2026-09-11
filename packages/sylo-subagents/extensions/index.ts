@@ -17,6 +17,7 @@ import { type AgentConfig, type AgentScope, discoverAgents } from './agents.ts'
 import { resolvePiSpawn } from './pi-cli.ts'
 import { subagentModelCliArgs } from './subagent-model.ts'
 import { cancelSubagentRun, consumeRunCancelled, registerSubagentRun, unregisterSubagentRun } from './subagent-run-registry.ts'
+import { resolveSubagentTimeoutMs } from './subagent-timeout.ts'
 import { newSubagentRunId, notifySyloSubagent, type SyloSubagentRunMode } from './sylo-host.ts'
 
 export { cancelAllSubagentRuns, cancelSubagentRun } from './subagent-run-registry.ts'
@@ -24,8 +25,6 @@ export { cancelAllSubagentRuns, cancelSubagentRun } from './subagent-run-registr
 const MAX_PARALLEL_TASKS = 8
 const MAX_CONCURRENCY = 4
 const PER_TASK_OUTPUT_CAP = 50 * 1024
-const DEFAULT_TIMEOUT_MS = 600_000
-
 /**
  * Coalescing window for live progress.
  *
@@ -362,13 +361,17 @@ async function runSingleAgent(
         resolve(code)
       }
 
+      const timeoutMs = resolveSubagentTimeoutMs({
+        timeoutSeconds: agent.timeoutSeconds,
+        provider: subagentModel.provider,
+      })
       timeout = setTimeout(() => {
-        currentResult.stderr += '\n[timeout] Subagent exceeded time limit.'
+        currentResult.stderr += `\n[timeout] Subagent exceeded time limit (${Math.round(timeoutMs / 1000)}s).`
         proc.kill('SIGTERM')
         setTimeout(() => {
           if (!proc.killed) proc.kill('SIGKILL')
         }, 5000)
-      }, DEFAULT_TIMEOUT_MS)
+      }, timeoutMs)
 
       type ChildEvent = {
         type?: string

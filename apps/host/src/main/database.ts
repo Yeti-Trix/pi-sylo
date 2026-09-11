@@ -147,6 +147,9 @@ export function canonicalDefaultWorkspacePiProjectPath(): string {
   return path.join(homedir(), 'Documents', 'GitHub', 'sylo-user')
 }
 
+/** Oldest workspace is the stable primary. `sort_order` is sidebar display order only. */
+const WORKSPACE_PRIMARY_SQL = 'created_at ASC, id ASC'
+
 /**
  * Resolve the sylo-user (primary workspace) project directory from the
  * workspace DB row's `pi_cwd`. Respects operator edits in the Workspaces UI
@@ -162,9 +165,7 @@ export function resolveSyloUserDir(): string {
   try {
     if (db) {
       const row = db
-        .prepare(
-          'SELECT pi_cwd FROM workspaces ORDER BY sort_order ASC, created_at ASC LIMIT 1',
-        )
+        .prepare(`SELECT pi_cwd FROM workspaces ORDER BY ${WORKSPACE_PRIMARY_SQL} LIMIT 1`)
         .get() as { pi_cwd: string | null } | undefined
       const cwd = row?.pi_cwd?.trim()
       if (cwd && fs.existsSync(cwd)) return cwd
@@ -381,7 +382,7 @@ function migrateLegacySchema(d: Database.Database, userDataPath: string): void {
 function migrateDefaultWorkspaceToDocumentsDir(d: Database.Database, userDataPath: string): void {
   if (!tableExists(d, 'workspaces')) return
   const row = d
-    .prepare('SELECT id, pi_cwd FROM workspaces ORDER BY sort_order ASC, created_at ASC LIMIT 1')
+    .prepare(`SELECT id, pi_cwd FROM workspaces ORDER BY ${WORKSPACE_PRIMARY_SQL} LIMIT 1`)
     .get() as { id: string; pi_cwd: string | null } | undefined
   if (!row) return
   const docs = homedir() + '\\Documents'
@@ -483,7 +484,7 @@ function bootstrapWorkspacesIfEmpty(d: Database.Database, userDataPath: string):
 function backfillConversationWorkspaces(d: Database.Database): void {
   if (!tableExists(d, 'workspaces')) return
   const def = (d
-    .prepare('SELECT id FROM workspaces ORDER BY sort_order ASC, created_at ASC LIMIT 1')
+    .prepare(`SELECT id FROM workspaces ORDER BY ${WORKSPACE_PRIMARY_SQL} LIMIT 1`)
     .get() as { id: string } | undefined)?.id
   if (!def) return
   d.prepare('UPDATE conversations SET workspace_id = ? WHERE workspace_id IS NULL').run(def)
@@ -581,7 +582,7 @@ export function refreshOperatorEnv(): void {
 /** First workspace by sort order — target for chat moves when deleting a workspace. */
 export function defaultWorkspaceId(): string {
   const row = getDb()
-    .prepare('SELECT id FROM workspaces ORDER BY sort_order ASC, created_at ASC LIMIT 1')
+    .prepare(`SELECT id FROM workspaces ORDER BY ${WORKSPACE_PRIMARY_SQL} LIMIT 1`)
     .get() as { id: string } | undefined
   if (!row) throw new Error('no workspace')
   return row.id
@@ -966,6 +967,21 @@ export function getWorkspace(id: string): WorkspaceRow | undefined {
   return getDb()
     .prepare(`SELECT ${WORKSPACE_COLUMNS} FROM workspaces WHERE id = ?`)
     .get(id) as WorkspaceRow | undefined
+}
+
+/** Persist sidebar order. `orderedIds` must be a permutation of every workspace id. */
+export function reorderWorkspaces(orderedIds: string[]): void {
+  const existing = listWorkspaces().map((w) => w.id)
+  if (existing.length === 0) return
+  const unique = [...new Set(orderedIds.filter((id) => typeof id === 'string' && id))]
+  if (unique.length !== existing.length || unique.some((id) => !existing.includes(id))) {
+    throw new Error('workspace_reorder_incomplete')
+  }
+  const d = getDb()
+  const stmt = d.prepare('UPDATE workspaces SET sort_order = ? WHERE id = ?')
+  d.transaction((ids: string[]) => {
+    ids.forEach((id, index) => stmt.run(index, id))
+  })(unique)
 }
 
 export function updateWorkspace(id: string, patch: { name?: string; pi_cwd?: string }): void {

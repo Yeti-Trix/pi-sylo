@@ -7,13 +7,14 @@ import { ChatModelBar } from './chat/ChatModelBar'
 import { LiveElapsedLabel } from './chat/LiveElapsedLabel'
 import {
   ChatTimelineList,
-  CHAT_NEAR_BOTTOM_PX,
   type ChatTimelineListHandle,
 } from './chat/ChatTimelineList'
 import {
+  CHAT_AT_END_PX,
   chatMessagesMatchConversation,
-  isUserDrivenScrollUp,
   isUserScrollUpWheel,
+  shouldRepinChatToEnd,
+  shouldUnpinChatFromEnd,
 } from './chat/chatScrollIntent'
 import {
   buildConversationMarkdown,
@@ -112,6 +113,8 @@ import {
   sidebarWsSectionChevron,
   sidebarWsSectionName,
   sidebarWsSectionActive,
+  sidebarWsSectionDragging,
+  sidebarWsDropLine,
   chatPane,
   chatArea,
   chatStatusSubfoot,
@@ -558,6 +561,8 @@ type WorkspaceRow = {
   resolved_pi_cwd: string
   /** Primary only: its folder was missing on disk at app startup. */
   folder_missing: boolean
+  /** Stable primary (oldest workspace), independent of sidebar order. */
+  is_primary: boolean
 }
 /** Stable empty slice for memoized message rows with no live workflow events. */
 const EMPTY_WORKFLOW: WorkflowStampedEntry[] = []
@@ -576,11 +581,19 @@ function clampSidebarWidth(width: number): number {
   return Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, Math.round(width)))
 }
 
+type WorkspaceDropHint = { id: string; edge: 'before' | 'after' }
+
+/** Top half of the project row = insert before; below that (row or chats) = after. */
+function workspaceDropEdge(section: HTMLElement, clientY: number): 'before' | 'after' {
+  const row = section.querySelector('summary')?.getBoundingClientRect() ?? section.getBoundingClientRect()
+  return clientY < row.top + row.height / 2 ? 'before' : 'after'
+}
+
 function scrollChatAreaToBottom(el: HTMLElement): void {
   el.scrollTop = el.scrollHeight
 }
 
-function isChatAreaNearBottom(el: HTMLElement, threshold = CHAT_NEAR_BOTTOM_PX): boolean {
+function isChatAreaNearBottom(el: HTMLElement, threshold = CHAT_AT_END_PX): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight < threshold
 }
 
@@ -619,6 +632,10 @@ export function App(): React.ReactElement {
   const activeIdRef = useRef<string | undefined>(undefined)
   activeIdRef.current = activeId
   const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([])
+  const [dragWsId, setDragWsId] = useState<string | null>(null)
+  const [dropHint, setDropHint] = useState<WorkspaceDropHint | null>(null)
+  const dragWsIdRef = useRef<string | null>(null)
+  const suppressWsToggleRef = useRef(false)
   const [sidebarWorkspaceId, setSidebarWorkspaceId] = useState<string>('')
   /** Sidebar chat-search filter (title substring within the active workspace). */
   const [convSearch, setConvSearch] = useState('')
@@ -997,6 +1014,7 @@ export function App(): React.ReactElement {
   const chatAreaRef = useRef<HTMLDivElement>(null)
   const chatListRef = useRef<ChatTimelineListHandle>(null)
   const stickToBottomRef = useRef(true)
+  const [pinChatToEnd, setPinChatToEnd] = useState(true)
   const pendingConvScrollRef = useRef(false)
   const prevMessagesLenRef = useRef(0)
   const prevChatTabVisibleRef = useRef(tab === 'chat')
@@ -1062,6 +1080,38 @@ export function App(): React.ReactElement {
     return list
   }, [])
 
+  const primaryWorkspace = useMemo(
+    () => workspaces.find((w) => w.is_primary) ?? workspaces[0],
+    [workspaces],
+  )
+
+  const reorderSidebarWorkspaces = useCallback(
+    (fromId: string, toId: string, edge: 'before' | 'after') => {
+      const fromIdx = workspaces.findIndex((x) => x.id === fromId)
+      const toIdxRaw = workspaces.findIndex((x) => x.id === toId)
+      if (fromIdx < 0 || toIdxRaw < 0) return
+      let toIdx = edge === 'after' ? toIdxRaw + 1 : toIdxRaw
+      const next = [...workspaces]
+      const [moved] = next.splice(fromIdx, 1)
+      if (fromIdx < toIdx) toIdx -= 1
+      if (toIdx === fromIdx) return
+      next.splice(toIdx, 0, moved)
+      const ordered = next.map((w, i) => ({ ...w, sort_order: i }))
+      setWorkspaces(ordered)
+      void window.sylo.workspaces.reorder(ordered.map((w) => w.id)).then((res) => {
+        if (!res.ok) void refreshWorkspaces()
+      })
+    },
+    [workspaces, refreshWorkspaces],
+  )
+
+  const dropWorkspaceAtEnd = useCallback(() => {
+    const last = workspaces[workspaces.length - 1]
+    const fromId = dragWsIdRef.current
+    if (!fromId || !last) return
+    reorderSidebarWorkspaces(fromId, last.id, 'after')
+  }, [workspaces, reorderSidebarWorkspaces])
+
   // First-run onboarding: ask the operator to name the universal workspace once,
   // BEFORE any GitHub backup is wired to it (a pull against the wrong repo is how
   // separate installs combine). Fires only on a pristine auto-created install:
@@ -1073,7 +1123,7 @@ export function App(): React.ReactElement {
     if (onboardingCheckedRef.current || workspaces.length === 0) return
     onboardingCheckedRef.current = true
     void (async () => {
-      const w = workspaces[0]
+      const w = primaryWorkspace
       // Missing user-data workspace folder (deleted externally, fresh machine,
       // botched rename): offer create-by-name or restore-from-GitHub first —
       // this takes precedence over the first-run naming onboarding.
@@ -1092,10 +1142,10 @@ export function App(): React.ReactElement {
       setOnboardingName(w.name)
       setOnboardingNameOpen(true)
     })()
-  }, [workspaces])
+  }, [workspaces, primaryWorkspace])
 
   const confirmOnboardingName = useCallback(async () => {
-    const w = workspaces[0]
+    const w = primaryWorkspace
     const name = onboardingName.trim()
     if (!w || !name) {
       setOnboardingError('A workspace name is required.')
@@ -1114,7 +1164,7 @@ export function App(): React.ReactElement {
     await window.sylo.prefs.set('sylo.onboarding.universal_named', true)
     setOnboardingNameOpen(false)
     await refreshWorkspaces()
-  }, [workspaces, onboardingName, refreshWorkspaces])
+  }, [primaryWorkspace, onboardingName, refreshWorkspaces])
 
   const skipOnboardingName = useCallback(async () => {
     await window.sylo.prefs.set('sylo.onboarding.universal_named', true)
@@ -1948,8 +1998,7 @@ export function App(): React.ReactElement {
     }
     const w = workspaces.find((x) => x.id === workspaceEditId)
     if (!w) return
-    const primary = workspaces[0]
-    const inheritFrom = primary?.resolved_pi_cwd ?? diagnostics.resolvedHostPiCwd
+    const inheritFrom = primaryWorkspace?.resolved_pi_cwd ?? diagnostics.resolvedHostPiCwd
     setWorkspaceEditName(w.name)
     setWorkspaceEditPath(w.pi_cwd.trim() ? w.pi_cwd : inheritFrom)
     setWorkspaceBackupEnabled(w.github_backup_enabled === 1)
@@ -1959,7 +2008,7 @@ export function App(): React.ReactElement {
     setGhPublishError('')
     setGhPublishResult(null)
     void refreshWorkspaceBackupStatus(w.id)
-  }, [workspaceEditId, workspaces, diagnostics.resolvedHostPiCwd, refreshWorkspaceBackupStatus])
+  }, [workspaceEditId, workspaces, primaryWorkspace, diagnostics.resolvedHostPiCwd, refreshWorkspaceBackupStatus])
 
   useEffect(() => {
     if (!workspaceManageOpen || newWorkspacePiCwdTouched) return
@@ -1986,10 +2035,18 @@ export function App(): React.ReactElement {
     void refreshMessages()
   }, [activeId, refreshMessages])
 
+  const applyStickToBottom = useCallback((next: boolean) => {
+    if (stickToBottomRef.current === next) return
+    stickToBottomRef.current = next
+    chatListRef.current?.setPinned(next)
+    if (!next) chatListRef.current?.stopSettle()
+    setPinChatToEnd(next)
+  }, [])
+
   /** Called when the user genuinely scrolls up (wheel up or scrollbar drag). */
   const markUserScrolledUp = useCallback(() => {
-    stickToBottomRef.current = false
-  }, [])
+    applyStickToBottom(false)
+  }, [applyStickToBottom])
 
   const onChatAreaWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
     if (isUserScrollUpWheel(e.deltaY, e.deltaMode)) markUserScrolledUp()
@@ -2000,36 +2057,41 @@ export function App(): React.ReactElement {
    * Content growing below the fold (compaction, next turn) must NOT opt out. */
   const onChatAreaScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget
-    const atEnd = chatListRef.current?.isAtEnd() ?? isChatAreaNearBottom(el)
-    if (atEnd) {
-      stickToBottomRef.current = true
+    const atEnd = chatListRef.current?.isAtEnd(CHAT_AT_END_PX) ?? isChatAreaNearBottom(el)
+    if (
+      shouldRepinChatToEnd({
+        atEnd,
+        alreadyPinned: stickToBottomRef.current,
+        scrollTop: el.scrollTop,
+        lastScrollTop: lastChatScrollTopRef.current,
+      })
+    ) {
+      applyStickToBottom(true)
       lastChatScrollTopRef.current = el.scrollTop
       lastChatScrollHeightRef.current = el.scrollHeight
       return
     }
     if (
-      isUserDrivenScrollUp({
+      shouldUnpinChatFromEnd({
+        atEnd,
         scrollTop: el.scrollTop,
         lastScrollTop: lastChatScrollTopRef.current,
-        scrollHeight: el.scrollHeight,
-        lastScrollHeight: lastChatScrollHeightRef.current,
         now: performance.now(),
         suppressUntil: suppressScrollClearUntilRef.current,
       })
     ) {
-      stickToBottomRef.current = false
+      applyStickToBottom(false)
     }
     lastChatScrollTopRef.current = el.scrollTop
     lastChatScrollHeightRef.current = el.scrollHeight
-  }, [])
+  }, [applyStickToBottom])
 
   const scrollChatToEnd = useCallback(() => {
     if (chatTimeline.length === 0) return
     if (chatListRef.current) {
       chatListRef.current.scrollToEnd()
-      // The settle pump inside ChatTimelineList will re-assert intent via
-      // its onSettleEnd callback. Keep the suppression window open for the
-      // duration of the pump (up to ~45 frames).
+      // Keep the suppression window open for the settle pump (~45 frames)
+      // so measurement scrollTop writes are not treated as a user opt-out.
       suppressScrollClearUntilRef.current = performance.now() + 1000
       return
     }
@@ -2050,7 +2112,7 @@ export function App(): React.ReactElement {
     if (prevActiveIdForScrollRef.current !== activeId) {
       pendingConvScrollRef.current = true
       prevMessagesLenRef.current = 0
-      stickToBottomRef.current = true
+      applyStickToBottom(true)
       suppressScrollClearUntilRef.current = performance.now() + 300
       lastChatScrollTopRef.current = chatAreaRef.current?.scrollTop ?? 0
       lastChatScrollHeightRef.current = chatAreaRef.current?.scrollHeight ?? 0
@@ -2072,7 +2134,7 @@ export function App(): React.ReactElement {
       }
       if (!messagesReady) return
       scrollChatToEnd()
-      stickToBottomRef.current = true
+      applyStickToBottom(true)
       pendingConvScrollRef.current = false
       prevMessagesLenRef.current = chatTimeline.length
       return
@@ -2104,6 +2166,7 @@ export function App(): React.ReactElement {
     scrollChatToEnd,
     tab,
     lastLoadedMessage?.conversation_id,
+    applyStickToBottom,
   ])
 
   // Opening the canvas remounts the scroll pane; images and tool cards also
@@ -3692,7 +3755,29 @@ export function App(): React.ReactElement {
           + New chat
         </button>
 
-        <div className={sidebarConvList}>
+        <div
+          className={sidebarConvList}
+          onDragOver={(e) => {
+            const fromId = dragWsIdRef.current
+            if (!fromId) return
+            if ((e.target as HTMLElement).closest('[data-ws-id]')) return
+            e.preventDefault()
+            e.dataTransfer.dropEffect = 'move'
+            const last = workspaces[workspaces.length - 1]
+            if (!last || last.id === fromId) return
+            if (dropHint?.id !== last.id || dropHint.edge !== 'after') {
+              setDropHint({ id: last.id, edge: 'after' })
+            }
+          }}
+          onDrop={(e) => {
+            if ((e.target as HTMLElement).closest('[data-ws-id]')) return
+            e.preventDefault()
+            dropWorkspaceAtEnd()
+            dragWsIdRef.current = null
+            setDragWsId(null)
+            setDropHint(null)
+          }}
+        >
           {workspaces.map((ws) => {
             const wsActive = ws.id === sidebarWorkspaceId
             const q = convSearch.trim().toLowerCase()
@@ -3700,12 +3785,50 @@ export function App(): React.ReactElement {
             const wsConvs = wsActive
               ? conversations.filter((c) => !searching || (c.title || '').toLowerCase().includes(q))
               : []
+            const hintHere = dropHint?.id === ws.id && dragWsId !== ws.id
             return (
+              <div key={ws.id} className="relative" data-ws-id={ws.id}>
+              {hintHere && dropHint.edge === 'before' ? (
+                <div className={cn(sidebarWsDropLine, 'top-0')} aria-hidden="true" />
+              ) : null}
               <details
-                key={ws.id}
-                className={sidebarWsSection}
+                className={cn(
+                  sidebarWsSection,
+                  dragWsId === ws.id && sidebarWsSectionDragging,
+                )}
                 open={wsActive ? activeWsOpen || searching : false}
+                onDragOver={(e) => {
+                  const fromId = dragWsIdRef.current
+                  if (!fromId) return
+                  e.preventDefault()
+                  e.stopPropagation()
+                  e.dataTransfer.dropEffect = 'move'
+                  if (fromId === ws.id) return
+                  const edge = workspaceDropEdge(e.currentTarget, e.clientY)
+                  if (dropHint?.id !== ws.id || dropHint.edge !== edge) {
+                    setDropHint({ id: ws.id, edge })
+                  }
+                }}
+                onDragLeave={(e) => {
+                  if (!e.currentTarget.contains(e.relatedTarget as Node | null) && dropHint?.id === ws.id) {
+                    setDropHint(null)
+                  }
+                }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  const fromId = dragWsIdRef.current || e.dataTransfer.getData('text/plain')
+                  const edge = workspaceDropEdge(e.currentTarget, e.clientY)
+                  if (fromId && fromId !== ws.id) reorderSidebarWorkspaces(fromId, ws.id, edge)
+                  dragWsIdRef.current = null
+                  setDragWsId(null)
+                  setDropHint(null)
+                }}
                 onToggle={(e) => {
+                  if (suppressWsToggleRef.current) {
+                    e.currentTarget.open = wsActive ? activeWsOpen || searching : false
+                    return
+                  }
                   const nowOpen = detailsOpenFromToggleEvent(e)
                   if (nowOpen && !wsActive) {
                     // Expanding another workspace's section switches to it.
@@ -3720,9 +3843,37 @@ export function App(): React.ReactElement {
                 <summary
                   className={cn(
                     sidebarWsSectionSummary,
-                    'group/wsrow',
+                    'group/wsrow cursor-grab active:cursor-grabbing',
                     wsActive && sidebarWsSectionActive,
                   )}
+                  title={`${ws.name} — drag to reorder`}
+                  draggable
+                  onDragStart={(e) => {
+                    if ((e.target as HTMLElement).closest('button')) {
+                      e.preventDefault()
+                      return
+                    }
+                    e.dataTransfer.setData('text/plain', ws.id)
+                    e.dataTransfer.effectAllowed = 'move'
+                    e.dataTransfer.setDragImage(e.currentTarget, 16, 12)
+                    suppressWsToggleRef.current = true
+                    dragWsIdRef.current = ws.id
+                    setDragWsId(ws.id)
+                  }}
+                  onDragEnd={() => {
+                    dragWsIdRef.current = null
+                    setDragWsId(null)
+                    setDropHint(null)
+                    window.requestAnimationFrame(() => {
+                      suppressWsToggleRef.current = false
+                    })
+                  }}
+                  onDragOver={(e) => {
+                    const fromId = dragWsIdRef.current
+                    if (!fromId || fromId === ws.id) return
+                    e.preventDefault()
+                    e.dataTransfer.dropEffect = 'move'
+                  }}
                 >
                   <span className={sidebarWsSectionChevron} aria-hidden="true">
                     {/* Folder glyph swaps closed ↔ open via the <details> state. */}
@@ -3874,8 +4025,37 @@ export function App(): React.ReactElement {
             )
           })}
               </details>
+              {hintHere && dropHint.edge === 'after' ? (
+                <div className={cn(sidebarWsDropLine, 'bottom-0')} aria-hidden="true" />
+              ) : null}
+              </div>
             )
           })}
+          {dragWsId ?
+            <div
+              className="relative min-h-8"
+              onDragOver={(e) => {
+                const fromId = dragWsIdRef.current
+                if (!fromId) return
+                e.preventDefault()
+                e.stopPropagation()
+                e.dataTransfer.dropEffect = 'move'
+                const last = workspaces[workspaces.length - 1]
+                if (!last || last.id === fromId) return
+                if (dropHint?.id !== last.id || dropHint.edge !== 'after') {
+                  setDropHint({ id: last.id, edge: 'after' })
+                }
+              }}
+              onDrop={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                dropWorkspaceAtEnd()
+                dragWsIdRef.current = null
+                setDragWsId(null)
+                setDropHint(null)
+              }}
+            />
+          : null}
           {(() => {
             // Archived section: filtered by the sidebar search too, auto-expanded
             // while searching, with bulk Restore-all / Delete-all (the manual
@@ -4085,7 +4265,8 @@ export function App(): React.ReactElement {
                       scrollRef={chatAreaRef}
                       renderRow={renderChatTimelineRow}
                       thinkTankUi={thinkTankUiBySession}
-                      onSettleEnd={() => { stickToBottomRef.current = true }}
+                      pinToEnd={pinChatToEnd}
+                      pinToEndRef={stickToBottomRef}
                     />
                   </div>
                   {agentWidgetPayload ?
@@ -4201,7 +4382,7 @@ export function App(): React.ReactElement {
                           className={btnGhostSm}
                           title="Jump to the end of the chat"
                           onClick={() => {
-                            stickToBottomRef.current = true
+                            applyStickToBottom(true)
                             scrollChatToEnd()
                           }}
                         >
@@ -4276,7 +4457,8 @@ export function App(): React.ReactElement {
                     scrollRef={chatAreaRef}
                     renderRow={renderChatTimelineRow}
                     thinkTankUi={thinkTankUiBySession}
-                    onSettleEnd={() => { stickToBottomRef.current = true }}
+                    pinToEnd={pinChatToEnd}
+                    pinToEndRef={stickToBottomRef}
                   />
                 </div>
                 {agentWidgetPayload ?
@@ -4392,7 +4574,7 @@ export function App(): React.ReactElement {
                         className={btnGhostSm}
                         title="Jump to the end of the chat"
                         onClick={() => {
-                          stickToBottomRef.current = true
+                          applyStickToBottom(true)
                           scrollChatToEnd()
                         }}
                       >
@@ -4658,7 +4840,7 @@ export function App(): React.ReactElement {
                         onChange={(e) => setWorkspaceEditName(e.target.value)}
                         autoComplete="off"
                       />
-                      {workspaceEditId === workspaces[0]?.id ?
+                      {workspaceEditId === primaryWorkspace?.id ?
                         <p className={cn(settingsCaption, 'mt-1.5')}>
                           Renaming the universal workspace also renames this folder on disk — the git repo,
                           seed files, and the global pointer file stay wired to it. Restart Sylo afterwards so
@@ -4668,7 +4850,7 @@ export function App(): React.ReactElement {
                     </div>
                     <div className={cn(workspaceField, workspaceFieldTight)}>
                       <span className={workspaceFieldLabel}>Pi project directory</span>
-                                            {workspaceEditId === workspaces[0]?.id ?
+                                            {workspaceEditId === primaryWorkspace?.id ?
                         <p className={cn(settingsCaption, 'my-1 mb-1.5')}>
                           <strong>📌 Pinned</strong> — this is your user profile workspace: all user config data
                           lives here — workflows, tool config parameters, global AI instructions, and the operator
@@ -4943,7 +5125,7 @@ export function App(): React.ReactElement {
                       >
                         Cancel
                       </button>
-                      {workspaceEditId === workspaces[0]?.id ?
+                      {workspaceEditId === primaryWorkspace?.id ?
                         <button
                           type="button"
                           className={btnGhost}
@@ -4969,8 +5151,7 @@ export function App(): React.ReactElement {
                             setWorkspaceBackupError('')
                             setWorkspaceBackupBusy(true)
                             try {
-                              const primary = workspaces[0]
-                              const inheritFrom = primary?.resolved_pi_cwd ?? diagnostics.resolvedHostPiCwd
+                              const inheritFrom = primaryWorkspace?.resolved_pi_cwd ?? diagnostics.resolvedHostPiCwd
                               const cwdTrim = workspaceEditPath.trim()
                               const pi_cwd =
                                 cwdTrim === '' || pathsEffectivelyEqual(cwdTrim, inheritFrom) ? '' : cwdTrim
@@ -5019,11 +5200,11 @@ export function App(): React.ReactElement {
                       <button
                         type="button"
                         className={cn(btnDanger, btnGhostSm)}
-                        disabled={workspaces.length <= 1 || workspaceEditId === workspaces[0]?.id}
+                        disabled={workspaces.length <= 1 || workspaceEditId === primaryWorkspace?.id}
                         title={
                           workspaces.length <= 1
                             ? 'The last workspace cannot be deleted'
-                            : workspaceEditId === workspaces[0]?.id
+                            : workspaceEditId === primaryWorkspace?.id
                               ? 'The universal workspace is pinned and cannot be deleted'
                               : undefined
                         }
@@ -5936,7 +6117,7 @@ export function App(): React.ReactElement {
         )
       : null}
 
-      {restoreWsOpen && workspaces[0] ?
+      {restoreWsOpen && primaryWorkspace ?
         createPortal(
           <div className={modalOverlay} role="presentation">
             <div
@@ -5953,7 +6134,7 @@ export function App(): React.ReactElement {
                 The folder for your <strong>user-data workspace</strong> is missing on disk:
               </p>
               <p className="mt-1">
-                <code className="text-xs">{workspaces[0].pi_cwd?.trim() || workspaces[0].resolved_pi_cwd}</code>
+                <code className="text-xs">{primaryWorkspace.pi_cwd?.trim() || primaryWorkspace.resolved_pi_cwd}</code>
               </p>
               <p className={cn(modalBody, leadText, 'mt-2')}>
                 It holds your profile, global AI instructions, workflows, and tool config — and is the folder

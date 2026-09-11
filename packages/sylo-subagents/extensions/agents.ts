@@ -1,6 +1,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { getAgentDir, parseFrontmatter } from '@earendil-works/pi-coding-agent'
+import { parseTimeoutSeconds } from './subagent-timeout.ts'
 
 export type AgentScope = 'user' | 'project' | 'both'
 
@@ -11,6 +12,8 @@ export interface AgentConfig {
   description: string
   tools?: string[]
   model?: string
+  /** Wall-clock limit from frontmatter `timeout_seconds`. */
+  timeoutSeconds?: number
   systemPrompt: string
   source: AgentSource
   filePath: string
@@ -57,6 +60,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
       description: frontmatter.description,
       tools: tools && tools.length > 0 ? tools : undefined,
       model: frontmatter.model,
+      timeoutSeconds: parseTimeoutSeconds(frontmatter.timeout_seconds),
       systemPrompt: body,
       source,
       filePath,

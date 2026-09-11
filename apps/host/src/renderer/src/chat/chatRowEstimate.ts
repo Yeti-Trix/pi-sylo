@@ -43,7 +43,8 @@ function estimateChatRowHeight(m: EstimateMsg | undefined): number {
 
   if (m.role === 'user') {
     const { text, attachments } = splitUserMessageAttachments(m.content ?? '')
-    const textLines = Math.ceil(text.length / 72)
+    const newlineLines = (text.match(/\n/g)?.length ?? 0) + (text.length > 0 ? 1 : 0)
+    const textLines = Math.max(newlineLines, Math.ceil(text.length / 72))
     const attachmentBlock = attachments.length > 0 ? 72 + attachments.length * 58 : 0
     return Math.min(2400, 56 + textLines * 22 + attachmentBlock)
   }
@@ -52,10 +53,13 @@ function estimateChatRowHeight(m: EstimateMsg | undefined): number {
     const toolJson = m.tool_calls_json ?? ''
     const segmentCount = countApproxSegments(toolJson)
     const textLines = Math.ceil(contentLen / 68)
-    const segmentBlocks = segmentCount * 120 + (segmentCount > 0 ? segmentCount * 24 : 0)
-    const toolPayloadLines = Math.ceil(toolJson.length / 64)
-    const streamingExtra = m.status === 'streaming' ? 120 : 0
-    return Math.min(64000, 96 + textLines * 21 + segmentBlocks + toolPayloadLines * 18 + streamingExtra)
+    const streaming = m.status === 'streaming'
+    // Completed turns collapse tools into one <details>. Counting raw JSON
+    // length used to estimate 64k px rows; measuring the real ~200px card
+    // then yanked the list by tens of thousands of pixels.
+    const segmentBlocks = streaming ? segmentCount * 120 : segmentCount > 0 ? 48 : 0
+    const streamingExtra = streaming ? 120 : 0
+    return Math.min(64000, 96 + textLines * 21 + segmentBlocks + streamingExtra)
   }
 
   return Math.min(2400, 56 + Math.ceil(contentLen / 72) * 22)
@@ -122,7 +126,7 @@ function estimateCacheKey(
 ): string {
   if (row.kind === 'message') {
     const m = row.message
-    return `m:${m.id}:${m.content.length}:${m.tool_calls_json?.length ?? 0}:${m.status}`
+    return `m:v2:${m.id}:${m.content.length}:${m.tool_calls_json?.length ?? 0}:${m.status}`
   }
   const ui = thinkTankUi[row.sessionId]
   const debate = ui ? Object.entries(ui.debateOpenById).sort().join(',') : ''
@@ -143,4 +147,14 @@ export function estimateTimelineRowHeight(
   const hit = estimateCache.get(key)
   if (hit !== undefined) return hit
   return rememberEstimate(key, computeTimelineRowHeight(row, thinkTankUi))
+}
+
+/** Store the measured height so a later remount does not re-guess. */
+export function rememberMeasuredTimelineRowHeight(
+  row: ChatTimelineRow,
+  thinkTankUi: Record<string, ThinkTankSessionUiState | undefined>,
+  size: number,
+): void {
+  if (!(size > 0) || !Number.isFinite(size)) return
+  rememberEstimate(estimateCacheKey(row, thinkTankUi), Math.round(size))
 }

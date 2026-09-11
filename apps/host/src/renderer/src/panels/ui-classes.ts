@@ -658,6 +658,11 @@ export const sidebarWsSectionName = 'min-w-0 flex-1 truncate'
 
 export const sidebarWsSectionActive = 'text-text-primary'
 
+export const sidebarWsSectionDragging = 'opacity-55'
+
+export const sidebarWsDropLine =
+  'pointer-events-none absolute inset-x-2 z-10 h-0.5 rounded-full bg-accent'
+
 export const sidebarConvEmpty = 'px-2 py-1.5 text-[0.78rem] text-text-muted'
 
 

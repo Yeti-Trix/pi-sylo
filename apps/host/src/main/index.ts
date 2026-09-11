@@ -43,6 +43,7 @@ import {
   net,
   protocol,
   Menu,
+  powerSaveBlocker,
   type MenuItemConstructorOptions,
 } from 'electron'
 import { BUILD_INFO } from '../generated/build-info.js'
@@ -1131,6 +1132,25 @@ protocol.registerSchemesAsPrivileged([
 let mainWindow: BrowserWindow | undefined
 let splashWindow: BrowserWindow | undefined
 let broker: BrokerSupervisor | undefined
+/** True after the first show+focus. Later reloads must not steal OS focus. */
+let mainWindowHasBeenRevealed = false
+
+/**
+ * Show the main window. `stealFocus` is only for first launch (or an explicit
+ * second-instance restore). On Windows, `focus()` moves the mouse cursor onto
+ * the focused display — that is the multi-monitor "cursor jumped" report.
+ */
+function revealMainWindow(opts: { stealFocus: boolean }): void {
+  const mw = mainWindow
+  if (!mw || mw.isDestroyed()) return
+  if (!mw.isVisible()) mw.show()
+  if (opts.stealFocus) {
+    void mw.focus()
+    mainWindowHasBeenRevealed = true
+    return
+  }
+  mainWindowHasBeenRevealed = true
+}
 
 /** Public repo URL shown in Help ▸ GitHub Repository and the About dialog. */
 const SYLO_REPO_URL = 'https://github.com/Yeti-Trix/pi-sylo'
@@ -1463,6 +1483,28 @@ type PendingTurn = {
 
 const pendingTurns = new Map<string, PendingTurn>()
 
+/** Keep the GPU from parking when Windows blanks the display on lock. */
+let turnPowerBlockerId: number | null = null
+
+function syncTurnPowerBlocker(): void {
+  const want = pendingTurns.size > 0
+  if (want && turnPowerBlockerId == null) {
+    turnPowerBlockerId = powerSaveBlocker.start('prevent-display-sleep')
+    return
+  }
+  if (!want && turnPowerBlockerId != null) {
+    if (powerSaveBlocker.isStarted(turnPowerBlockerId)) {
+      powerSaveBlocker.stop(turnPowerBlockerId)
+    }
+    turnPowerBlockerId = null
+  }
+}
+
+function dropPendingTurn(turnId: string): void {
+  pendingTurns.delete(turnId)
+  syncTurnPowerBlocker()
+}
+
 type PendingAskQuestion = {
   requestId: string
   toolCallId: string
@@ -1622,7 +1664,7 @@ function finalizePendingTurn(
   } else if (!pending.aborted) {
     db.updateMessageContent(pending.assistantId, pending.chunks || '', 'complete')
   }
-  pendingTurns.delete(turnId)
+  dropPendingTurn(turnId)
   if (status === 'cancelled') {
     cancelPendingAskQuestions({
       turnId,
@@ -2552,10 +2594,11 @@ async function startChatTurn(
     toolJsonChars: 0,
     toolFlushTimer: null,
   })
+  syncTurnPowerBlocker()
   const assignedBroker = await acquireBrokerForTurn(conversationId)
   if (!assignedBroker) {
     flushPendingTurnBuffers(pendingTurns.get(turnId)!)
-    pendingTurns.delete(turnId)
+    dropPendingTurn(turnId)
     const msg = 'All broker slots are busy. Try again shortly.'
     db.updateMessageContent(assistant.id, `(error) ${msg}`, 'failed')
     emitChatRefresh(conversationId, 'turnFinished')
@@ -2566,7 +2609,7 @@ async function startChatTurn(
     await ensureBrokerSessionForConversation(conversationId)
   } catch (e) {
     flushPendingTurnBuffers(pendingTurns.get(turnId)!)
-    pendingTurns.delete(turnId)
+    dropPendingTurn(turnId)
     turnBrokerPool.releaseTurn(turnId, broker)
     const msg = e instanceof Error ? e.message : String(e)
     db.updateMessageContent(assistant.id, `(error) ${msg}`, 'failed')
@@ -3458,7 +3501,7 @@ function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext
         pending.chunks || `(error) ${msg.error}`,
         'failed',
       )
-      pendingTurns.delete(msg.turnId)
+      dropPendingTurn(msg.turnId)
       turnBrokerPool.releaseTurn(msg.turnId, broker)
       emitChatRefresh(pending.convId, 'turnFinished')
       void flushDeferredTurns()
@@ -3494,7 +3537,7 @@ function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext
         notifyOnDoneByConv.delete(pending.convId)
         if (!pending.aborted) void publishScheduledTurnNotification(notify, pending.chunks)
       }
-      pendingTurns.delete(msg.turnId)
+      dropPendingTurn(msg.turnId)
       turnBrokerPool.releaseTurn(msg.turnId, broker)
       emitChatRefresh(pending.convId, 'turnFinished')
       void flushDeferredTurns()
@@ -4221,6 +4264,7 @@ function registerIpc(): void {
       // missing at startup (renderer shows the create-or-clone prompt). Computed
       // before the resolving call, whose fallback mkdir would mask absence.
       folder_missing: w.id === db.defaultWorkspaceId() ? primaryWorkspaceFolderMissing : false,
+      is_primary: w.id === db.defaultWorkspaceId(),
       resolved_pi_cwd: effectivePiCwdForWorkspace(w.id),
     })),
   )
@@ -4284,6 +4328,17 @@ function registerIpc(): void {
       return { ok: true as const }
     },
   )
+  ipcMain.handle('workspaces:reorder', (_e, orderedIds: unknown) => {
+    if (!Array.isArray(orderedIds) || !orderedIds.every((id) => typeof id === 'string')) {
+      return { ok: false as const, error: 'bad_ids' }
+    }
+    try {
+      db.reorderWorkspaces(orderedIds)
+      return { ok: true as const }
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
   ipcMain.handle(
     'workspaces:primaryProvision',
     (_e, args?: { name?: unknown }) => {
@@ -4291,7 +4346,7 @@ function registerIpc(): void {
       if (!name) return { ok: false as const, error: 'bad_name', detail: 'Workspace name is required.' }
       const seg = safeChatFolderDirSegment(name)
       if (!seg) return { ok: false as const, error: 'bad_name', detail: 'Invalid workspace name.' }
-      const row = db.listWorkspaces()[0]
+      const row = db.getWorkspace(db.defaultWorkspaceId())
       if (!row) return { ok: false as const, error: 'bad_workspace', detail: 'No primary workspace row.' }
       // Create fresh at the default clone root under the chosen name (flat,
       // sibling of the other GitHub workspaces).
@@ -4337,7 +4392,7 @@ function registerIpc(): void {
     async (_e, args?: { cloneUrl?: unknown }) => {
       const cloneUrl = typeof args?.cloneUrl === 'string' ? args.cloneUrl.trim() : ''
       if (!cloneUrl) return { ok: false as const, error: 'bad_clone_url', detail: 'Clone URL is required.' }
-      const row = db.listWorkspaces()[0]
+      const row = db.getWorkspace(db.defaultWorkspaceId())
       if (!row) return { ok: false as const, error: 'bad_workspace', detail: 'No primary workspace row.' }
       const raw = row.pi_cwd?.trim() ?? ''
       if (raw && existsSync(raw)) {
@@ -7181,16 +7236,13 @@ function createWindow(): void {
     disposeAllTerminals()
     dismissSplash()
     mainWindow = undefined
+    mainWindowHasBeenRevealed = false
   })
 
   mainWindow.webContents.on('did-fail-load', (_event, code, desc, url) => {
     console.error('[sylo] renderer did-fail-load:', code, desc, url)
     dismissSplash()
-    const mw = mainWindow
-    if (mw && !mw.isDestroyed()) {
-      mw.show()
-      void mw.focus()
-    }
+    revealMainWindow({ stealFocus: !mainWindowHasBeenRevealed })
   })
 
   if (devRendererUrl) {
@@ -7209,11 +7261,11 @@ function createWindow(): void {
     markWindowSessionActive()
     dismissSplash()
     void markLastGoodCommit()
-    const mw = mainWindow
-    if (mw && !mw.isDestroyed()) {
-      mw.show()
-      void mw.focus()
-    }
+    // First paint may take OS focus. Reloads (HMR, crash recovery) must not —
+    // on multi-monitor Windows, BrowserWindow.focus() warps the cursor onto
+    // this display.
+    const firstShow = !mainWindowHasBeenRevealed
+    revealMainWindow({ stealFocus: firstShow })
   })
 }
 
@@ -7276,7 +7328,7 @@ app.whenReady().then(() => {
   // machine, or a botched rename — do not silently re-seed a fallback folder:
   // the renderer offers create-by-name or clone-from-GitHub first, and the
   // provisioning/restore IPC handlers run the steps below once resolved.
-  const primaryRow = db.listWorkspaces()[0]
+  const primaryRow = db.getWorkspace(db.defaultWorkspaceId())
   const primaryRawCwd = primaryRow?.pi_cwd?.trim() ?? ''
   const primaryExpectedDir = primaryRawCwd || db.canonicalDefaultWorkspacePiProjectPath()
   primaryWorkspaceFolderMissing = !existsSync(primaryExpectedDir)

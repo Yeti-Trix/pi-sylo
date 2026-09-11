@@ -296,8 +296,11 @@ declare global {
             resolved_pi_cwd: string
             /** Primary only: its folder was missing on disk at app startup. */
             folder_missing: boolean
+            /** Stable primary (oldest workspace), independent of sidebar order. */
+            is_primary: boolean
           }[]
         >
+        reorder: (orderedIds: string[]) => Promise<{ ok: true } | { ok: false; error: string }>
         /** Ensures Dev sylo workspace exists (dev repo clone) and returns its id. */
         devWorkspaceId: () => Promise<string | null>
         defaultPathForName: (name: string) => Promise<string>
