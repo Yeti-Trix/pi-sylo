@@ -1,0 +1,99 @@
+# Board automation for the "Sylo work board" GitHub Project (user-level, #1).
+# When a PR is opened with a closing keyword reference (Fixes/Closes/Resolves #N),
+# the linked issue is added to the project (if missing) and its Status slides to
+# "In Progress". PR merge / issue close slides are handled by the project's
+# built-in workflows (Pull request merged -> Done, Item closed -> Done).
+#
+# Token notes:
+# - Uses secrets.PROJECTS_PAT when present (fine-grained PAT, Projects: read/write).
+#   This is the reliable path for USER-owned projects.
+# - Falls back to the workflow GITHUB_TOKEN, which may lack user-project write
+#   access; if runs fail with FORBIDDEN/NOT_FOUND, create PROJECTS_PAT.
+
+name: Board automation
+
+on:
+  pull_request:
+    types: [opened, reopened]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  projects: write
+
+jobs:
+  slide-linked-issues:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Slide linked issues to In Progress
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROJECTS_PAT || github.token }}
+          script: |
+            const PROJECT_ID = 'PVT_kwHOB9z9Os4BjNrj';
+            const pr = context.payload.pull_request;
+            const body = pr.body || '';
+            const linked = new Set();
+            const re = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)/gi;
+            let m;
+            while ((m = re.exec(body)) !== null) linked.add(parseInt(m[1], 10));
+            if (linked.size === 0) {
+              core.info('No closing-keyword issue references in PR body — nothing to do.');
+              return;
+            }
+            core.info(`Linked issues: ${[...linked].map(n => '#' + n).join(', ')}`);
+
+            // Look up the project's Status field + "In Progress" option id
+            const proj = await github.graphql(
+              'query($p: ID!) { node(id: $p) { ... on ProjectV2 { ' +
+              'field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name } } } } } }',
+              { p: PROJECT_ID }
+            );
+            const statusField = proj.node.field;
+            if (!statusField) { core.warning('Status field not found on project'); return; }
+            const inProgress = statusField.options.find(o => o.name === 'In Progress');
+            if (!inProgress) { core.warning('"In Progress" option not found'); return; }
+
+            for (const n of linked) {
+              let issue;
+              try {
+                const q = await github.graphql(
+                  'query($o: String!, $r: String!, $n: Int!) { repository(owner: $o, name: $r) { ' +
+                  'issue(number: $n) { id number state title ' +
+                  'projectItems(first: 20) { nodes { id project { id } } } } } }',
+                  { o: context.repo.owner, r: context.repo.repo, n: n }
+                );
+                issue = q.repository.issue;
+              } catch (e) {
+                core.warning(`Issue #${n} not found: ${e.message}`);
+                continue;
+              }
+              if (!issue) { core.warning(`Issue #${n} not found`); continue; }
+              if (issue.state !== 'OPEN') {
+                core.info(`Issue #${n} is ${issue.state} — leaving status alone.`);
+                continue;
+              }
+
+              // Ensure the issue is an item on the project
+              let itemId = null;
+              for (const it of issue.projectItems.nodes) {
+                if (it.project.id === PROJECT_ID) { itemId = it.id; break; }
+              }
+              if (!itemId) {
+                const added = await github.graphql(
+                  'mutation($p: ID!, $c: ID!) { addProjectV2ItemById(input: { projectId: $p, contentId: $c }) { item { id } } }',
+                  { p: PROJECT_ID, c: issue.id }
+                );
+                itemId = added.addProjectV2ItemById.item.id;
+                core.info(`Added issue #${n} to the board.`);
+              }
+
+              await github.graphql(
+                'mutation($p: ID!, $i: ID!, $f: ID!, $o: ID!) { updateProjectV2ItemFieldValue(input: ' +
+                '{ projectId: $p, itemId: $i, fieldId: $f, value: { singleSelectOptionId: $o } }) ' +
+                '{ projectV2Item { id } } }',
+                { p: PROJECT_ID, i: itemId, f: statusField.id, o: inProgress.id }
+              );
+              core.info(`Issue #${n} "${issue.title}" -> In Progress`);
+            }

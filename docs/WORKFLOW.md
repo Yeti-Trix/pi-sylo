@@ -34,6 +34,20 @@ GitHub Desktop, CLI). `AGENTS.md` carries only the pointer; this file is the pro
 | Deep design docs | `features_tracker/active/*.md` (private dev repo only) | Per-feature design + history; link the file from its issue; move to `features_tracker/completed/` when shipped |
 | Agent conventions | `AGENTS.md` | Points here — keep it short, it's in every session's context |
 
+## Board automation — never move cards by hand
+
+The board (GitHub Project "Sylo work board") keeps itself honest:
+
+- PR opened with `Fixes #N` in the body → the linked issue is added to the board
+  (if missing) and its card slides to **In Progress** (`.github/workflows/board-slide.yml`
+  on the public repo)
+- PR merged → card slides to **Done**, issue auto-closes
+- Issue closed directly → card slides to **Done**
+
+Your only obligation: **reference the issue in the PR body (`Fixes #N`)** — the
+automation keys off that text. Don't drag cards manually; if a card is wrong, fix
+the issue/PR linkage, not the card.
+
 ## For Sylo agent sessions specifically
 
 Sylo chats running in this workspace should check `gh issue list` before starting
