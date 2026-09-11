@@ -74,5 +74,12 @@ export function resolveToolsPackageDir(
     const pkg = join(bundle, 'packages', packageName)
     if (existsSync(pkg)) return pkg
   }
+  // npm-installed package (pi install npm:<name> — broker-managed copy).
+  const npmPkg = join(homedir(), '.pi', 'agent', 'npm', 'node_modules', packageName)
+  if (existsSync(npmPkg)) return npmPkg
+  // Standalone public repo clone (one repo = one package, dev-machine pattern —
+  // same spirit as the bundle dev-location fallback).
+  const repoClone = join(homedir(), 'Documents', 'GitHub', packageName)
+  if (existsSync(join(repoClone, 'package.json'))) return repoClone
   return join(repoRoot, 'packages', packageName)
 }
