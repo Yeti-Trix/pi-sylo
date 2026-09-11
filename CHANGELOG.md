@@ -69,3 +69,5 @@ MVP operator sign-off per `.prd/MVP_TEST_CHECKLIST.md`.
 ### Changed
 
 - Host renderer migrated to Tailwind v4 for shell, chat, settings, diagnostics, and capability manager.
+
+- (smoke test, not merged)
