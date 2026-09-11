@@ -4,11 +4,9 @@
 # "In Progress". PR merge / issue close slides are handled by the project's
 # built-in workflows (Pull request merged -> Done, Item closed -> Done).
 #
-# Token notes:
-# - Uses secrets.PROJECTS_PAT when present (fine-grained PAT, Projects: read/write).
-#   This is the reliable path for USER-owned projects.
-# - Falls back to the workflow GITHUB_TOKEN, which may lack user-project write
-#   access; if runs fail with FORBIDDEN/NOT_FOUND, create PROJECTS_PAT.
+# Token note: GITHUB_TOKEN cannot write USER-owned Projects V2, so this relies on
+# the repo secret PROJECTS_PAT (fine-grained PAT, account Yeti-Trix, permission
+# "Projects: Read and write"). Without it the run fails with a permission error.
 
 name: Board automation
 
@@ -18,9 +16,6 @@ on:
 
 permissions:
   contents: read
-  issues: read
-  pull-requests: read
-  projects: write
 
 jobs:
   slide-linked-issues:
