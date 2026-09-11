@@ -4,9 +4,10 @@
 # "In Progress". PR merge / issue close slides are handled by the project's
 # built-in workflows (Pull request merged -> Done, Item closed -> Done).
 #
-# Token note: GITHUB_TOKEN cannot write USER-owned Projects V2, so this relies on
-# the repo secret PROJECTS_PAT (fine-grained PAT, account Yeti-Trix, permission
-# "Projects: Read and write"). Without it the run fails with a permission error.
+# Token note: GITHUB_TOKEN cannot write USER-owned Projects V2 (and fine-grained
+# PATs cannot either), so this relies on the repo secret PROJECTS_PAT: a CLASSIC
+# personal access token with ONLY the "project" + "read:project" scopes.
+# Without it the run fails with "Resource not accessible by integration".
 
 name: Board automation
 
@@ -85,7 +86,7 @@ jobs:
               }
 
               await github.graphql(
-                'mutation($p: ID!, $i: ID!, $f: ID!, $o: ID!) { updateProjectV2ItemFieldValue(input: ' +
+                'mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) { updateProjectV2ItemFieldValue(input: ' +
                 '{ projectId: $p, itemId: $i, fieldId: $f, value: { singleSelectOptionId: $o } }) ' +
                 '{ projectV2Item { id } } }',
                 { p: PROJECT_ID, i: itemId, f: statusField.id, o: inProgress.id }
