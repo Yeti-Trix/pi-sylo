@@ -93,7 +93,16 @@ type NpmSearchObject = {
  * package (pi-package keyword or pi.sylo block), so name-squatters can never
  * work themselves into Sylo’s UI.
  */
-const SYLO_KNOWN_PACKAGE_NAMES = ['sylo-news', 'sylo-reddit']
+const SYLO_KNOWN_PACKAGE_NAMES = [
+  'sylo-news',
+  'sylo-reddit',
+  'sylo-allen-bradley',
+  'sylo-codesys',
+  'sylo-fieldbrain',
+  'sylo-ignition',
+  'sylo-plc-comms',
+  'sylo-template-docx-writer',
+]
 
 type SyloCandidate = { name: string; description: string; publishedMs: number }
 
