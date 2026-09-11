@@ -1090,7 +1090,7 @@ export const chatInputTextarea =
   'max-h-[160px] min-h-9 flex-1 resize-none border-0 bg-transparent px-0 py-1 font-[inherit] text-[0.92rem] leading-[1.5] text-text-primary placeholder:text-text-muted focus:outline-none'
 
 export const chatInputSendBtn =
-  'shrink-0 cursor-pointer self-end rounded-lg border-none bg-accent px-3.5 py-2 text-[0.85rem] font-medium text-[#111111] transition-[background,opacity] duration-[120ms] hover:bg-[#e2e2e2] disabled:cursor-not-allowed disabled:opacity-50'
+  'flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center self-end rounded-full border-none bg-white p-0 text-[#111111] transition-[background,opacity] duration-[120ms] hover:bg-[#e2e2e2] disabled:cursor-not-allowed disabled:opacity-40'
 
 /** Quiet model-bar pills (ChatModelBar selects/inputs). */
 export const modelBarPill =

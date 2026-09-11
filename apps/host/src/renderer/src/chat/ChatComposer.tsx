@@ -24,7 +24,7 @@ import {
   chatComposer,
   chatComposerDrag,
   chatInputRow,
-  chatInputSendBtn,
+    chatInputSendBtn,
   chatInputTextarea,
   chatQueueIndex,
   chatQueueItem,
@@ -306,10 +306,6 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
     [activeId, safeMode, agentReady],
   )
 
-  const send = useCallback(async () => {
-    await submitComposer(activeSending ? 'queue' : 'send')
-  }, [submitComposer, activeSending])
-
   const handleComposerPaste = useCallback(
     async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
       if (safeMode || !activeId) return
@@ -515,9 +511,23 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
           }
           disabled={safeMode || (inputLocked && !onThinkTankInject)}
         />
-        <button
+                <button
           type="button"
           className={chatInputSendBtn}
+          title={
+            onThinkTankInject ?
+              'Queue inject for the Moderator'
+            : activeSending ?
+              'Send now — runs at the next tool call (Enter queues · Ctrl+Enter sends immediately)'
+            : 'Send'
+          }
+          aria-label={
+            onThinkTankInject ?
+              'Queue inject for the Moderator'
+            : activeSending ?
+              'Send now'
+            : 'Send'
+          }
           disabled={
             safeMode ||
             (inputLocked && !onThinkTankInject) ||
@@ -526,9 +536,19 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
             composerBusy ||
             (!input.trim() && chatAttachments.length === 0)
           }
-          onClick={() => void send()}
+          onClick={() =>
+            void (
+              onThinkTankInject ?
+                submitComposer('queue')
+              : submitComposer(activeSending ? 'steer' : 'send')
+            )
+          }
         >
-          {onThinkTankInject ? 'Queue inject' : activeSending ? 'Queue' : 'Send'}
+                    {(
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className="h-4 w-4">
+              <path d="M12 4 6.8 9.2h3.4V20h3.6V9.2h3.4L12 4z" />
+            </svg>
+          )}
         </button>
       </div>
     </div>

@@ -423,12 +423,17 @@ export function SideChatPane({
         : null}
         <button
           type="button"
-          className={cn(chatInputSendBtn, 'px-3 py-2 text-[0.8rem]')}
+          className={chatInputSendBtn}
           disabled={noParent || childLoading || !input.trim()}
-          title={sending ? 'Steer the running turn with this message' : 'Send'}
+          title={sending ? 'Steer the running turn with this message (Enter steers too)' : 'Send'}
+          aria-label={sending ? 'Steer the running turn' : 'Send'}
           onClick={() => void send()}
         >
-          Send
+          {(
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className="h-4 w-4">
+              <path d="M12 4 6.8 9.2h3.4V20h3.6V9.2h3.4L12 4z" />
+            </svg>
+          )}
         </button>
       </div>
     </div>
