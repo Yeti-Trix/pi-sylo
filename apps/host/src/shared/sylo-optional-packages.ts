@@ -1,9 +1,9 @@
-﻿import {
+import {
   classifySyloBuiltinExtension,
   syloBuiltinExtensionHint,
 } from './sylo-builtin-extensions.js'
 
-/** Bundled first-party Pi package — off by default; enable in Capability manager → Sylo optional packages. */
+/** Bundled first-party Pi package — off by default; enable in Capability manager → Sylo built-in packages. */
 export type SyloOptionalPackage = {
   id: string
   title: string
@@ -49,7 +49,7 @@ export const SYLO_OPTIONAL_PACKAGES: readonly SyloOptionalPackage[] = [
     requiresSyloUi: false,
   },
   // 2026-09-02: sylo-template-docx-writer, sylo-machine-expert, sylo-codesys,
-  // sylo-logicforge, sylo-ignition, sylo-fieldbrain moved to the operator's
+  // sylo-allen-bradley, sylo-ignition, sylo-fieldbrain moved to the operator's
   // sylo-tools-controls bundle; sylo-onenote moved to sylo-tools-onenote.
   // Installed via ~/.pi/agent/settings.json packages (see README there).
   {

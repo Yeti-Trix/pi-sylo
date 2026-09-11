@@ -9,6 +9,7 @@ export type Conversation = {
   model_id: string | null
   image_model_id: string | null
   image_model_provider: string | null
+  archived_at?: number | null
 }
 
 export type Message = {
@@ -91,12 +92,12 @@ export async function setActiveWorkspace(workspaceId: string): Promise<string> {
   return data.activeWorkspaceId
 }
 
-export async function fetchConversations(workspaceId: string): Promise<{
+export async function fetchConversations(workspaceId: string, archived = false): Promise<{
   conversations: Conversation[]
   running: string[]
 }> {
   const data = await apiFetch<{ conversations: Conversation[]; running?: string[] }>(
-    `/api/conversations?workspaceId=${encodeURIComponent(workspaceId)}`,
+    `/api/conversations?workspaceId=${encodeURIComponent(workspaceId)}${archived ? '&archived=true' : ''}`,
   )
   return { conversations: data.conversations, running: data.running ?? [] }
 }
@@ -133,6 +134,17 @@ export async function deleteConversation(
 ): Promise<{ ok: boolean }> {
   return apiFetch(`/api/conversations/${encodeURIComponent(conversationId)}`, {
     method: 'DELETE',
+  })
+}
+
+/** Archive or unarchive a chat (hidden from / shown in the active list). */
+export async function setConversationArchived(
+  conversationId: string,
+  archived: boolean,
+): Promise<{ ok: boolean }> {
+  return apiFetch(`/api/conversations/${encodeURIComponent(conversationId)}/archived`, {
+    method: 'PUT',
+    body: JSON.stringify({ archived }),
   })
 }
 
@@ -272,11 +284,11 @@ export type CompanionPersonalEntry = {
   logged_date?: string
 }
 
-/** Companion manifest from the installed personal bundle (null when absent). */
+/** Companion manifest from the installed host plugins (null when absent). */
 export type PersonalManifest = {
-  tabs: { id: string; label: string; icon: string }[]
+  tabs: { id: string; label: string; icon: string; appBase?: string }[]
   appBase: string
-  landing: {
+  landing?: {
     op: string
     payload: Record<string, unknown>
     title: string
@@ -304,6 +316,7 @@ function ymdToday(): string {
 export async function fetchPersonalLandingEntries(
   manifest: PersonalManifest,
 ): Promise<CompanionPersonalEntry[]> {
+  if (!manifest.landing) return []
   const { op, payload } = manifest.landing
   const resolved = Object.fromEntries(
     Object.entries(payload ?? {}).map(([k, v]) => [k, v === '$today' ? ymdToday() : v]),

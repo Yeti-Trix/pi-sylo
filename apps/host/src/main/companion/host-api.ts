@@ -5,6 +5,10 @@ export type CompanionHostApi = {
   getActiveWorkspaceId: () => string
   setActiveWorkspaceId: (workspaceId: string) => void
   listConversations: (workspaceId: string) => ConversationRow[]
+  /** Archived top-level chats for a workspace (most recently archived first). */
+  listArchivedConversations: (workspaceId?: string) => ConversationRow[]
+  /** Archive/unarchive a chat (hidden from the active list, kept in the DB). */
+  setConversationArchived: (id: string, archived: boolean) => void
   findLatestEmptyConversation: (workspaceId: string) => string | undefined
   createConversation: (title?: string, workspaceId?: string) => ConversationRow
   listMessages: (conversationId: string) => MessageRow[]

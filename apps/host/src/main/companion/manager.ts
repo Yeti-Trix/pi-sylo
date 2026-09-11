@@ -27,11 +27,15 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 let active: CompanionServerHandle | undefined
-let personalAppRootFn: (() => string) | null = null
+const personalAppRoots = new Map<string, () => string>()
+let legacyPersonalAppRoot: (() => string) | null = null
 
-/** Resolved at request time so agent dir changes apply without restart. */
-export function setPersonalAppRoot(fn: () => string): void {
-  personalAppRootFn = fn
+/** Register a plugin's companion static-app root. Scoped per plugin: mounted at
+ *  /personal-app/<id>/ on the companion server. The first-registered root also
+ *  serves the legacy unscoped /personal-app/ mount (pre-multi-plugin phone builds). */
+export function setPersonalAppRoot(fn: () => string, pluginId: string): void {
+  personalAppRoots.set(pluginId, fn)
+  legacyPersonalAppRoot ??= fn
 }
 
 /** Built UI from `npm run build:companion` → `apps/host/out/companion/`. Main is a single bundle at `out/main/index.js`, so resolve from host package root — not `../../companion` (that misses `out/`). */
@@ -136,7 +140,7 @@ export async function restartCompanionServer(prefs?: CompanionPrefs): Promise<vo
       prefs: cfg,
       tls,
       userDataPath: app.getPath('userData'),
-      personalAppRoot: personalAppRootFn ?? undefined,
+      personalAppRoots: personalAppRoots.size > 0 ? Object.fromEntries(personalAppRoots) : undefined,
     })
         const urls = companionPublicUrls(
       cfg.port,

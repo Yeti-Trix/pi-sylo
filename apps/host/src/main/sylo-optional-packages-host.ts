@@ -39,7 +39,7 @@ export function resolveSyloOptionalPackageExtensionPath(
   return join(repoRoot, pkg.extensionRelPath)
 }
 
-/** Extension paths for enabled optional packages that exist on disk (Sylo repo dev layout). */
+/** Extension paths for enabled built-in packages that exist on disk (Sylo repo dev layout). */
 export function enabledOptionalExtensionPaths(
   repoRoot: string,
   pref: Record<string, boolean>,
@@ -137,7 +137,7 @@ export async function installOptionalPackagePythonDeps(
   packageId: string,
 ): Promise<InstallOptionalPackagePythonResult> {
   const pkg = findSyloOptionalPackage(packageId)
-  if (!pkg) return { ok: false, error: `Unknown optional package: ${packageId}` }
+  if (!pkg) return { ok: false, error: `Unknown built-in package: ${packageId}` }
   const python = resolvePythonExecutable()
 
   const pyCheck = await assertPythonSupportedForOptionalPackages(python)

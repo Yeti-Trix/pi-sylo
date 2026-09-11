@@ -37,14 +37,50 @@ export type CanvasView =
 /** One tab in the docked canvas. Each tab owns exactly one view — snapshot
  *  or live — which is what makes Pop out / Refresh unambiguous (the old
  *  single-slot model could hold a shown snapshot AND a hidden live board at
- *  the same time, which is how Pop out ended up opening a stale item). */
+ *  the same time, which is how Pop out ended up opening a stale item).
+ *
+ *  Phase 4 (apps pane): tabs can also be non-canvas app panes (terminal,
+ *  browser, side chat). `kind` defaults to 'canvas'; non-canvas kinds ignore
+ *  `view` (it holds an empty placeholder payload) and render their own body.
+ *  `title` names app panes (canvas tabs label from their view). */
+export type AppTabKind = 'canvas' | 'terminal' | 'browser' | 'side-chat'
+
+export const APP_TAB_KIND_LABEL: Record<AppTabKind, string> = {
+  canvas: 'Canvas',
+  terminal: 'Terminal',
+  browser: 'Browser',
+  'side-chat': 'Side chat',
+}
+
 export type CanvasTab = {
   id: string
   view: CanvasView
+  kind?: AppTabKind
+  title?: string
+  /** Workspace-pool tabs: which chat opened it (muted chip in the strip). */
+  origin?: string
+  /** Workspace-pool persistence: terminal start cwd / last browser URL. */
+  terminalCwd?: string
+  browserUrl?: string
 }
 
-/** Short label for a tab: payload title → file name → kind fallback. */
-export function canvasTabLabel(view: CanvasView): string {
+export function tabKind(t: CanvasTab): AppTabKind {
+  return t.kind ?? 'canvas'
+}
+
+/** Glyph prefix for app-pane tabs (canvas tabs use their live dot instead). */
+export const APP_TAB_KIND_GLYPH: Record<AppTabKind, string> = {
+  canvas: '',
+  terminal: '>_',
+  browser: '◎',
+  'side-chat': '◇',
+}
+
+/** Short label for a tab: app-pane title → payload title → file name → kind fallback. */
+export function canvasTabLabel(view: CanvasView, kind: AppTabKind = 'canvas', title?: string): string {
+  if (kind !== 'canvas') {
+    return title?.trim() || APP_TAB_KIND_LABEL[kind]
+  }
   if (view.mode === 'live') {
     return (
       view.sub.title?.trim() ||

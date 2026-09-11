@@ -1,0 +1,5 @@
+﻿{
+  "source_path": "https://github.com/ArthurkaX/cds-text-sync.git",
+  "synced_at_commit": "1411a45 fix: handle UTF-8 in IronPython daemon text reads",
+  "note": "Vendored (flat files, no .git) for sylo-machine-expert; re-sync by cloning upstream and replacing this folder."
+}

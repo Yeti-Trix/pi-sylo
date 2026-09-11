@@ -8,7 +8,7 @@
 // workspace at broker start; there is no per-package toggle.
 //
 // Sylo builtin/optional packages are NOT listed — they ship in the Sylo repo
-// and are toggled in Capability manager → Sylo optional packages, never via
+// and are toggled in Capability manager → Sylo built-in packages, never via
 // settings.json.
 import { existsSync, readFileSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'

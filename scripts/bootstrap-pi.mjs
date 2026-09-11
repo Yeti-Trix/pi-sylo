@@ -65,33 +65,48 @@ for (const stale of staleSkillDirs) {
   }
 }
 
-// Personal-domain skills (nutrition/workouts/news/reddit) are owned by the
-// operator's sylo-personal-tools bundle, not sylo-dev. When the bundle is
-// installed, Pi's package loader copies them into ~/.pi/agent/skills. When the
-// bundle is ABSENT (work/controls machines, or any machine that ran an older
+// Personal-domain skills (nutrition/workouts/news/reddit) are owned by packages
+// the operator registers, not sylo-dev. When a package is installed, Pi's
+// package loader copies its skills into ~/.pi/agent/skills. When the owning
+// package is ABSENT (work/controls machines, or any machine that ran an older
 // bootstrap that copied them here), stale orphan folders would still be
 // scanned by Pi and register their routes — e.g. the "Health" sidebar
 // dashboard link. Mirror personal-plugin.ts resolution and purge them only
-// when the bundle is not resolvable (so the home machine keeps its skills).
-function personalToolsInstalled() {
-  // Renamed 2026-09-02: sylo-personal-tools → sylo-tools-personal (legacy name kept as alias).
-  const env = process.env.SYLO_TOOLS_PERSONAL_DIR?.trim() ?? process.env.SYLO_PERSONAL_TOOLS_DIR?.trim()
-  if (env && fs.existsSync(path.resolve(env))) return true
+// when the owner is not resolvable (so the home machine keeps its skills).
+// 2026-09-10 split: news/reddit are owned by sylo-news / sylo-reddit now,
+// not sylo-tools-personal — purge each group based on its own owners.
+function pkgInstalled(names, fallbackDirs) {
   try {
     const settingsPath = path.join(agent, 'settings.json')
     if (fs.existsSync(settingsPath)) {
       const raw = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
-      const entry = (raw.packages ?? []).find((p) =>
-        ['sylo-tools-personal', 'sylo-personal-tools'].includes(path.basename(String(p).replace(/\\/g, '/'))))
-      if (entry && fs.existsSync(path.resolve(path.dirname(settingsPath), entry))) return true
+      const found = (raw.packages ?? []).some((p) =>
+        names.includes(path.basename(String(p).replace(/\\/g, '/'))) &&
+        fs.existsSync(path.resolve(path.dirname(settingsPath), String(p))))
+      if (found) return true
     }
   } catch { /* settings unreadable — fall through */ }
-  const fallback = path.join(os.homedir(), 'Documents', 'GitHub', 'sylo-tools-personal')
-  if (fs.existsSync(fallback)) return true
-  return fs.existsSync(path.join(os.homedir(), 'Documents', 'GitHub', 'sylo-personal-tools'))
+  const env = process.env.SYLO_TOOLS_PERSONAL_DIR?.trim() ?? process.env.SYLO_PERSONAL_TOOLS_DIR?.trim()
+  if (env && fs.existsSync(path.resolve(env))) return true
+  return fallbackDirs.some((d) => fs.existsSync(path.join(os.homedir(), 'Documents', 'GitHub', d)))
 }
 
-const personalSkillNames = ['nutrition', 'workouts', 'news', 'reddit']
+function personalToolsInstalled() {
+  // Renamed 2026-09-02: sylo-personal-tools → sylo-tools-personal (legacy name kept as alias).
+  return pkgInstalled(
+    ['sylo-tools-personal', 'sylo-personal-tools'],
+    ['sylo-tools-personal', 'sylo-personal-tools'])
+}
+
+function newsRedditInstalled() {
+  // 2026-09-10: news/reddit split into standalone packages; the health bundle
+  // no longer declares their skills, so their copies need their own owners.
+  return pkgInstalled(
+    ['sylo-tools-personal', 'sylo-personal-tools', 'sylo-news', 'sylo-reddit'],
+    ['sylo-tools-personal', 'sylo-personal-tools', 'sylo-news', 'sylo-reddit'])
+}
+
+const personalSkillNames = ['nutrition', 'workouts']
 if (!personalToolsInstalled()) {
   for (const name of personalSkillNames) {
     const dir = path.join(agent, 'skills', name)
@@ -102,6 +117,19 @@ if (!personalToolsInstalled()) {
   }
 } else {
   console.log('Sylo bootstrap: sylo-tools-personal bundle present — keeping personal skills')
+}
+
+const newsRedditSkillNames = ['news', 'reddit']
+if (!newsRedditInstalled()) {
+  for (const name of newsRedditSkillNames) {
+    const dir = path.join(agent, 'skills', name)
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true })
+      console.log('Sylo bootstrap: removed stale news/reddit skill (packages absent):', dir)
+    }
+  }
+} else {
+  console.log('Sylo bootstrap: news/reddit owners present — keeping news/reddit skills')
 }
 
 ensureCopy(

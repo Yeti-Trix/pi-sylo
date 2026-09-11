@@ -404,7 +404,7 @@ function TaskRow({
                   cancelEdit()
                 }
               }}
-              rows={2}
+              rows={8}
               placeholder="Notes for this task (markdown)…"
               className="mt-1 w-full resize-y rounded-md border border-accent-muted bg-bg-secondary px-2 py-1 text-[0.78rem] leading-[1.4] text-text-primary placeholder:text-text-secondary focus:outline-none"
             />

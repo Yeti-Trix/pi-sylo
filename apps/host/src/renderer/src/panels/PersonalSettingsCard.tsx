@@ -2,52 +2,79 @@ import { useEffect, useState } from 'react'
 import { btnGhost, card, cardTitle, leadText } from './ui-classes'
 
 /**
- * Generic Settings card driven by the personal bundle's declarative config.
+ * Generic Settings cards driven by host plugins' declarative configs.
  *
- * The plugin (sylo-personal-tools) supplies title/copy/pref-key via the
- * `personal:settingsCard` IPC — the host owns no domain names. Renders nothing
- * when no personal bundle is installed (public/controls machines).
+ * Plugins supply title/copy/pref-key via the `personal:settingsCard` IPC (an
+ * ARRAY since the v1 multi-plugin contract — a single object for back-compat);
+ * the host owns no domain names. Renders nothing when no plugin declares a
+ * card (public/controls machines).
  */
+type CardConfig = {
+  title: string
+  lead: string
+  prefKey: string
+  defaultLabel: string
+  valuePrefix: string
+  pickLabel: string
+  restartBrokerOnSave?: boolean
+}
+
+function isCardConfig(value: unknown): value is CardConfig {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    typeof (value as CardConfig).prefKey === 'string' &&
+    typeof (value as CardConfig).title === 'string'
+  )
+}
+
 export default function PersonalSettingsCard({
   onChanged,
 }: {
   onChanged?: () => void | Promise<void>
 }) {
-  const [cfg, setCfg] = useState<{
-    title: string
-    lead: string
-    prefKey: string
-    defaultLabel: string
-    valuePrefix: string
-    pickLabel: string
-    restartBrokerOnSave?: boolean
-  } | null>(null)
-  const [value, setValue] = useState('')
+  const [cfgs, setCfgs] = useState<CardConfig[]>([])
   const [ready, setReady] = useState(false)
 
   useEffect(() => {
     void (async () => {
-      const c = (await window.sylo.personal?.settingsCard()) as null | {
-        title: string
-        lead: string
-        prefKey: string
-        defaultLabel: string
-        valuePrefix: string
-        pickLabel: string
-        restartBrokerOnSave?: boolean
-      }
-      if (!c) {
-        setReady(true)
-        return
-      }
-      setCfg(c)
-      const v = (await window.sylo.prefs.get(c.prefKey, '')) as string
-      setValue(typeof v === 'string' ? v : '')
+      const raw = (await window.sylo.personal?.settingsCard()) as
+        | CardConfig[]
+        | CardConfig
+        | null
+        | undefined
+      const list = (Array.isArray(raw) ? raw : raw ? [raw] : []).filter(isCardConfig)
+      setCfgs(list)
       setReady(true)
     })()
   }, [])
 
-  if (!ready || !cfg) return null
+  if (!ready || cfgs.length === 0) return null
+
+  return (
+    <>
+      {cfgs.map((cfg) => (
+        <PluginSettingsCard key={cfg.prefKey} cfg={cfg} onChanged={onChanged} />
+      ))}
+    </>
+  )
+}
+
+function PluginSettingsCard({
+  cfg,
+  onChanged,
+}: {
+  cfg: CardConfig
+  onChanged?: () => void | Promise<void>
+}) {
+  const [value, setValue] = useState('')
+
+  useEffect(() => {
+    void (async () => {
+      const v = (await window.sylo.prefs.get(cfg.prefKey, '')) as string
+      setValue(typeof v === 'string' ? v : '')
+    })()
+  }, [cfg.prefKey])
 
   return (
     <section className={card}>

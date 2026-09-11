@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { SYLO_MODEL_PROVIDERS, SYLO_MODEL_PROVIDER_LABELS, CHATGPT_CODEX_PROVIDER, CHATGPT_CODEX_MODELS } from '../../../shared/chatgpt-codex'
 import { cn } from '../lib/cn'
-import { select, input, mutedText } from '../panels/ui-classes'
+import { modelBarPill, mutedText } from '../panels/ui-classes'
 import { normalizeOllamaOriginUi, OllamaModelSelect } from '../panels/ollama-ui'
 import { ChatSubagentModelsModal } from './ChatSubagentModelsModal'
 
@@ -331,7 +331,7 @@ export function ChatModelBar({
     <div className="flex min-w-0 flex-1 flex-col gap-1">
       <div className="flex flex-wrap items-center gap-1.5">
         <select
-          className={cn(select, 'h-7 max-w-[140px] py-0.5 text-[0.72rem]')}
+          className={cn(modelBarPill, 'h-7 max-w-[110px] py-0.5 text-[0.72rem]')}
           value={providerSelectValue}
           onChange={(e) => onProviderChange(e.target.value)}
           disabled={!agentReady}
@@ -355,11 +355,11 @@ export function ChatModelBar({
               ollamaTags={ollamaTags}
               emptyOptionLabel={`Global (${globalModelLabel})`}
               id="sylo-chat-model-select"
-              className="h-7 min-w-0 max-w-[220px] flex-1 py-0.5 text-[0.72rem]"
+              className={cn(modelBarPill, 'h-7 min-w-0 max-w-[220px] flex-1 py-0.5 text-[0.72rem]')}
             />
           ) : effProvider === CHATGPT_CODEX_PROVIDER ? (
             <select
-              className={cn(select, 'h-7 min-w-0 max-w-[220px] flex-1 py-0.5 text-[0.72rem]')}
+              className={cn(modelBarPill, 'h-7 min-w-0 max-w-[220px] flex-1 py-0.5 text-[0.72rem]')}
               value={modelSelectValue}
               onChange={(e) => onModelChange(e.target.value)}
               disabled={!agentReady}
@@ -377,7 +377,7 @@ export function ChatModelBar({
             </select>
           ) : (
             <input
-              className={cn(input, 'h-7 max-w-[200px] py-0.5 text-[0.72rem]')}
+              className={cn(modelBarPill, 'h-7 max-w-[200px] py-0.5 text-[0.72rem]')}
               value={override.model_id ?? ''}
               onChange={(e) => onModelChange(e.target.value)}
               placeholder={`Model id (global: ${globalModelLabel})`}
@@ -396,7 +396,7 @@ export function ChatModelBar({
          * control), so the bar stays clean until a model declares usable levels. */}
         {effProvider && effModelId && thinkLevels && thinkLevels.some((l) => l !== 'off') ? (
           <select
-            className={cn(select, 'h-7 max-w-[90px] py-0.5 text-[0.72rem]')}
+            className={cn(modelBarPill, 'h-7 max-w-[90px] py-0.5 text-[0.72rem]')}
             value={override.thinking_level ?? THINK_DEFAULT_SENTINEL}
             onChange={(e) => onThinkingLevelChange(e.target.value)}
             disabled={!agentReady || saving}
@@ -432,11 +432,11 @@ export function ChatModelBar({
                 visionTags={visionTags}
                 emptyOptionLabel={`Global (${globalImageLabel})`}
                 id="sylo-chat-image-model-select"
-                className="h-7 min-w-0 max-w-[220px] flex-1 py-0.5 text-[0.72rem]"
+                className={cn(modelBarPill, 'h-7 min-w-0 max-w-[220px] flex-1 py-0.5 text-[0.72rem]')}
               />
             ) : (
               <input
-                className={cn(input, 'h-7 max-w-[200px] py-0.5 text-[0.72rem]')}
+                className={cn(modelBarPill, 'h-7 max-w-[200px] py-0.5 text-[0.72rem]')}
                 value={override.image_model_id ?? ''}
                 onChange={(e) => onImageModelChange(e.target.value)}
                 placeholder={`Image model id (global: ${globalImageLabel})`}

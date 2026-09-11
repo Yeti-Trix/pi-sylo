@@ -39,6 +39,28 @@ export function packageBundleOriginFromPath(samplePath: string): CapabilityOrigi
   return 'npm-package'
 }
 
+/**
+ * Individual package folder for a capability row path: the npm/git package id
+ * (node_modules | npm | git mirror segment), or a monorepo sub-package
+ * (`…/packages/<id>/…`, last match wins). Returns null when the path doesn't
+ * identify a package folder (e.g. a single local package's own extensions/).
+ */
+export function bundleItemFolderFromPath(filePath: string): string | null {
+  const npm = npmPackageFolderFromPath(filePath)
+  if (npm) return npm
+  const segs = filePath.replace(/\\/g, '/').split('/')
+  for (let i = segs.length - 2; i >= 1; i--) {
+    if (segs[i] === 'packages' && segs[i + 1]) return segs[i + 1]
+  }
+  return null
+}
+
+/** Display folder name for an installed package: last path segment of the install root (or raw spec fallback). */
+export function bundleFolderBasename(installedPath: string, spec: string): string {
+  const segs = (installedPath || spec).replace(/\\/g, '/').replace(/\/+$/, '').split('/')
+  return segs[segs.length - 1] || spec
+}
+
 export const ORIGIN_LABELS: Record<CapabilityOrigin, string> = {
   'pi-agent': 'Pi agent',
   'pi-cwd': 'Pi cwd',
@@ -47,7 +69,7 @@ export const ORIGIN_LABELS: Record<CapabilityOrigin, string> = {
   'npm-package': 'npm package',
   'git-package': 'git package',
   'sylo-builtin': 'built-in (Sylo)',
-  'sylo-optional': 'Sylo optional package',
+  'sylo-optional': 'Sylo built-in package',
 }
 
 export const KNOWN_PACKAGES: { canonical: string; aliases?: string[]; hint: string }[] = [

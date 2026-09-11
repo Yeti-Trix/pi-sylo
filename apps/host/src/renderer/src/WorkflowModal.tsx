@@ -100,7 +100,7 @@ export function WorkflowModal({
           </h2>
           <button
             type="button"
-            className="cursor-pointer border-0 bg-transparent p-0 font-inherit text-[0.75rem] text-accent underline underline-offset-2 hover:text-[#8cb4ff]"
+            className="cursor-pointer border-0 bg-transparent p-0 font-inherit text-[0.75rem] text-accent underline underline-offset-2 hover:text-[#ededed]"
             onClick={onClose}
           >
             Close

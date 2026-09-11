@@ -116,6 +116,12 @@ function serveStatic(res: ServerResponse, filePath: string): void {
   if (ext === '.js' && filePath.replace(/\\/g, '/').endsWith('/sw.js')) {
     headers['Cache-Control'] = 'no-cache'
   }
+  // HTML shells must always revalidate: they carry no content hash but reference
+  // hashed assets — a stale cached shell would 404 on deleted asset files (phone
+  // PWA kept a stale personal-app shell → health tabs broke after a rebuild).
+  if (ext === '.html') {
+    headers['Cache-Control'] = 'no-cache'
+  }
   res.writeHead(200, headers)
   createReadStream(filePath).pipe(res)
 }
@@ -124,9 +130,9 @@ function createCompanionHandler(opts: {
   staticRoot: string
   sseClients: Set<SseClient>
   userDataPath: string
-  personalAppRoot?: () => string
+  personalAppRoots?: Record<string, () => string>
 }): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
-  const { staticRoot, sseClients, userDataPath, personalAppRoot } = opts
+  const { staticRoot, sseClients, userDataPath, personalAppRoots } = opts
   return async (req, res) => {
     const secureCookies = isSecureRequest(req)
     if (!req.url) {
@@ -328,9 +334,12 @@ function createCompanionHandler(opts: {
         const api = getCompanionHostApi()
         const qs = url.searchParams.get('workspaceId')
                 const workspaceId = qs && qs.trim() ? qs.trim() : api.getActiveWorkspaceId()
+        const archivedOnly = url.searchParams.get('archived') === 'true'
         json(res, 200, {
-          conversations: api.listConversations(workspaceId),
-          running: api.listRunningConversationIds(),
+          conversations: archivedOnly
+            ? api.listArchivedConversations(workspaceId)
+            : api.listConversations(workspaceId),
+          running: archivedOnly ? [] : api.listRunningConversationIds(),
           workspaceId,
         })
       } catch (e) {
@@ -395,6 +404,21 @@ function createCompanionHandler(opts: {
           image_model_provider: norm(body.image_model_provider),
         })
         json(res, 200, { ...result, conversationId })
+      } catch (e) {
+        json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
+      }
+      return
+    }
+
+    const archivedMatch = /^\/api\/conversations\/([^/]+)\/archived$/.exec(url.pathname)
+    if (archivedMatch && req.method === 'PUT') {
+      if (!requireAuth(req, res)) return
+      try {
+        const conversationId = decodeURIComponent(archivedMatch[1] ?? '')
+        const body = (await readJsonBody(req)) as { archived?: unknown }
+        const archived = Boolean(body.archived)
+        getCompanionHostApi().setConversationArchived(conversationId, archived)
+        json(res, 200, { ok: true, conversationId, archived })
       } catch (e) {
         json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
       }
@@ -608,13 +632,30 @@ function createCompanionHandler(opts: {
     }
 
     if (url.pathname === '/personal-app' || url.pathname.startsWith('/personal-app/')) {
-      const root = personalAppRoot?.()
-      if (root && existsSync(root)) {
-        const suffix =
-          url.pathname === '/personal-app' || url.pathname === '/personal-app/' ?
-            '/index.html'
-          : url.pathname.slice('/personal-app'.length)
-        const personalPath = safeStaticPath(root, suffix)
+      const roots = personalAppRoots ?? {}
+      const rest =
+        url.pathname === '/personal-app' || url.pathname === '/personal-app/'
+          ? ''
+          : url.pathname.slice('/personal-app/'.length)
+      // Per-plugin mount: /personal-app/<id>/... (multi-plugin contract).
+      // Legacy unscoped /personal-app/... serves the first-registered root.
+      const pluginMatch = /^([^/]+)(\/.*)?$/.exec(rest)
+      let rootFn: (() => string) | null = null
+      let suffix = '/'
+      if (pluginMatch && roots[pluginMatch[1]!]) {
+        rootFn = roots[pluginMatch[1]!]!
+        suffix = pluginMatch[2] ?? '/'
+      } else {
+        const first = Object.values(roots)[0]
+        if (first) {
+          rootFn = first
+          suffix = rest ? `/${rest}` : '/'
+        }
+      }
+      if (rootFn) {
+        const suffixPath = suffix === '' || suffix === '/' ? '/index.html' : suffix
+        const root = rootFn()
+        const personalPath = safeStaticPath(root, suffixPath)
         if (personalPath && existsSync(personalPath) && statSync(personalPath).isFile()) {
           serveStatic(res, personalPath)
           return
@@ -646,7 +687,7 @@ export function startCompanionServer(opts: {
   prefs: CompanionPrefs
   tls: CompanionTlsMaterial
   userDataPath: string
-  personalAppRoot?: () => string
+  personalAppRoots?: Record<string, () => string>
 }): CompanionServerHandle {
   const sseClients = new Set<SseClient>()
 
@@ -666,7 +707,7 @@ export function startCompanionServer(opts: {
     staticRoot: opts.staticRoot,
     sseClients,
     userDataPath: opts.userDataPath,
-    personalAppRoot: opts.personalAppRoot,
+    personalAppRoots: opts.personalAppRoots,
   })
 
   const host = companionBindHost(opts.prefs.bind)

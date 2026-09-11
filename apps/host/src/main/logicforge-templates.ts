@@ -16,12 +16,13 @@ import { homedir } from 'node:os'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { resolveSyloUserDir } from './database.js'
+import { resolveToolsPackageDir } from './tools-bundles.js'
 
 const execFileAsync = promisify(execFile)
 
 const hostMainDir = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(hostMainDir, '..', '..', '..', '..')
-const packageRoot = join(repoRoot, 'packages', 'sylo-logicforge')
+const packageRoot = resolveToolsPackageDir(repoRoot, 'sylo-tools-controls', 'sylo-logicforge')
 const scriptsDir = join(packageRoot, 'scripts')
 const seedDir = join(packageRoot, 'assets', 'templates', 'Studio 5000 Templates')
 

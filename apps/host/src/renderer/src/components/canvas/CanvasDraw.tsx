@@ -4,27 +4,26 @@ import { btnGhostSm, mutedText } from '../../panels/ui-classes'
 
 /**
  * Phase 5 — freehand draw mode for the Canvas. Operator clicks "Draw" on the
- * canvas header and the panel switches to this sketch surface. Mouse
- * (or pen/touch via Pointer Events) draws freehand strokes. Controls: clear,
- * undo, pen color, stroke width, and a dark/light background toggle. "Send to
- * agent" exports the current sketch as a PNG and delivers it to the active
- * conversation as a chat-attached image the model can read (vision) — reusing
- * the existing `chat.writePastedImage` + `chat.deliverQueued` pipe, so no new
- * IPC is needed.
+ * canvas bottom control bar and the panel switches to this sketch surface. Mouse
+ * (or pen/touch via Pointer Events) draws freehand strokes. Controls (below the
+ * sketch): clear, undo, pen color, stroke width, and a dark/light background
+ * toggle. The sketch is pull-based: every change is mirrored (debounced) to the
+ * host via `window.sylo.canvas.setSketchImage`, and the broker's `canvas_sketch`
+ * tool reads it back as an image from normal chat ("look at my sketch"). The
+ * removed draw-panel send box was replaced by that tool.
  *
  * Stroke layer: drawing is kept on a transparent offscreen canvas
  * (`strokeRef`); the visible canvas is a composite of the current background
  * fill + the stroke layer. This lets the operator swap the background (dark ↔
  * light) without erasing or double-painting the strokes — toggling bg just
- * recomposites. The exported PNG is the composited visible canvas, so it
+ * recomposites. The mirrored PNG is the composited visible canvas, so it
  * always carries an opaque background (better for the model's vision).
  *
  * Persistence: the stroke layer (strokes only, transparent) is stashed as a
  * PNG data URL into `backupRef` (held by the parent, lifted to App so it
  * survives CanvasPanel unmount on tab switches). On remount the strokes are
- * restored and composited onto the current bg. In-memory only — does not
- * survive a Sylo restart unless sent to the agent (the sent PNG lives in the
- * paste-images folder).
+ * restored and composited onto the current bg. In-memory only — the sketch does
+ * not survive a Sylo restart (the host drops the mirrored PNG at startup).
  *
  * Docked-only for v1. Drawing on a popped-out canvas is a future enhancement
  * (the popout is bound to a live `liveId`; draw mode is a separate, local
@@ -32,24 +31,17 @@ import { btnGhostSm, mutedText } from '../../panels/ui-classes'
  */
 
 type Props = {
-  /** Active conversation id — used by "Send to agent". When missing (e.g. no
-   *  active chat), the send button is disabled with a hint. */
-  conversationId?: string
   /** Parent-held backup of the last stroke layer (PNG data URL, transparent).
    *  Lifted to App so the sketch survives CanvasPanel unmount (tab switches). */
   backupRef: React.MutableRefObject<string | null>
-  /** Exit draw mode (return to the previous canvas view). */
-  onExit: () => void
 }
 
-const BG_DARK = '#0f1115'
+const BG_DARK = '#101010'
 const BG_LIGHT = '#ffffff'
-const COLORS = ['#e6e9ef', '#1a1d23', '#6b9fff', '#ff6b6b', '#69db7c', '#f5c518', '#c08bff']
+const COLORS = ['#e6e9ef', '#1a1d23', '#d4d4d4', '#f16a50', '#3dd68c', '#f5c518', '#c08bff']
 const WIDTHS = [2, 4, 7]
-const DEFAULT_PROMPT =
-  "Here's a sketch I drew on the canvas — please analyze what you see and suggest next steps."
 
-export function CanvasDraw({ conversationId, backupRef, onExit }: Props): React.ReactElement {
+export function CanvasDraw({ backupRef }: Props): React.ReactElement {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   /** Transparent stroke layer (offscreen). Source of truth for the drawing. */
@@ -67,10 +59,8 @@ export function CanvasDraw({ conversationId, backupRef, onExit }: Props): React.
   const [width, setWidth] = useState(WIDTHS[1])
   const [bgLight, setBgLight] = useState(false)
   const [canUndo, setCanUndo] = useState(false)
-  const [question, setQuestion] = useState('')
-  const [sending, setSending] = useState(false)
-  const [sent, setSent] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  /** Debounce timer for the host sketch mirror (canvas:set-sketch-image). */
+  const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     colorRef.current = color
@@ -139,13 +129,56 @@ export function CanvasDraw({ conversationId, backupRef, onExit }: Props): React.
         sctx.clearRect(0, 0, w, h)
         if (src) sctx.drawImage(src, 0, 0, w, h)
       }
-      // Visible layer.
+            // Visible layer.
       canvas.width = Math.floor(w * dpr)
       canvas.height = Math.floor(h * dpr)
       composite()
     },
     [composite],
   )
+
+  /** True if the stroke layer has any visible pixels (alpha > 0). Probed on a
+   *  downscaled copy — exact enough to distinguish "nothing drawn" from any
+   *  stroke, and cheap even at full DPR size. */
+  function strokesExist(): boolean {
+    const stroke = strokeRef.current
+    if (!stroke || stroke.width === 0 || stroke.height === 0) return false
+    const probe = getOffscreen()
+    probe.width = 48
+    probe.height = 48
+    const pctx = probe.getContext('2d')
+    if (!pctx) return false
+    pctx.clearRect(0, 0, 48, 48)
+    pctx.drawImage(stroke, 0, 0, 48, 48)
+    const data = pctx.getImageData(0, 0, 48, 48).data
+    for (let i = 3; i < data.length; i += 4) {
+      if ((data[i] ?? 0) > 0) return true
+    }
+    return false
+  }
+
+  /** Mirror the current sketch into the host (debounced) so the broker's
+   *  `canvas_sketch` tool can pull it from normal chat. Clears the mirror when
+   *  the drawing area is empty. */
+  const scheduleSync = useCallback(() => {
+    if (syncTimerRef.current) clearTimeout(syncTimerRef.current)
+    syncTimerRef.current = setTimeout(() => {
+      syncTimerRef.current = null
+      const canvas = canvasRef.current
+      if (!canvas || canvas.width === 0 || !strokesExist()) {
+        void window.sylo.canvas.setSketchImage(null)
+        return
+      }
+      // The composited bitmap carries the opaque background — better for vision.
+      void window.sylo.canvas.setSketchImage(canvas.toDataURL('image/png'))
+    }, 300)
+  }, [])
+
+  // Recomposite (and re-mirror) when the background flips — strokes are preserved.
+  useEffect(() => {
+    composite()
+    scheduleSync()
+  }, [bgLight, composite, scheduleSync])
 
   // Mount: restore the backup strokes (if any) and observe resizes. Unmount:
   // stash the stroke layer so a remount (toggle off→on or tab switch) restores
@@ -155,7 +188,10 @@ export function CanvasDraw({ conversationId, backupRef, onExit }: Props): React.
     const doMount = () => {
       if (backup) {
         const img = new Image()
-        img.onload = () => sizeCanvas(img)
+        img.onload = () => {
+          sizeCanvas(img)
+          scheduleSync()
+        }
         img.onerror = () => sizeCanvas(null)
         img.src = backup
       } else {
@@ -167,6 +203,7 @@ export function CanvasDraw({ conversationId, backupRef, onExit }: Props): React.
     if (wrapRef.current) ro.observe(wrapRef.current)
     return () => {
       ro.disconnect()
+      if (syncTimerRef.current) clearTimeout(syncTimerRef.current)
       const s = strokeRef.current
       if (s && s.width > 0 && s.height > 0) backupRef.current = s.toDataURL('image/png')
     }
@@ -199,11 +236,12 @@ export function CanvasDraw({ conversationId, backupRef, onExit }: Props): React.
       sctx.clearRect(0, 0, wrap.clientWidth, wrap.clientHeight)
       sctx.drawImage(img, 0, 0, wrap.clientWidth, wrap.clientHeight)
       composite()
+      scheduleSync()
     }
     img.src = prev
   }
 
-  function clearCanvas(): void {
+    function clearCanvas(): void {
     pushUndo()
     const stroke = strokeRef.current
     const wrap = wrapRef.current
@@ -214,6 +252,7 @@ export function CanvasDraw({ conversationId, backupRef, onExit }: Props): React.
     sctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     sctx.clearRect(0, 0, wrap.clientWidth, wrap.clientHeight)
     composite()
+    scheduleSync()
   }
 
   /** Toggle bg dark ↔ light. Auto-switch the pen to a visible color if the
@@ -299,10 +338,11 @@ export function CanvasDraw({ conversationId, backupRef, onExit }: Props): React.
     lastPtRef.current = p
   }
 
-  function onPointerUp(e: React.PointerEvent<HTMLCanvasElement>): void {
+    function onPointerUp(e: React.PointerEvent<HTMLCanvasElement>): void {
     if (!drawingRef.current) return
     drawingRef.current = false
     lastPtRef.current = null
+    scheduleSync()
     try {
       canvasRef.current?.releasePointerCapture(e.pointerId)
     } catch {
@@ -310,40 +350,25 @@ export function CanvasDraw({ conversationId, backupRef, onExit }: Props): React.
     }
   }
 
-  async function sendToAgent(): Promise<void> {
-    const canvas = canvasRef.current
-    if (!canvas || canvas.width === 0) return
-    if (!conversationId) {
-      setError('Open a conversation in chat first — the sketch is sent there.')
-      return
-    }
-    const text = question.trim() || DEFAULT_PROMPT
-    setSending(true)
-    setError(null)
-    try {
-      const blob = await new Promise<Blob | null>((resolve) =>
-        canvas.toBlob((b) => resolve(b), 'image/png'),
-      )
-      if (!blob) throw new Error('Could not export the sketch as a PNG.')
-      const buf = await blob.arrayBuffer()
-      const file = await window.sylo.chat.writePastedImage(buf, 'image/png')
-      const res = await window.sylo.chat.deliverQueued(conversationId, text, [
-        { path: file.path, name: file.name },
-      ])
-      if (!res?.ok) throw new Error(res?.error ?? 'send_failed')
-      setSent(true)
-      setQuestion('')
-      setTimeout(() => setSent(false), 2000)
-    } catch (e) {
-      setError(String((e as Error)?.message ?? e))
-    } finally {
-      setSending(false)
-    }
-  }
-
   return (
     <div className="flex h-full min-h-0 flex-col gap-2">
-      {/* Toolbar */}
+      {/* Drawing surface (top) */}
+      <div
+        ref={wrapRef}
+        className="relative min-h-0 flex-1 overflow-hidden rounded-md border border-border"
+        style={{ backgroundColor: bgLight ? BG_LIGHT : BG_DARK }}
+      >
+        <canvas
+          ref={canvasRef}
+          className="absolute inset-0 h-full w-full touch-none cursor-crosshair"
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+        />
+      </div>
+
+      {/* Controls (bottom, under the sketch) */}
       <div className="flex shrink-0 flex-wrap items-center gap-2 rounded-md border border-border bg-bg-secondary px-2 py-1.5">
         <div className="flex items-center gap-1">
           <span className={cn(mutedText, 'text-[0.72rem]')}>Color</span>
@@ -403,67 +428,9 @@ export function CanvasDraw({ conversationId, backupRef, onExit }: Props): React.
           <button type="button" className={btnGhostSm} onClick={clearCanvas} title="Clear the sketch">
             Clear
           </button>
-          <button type="button" className={btnGhostSm} onClick={onExit} title="Exit draw mode">
-            Exit draw
-          </button>
         </div>
       </div>
 
-      {/* Drawing surface */}
-      <div
-        ref={wrapRef}
-        className="relative min-h-0 flex-1 overflow-hidden rounded-md border border-border"
-        style={{ backgroundColor: bgLight ? BG_LIGHT : BG_DARK }}
-      >
-        <canvas
-          ref={canvasRef}
-          className="absolute inset-0 h-full w-full touch-none cursor-crosshair"
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerCancel={onPointerUp}
-        />
-      </div>
-
-      {/* Send to agent */}
-      <div className="shrink-0 rounded-md border border-border bg-bg-secondary px-2 py-1.5">
-        <div className="flex items-center gap-2">
-          <input
-            type="text"
-            value={question}
-            disabled={!conversationId || sending}
-            placeholder={
-              conversationId
-                ? 'Ask about your sketch (optional) — e.g. "Does this control flow make sense?"'
-                : 'Open a conversation in chat to send the sketch to the agent'
-            }
-            onChange={(e) => setQuestion(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault()
-                void sendToAgent()
-              }
-            }}
-            className="min-w-0 flex-1 rounded-md border border-border bg-bg-primary px-2 py-1.5 text-[0.82rem] text-text-primary placeholder:text-text-secondary focus:border-accent-muted focus:outline-none disabled:opacity-50"
-          />
-          <button
-            type="button"
-            disabled={!conversationId || sending}
-            onClick={() => void sendToAgent()}
-            title="Export the sketch as a PNG and send it to the agent as an image attachment"
-            className="shrink-0 rounded-md border border-accent-muted bg-accent/15 px-3 py-1.5 text-[0.8rem] text-accent hover:bg-accent/25 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {sent ? 'Sent ✓' : sending ? 'Sending…' : 'Send to agent'}
-          </button>
-        </div>
-        {error ? (
-          <p className="m-0 mt-1 text-[0.74rem] text-danger">{error}</p>
-        ) : null}
-        <p className={cn(mutedText, 'm-0 mt-1 text-[0.72rem] leading-[1.4]')}>
-          The sketch is sent as an image attachment — the model can see it. If a
-          turn is running it steers; otherwise it starts a new turn.
-        </p>
-      </div>
     </div>
   )
 }
