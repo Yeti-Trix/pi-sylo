@@ -2,32 +2,41 @@
 
 @source "./**/*.{tsx,ts,html}";
 
+/** Cursor-neutral dark palette (Phase 0 of the Cursor-style restyle, tracker
+ *  2026-09-10_21-15-00). No blue anywhere: accent is a neutral gray highlight;
+ *  only status colors stay chromatic (green/amber/red).
+ *
+ *  Tier semantics: primary = app/chat bg (DARKER — Cursor keeps the agent
+ *  chat surface darker than the left panel), secondary = sidebar/chrome/panels
+ *  (LIGHTER than chat), tertiary = raised (hover, bubbles, selected rows).
+ *  Legacy :root vars below must stay in sync. */
 @theme {
-  --color-bg-primary: #0f1115;
-  --color-bg-secondary: #161a20;
-  --color-bg-tertiary: #1e232b;
-  --color-border: #2a3140;
-  --color-text-primary: #e8eaed;
-  --color-text-secondary: #9aa0a6;
-  --color-accent: #6b9fff;
-  --color-accent-muted: #3d5a80;
-  --color-danger: #ff6b6b;
-  --color-success: #69db7c;
+  --color-bg-primary: #101010;
+  --color-bg-secondary: #161616;
+  --color-bg-tertiary: #232323;
+  --color-border: #2a2a2a;
+  --color-text-primary: #ededed;
+  --color-text-secondary: #9b9b9b;
+  --color-text-muted: #6b6b6b;
+  --color-accent: #d4d4d4;
+  --color-accent-muted: #525252;
+  --color-danger: #f16a50;
+  --color-success: #3dd68c;
   --font-sans: system-ui, "Segoe UI", Roboto, sans-serif;
 }
 
 /* Legacy :root vars — keep in sync with @theme above */
 :root {
-  --bg-primary: #0f1115;
-  --bg-secondary: #161a20;
-  --bg-tertiary: #1e232b;
-  --border: #2a3140;
-  --text-primary: #e8eaed;
-  --text-secondary: #9aa0a6;
-  --accent: #6b9fff;
-  --accent-muted: #3d5a80;
-  --danger: #ff6b6b;
-  --success: #69db7c;
+  --bg-primary: #101010;
+  --bg-secondary: #161616;
+  --bg-tertiary: #232323;
+  --border: #2a2a2a;
+  --text-primary: #ededed;
+  --text-secondary: #9b9b9b;
+  --accent: #d4d4d4;
+  --accent-muted: #525252;
+  --danger: #f16a50;
+  --success: #3dd68c;
   font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
 }
 
@@ -52,6 +61,29 @@ body {
   height: 100%;
   min-height: 0;
   overflow: hidden;
+}
+
+/* Thin Cursor-style scrollbars (6px, neutral thumb) */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #333333;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3d3d3d;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 @keyframes chatSegmentPulse {
@@ -86,7 +118,7 @@ body {
   .chat-md code {
     font-family: ui-monospace, monospace;
     font-size: 0.86em;
-    background: rgb(14 17 23 / 0.95);
+    background: rgb(255 255 255 / 0.08);
     padding: 0.1em 0.35em;
     border-radius: 4px;
   }

@@ -199,6 +199,24 @@ declare global {
         findLatestEmpty: (workspaceId: string) => Promise<string | null>
         setTitle: (id: string, title: string) => Promise<void>
         setWorkspace: (id: string, workspaceId: string) => Promise<void>
+        /** Apps pane (Phase 7): create a side chat (DB child conversation). */
+        createSide: (
+          parentId: string,
+          title?: string,
+        ) => Promise<
+          | { ok: true; conversation: { id: string; title: string; workspace_id: string | null } }
+          | { ok: false; error: string }
+        >
+        /** Apps pane (Phase 7): list a parent chat's side chats (oldest first). */
+        listSide: (parentId: string) => Promise<
+          { id: string; title: string; created_at: number }[]
+        >
+        /** Archive (retention v2): archive/unarchive a chat (archive hides it from the sidebar; nothing is deleted). */
+        setArchived: (id: string, archived: boolean) => Promise<void>
+        /** Archive (retention v2): archived chats (most recently archived first). */
+        listArchived: (workspaceId?: string) => Promise<
+          { id: string; title: string; updated_at: number; archived_at: number | null; workspace_id: string | null }[]
+        >
         /** Persist the per-chat model override (null fields inherit the global default). */
         setModel: (
           id: string,
@@ -628,8 +646,18 @@ declare global {
           sections: { label: string; chars: number; tokens: number; pct: number }[]
         } | null>
         onSystemPromptStats: (cb: (p: unknown) => void) => () => void
-        getActualContextTokens: () => Promise<number | null>
-        onActualContextTokens: (cb: (tokens: number) => void) => () => void
+                getActualContextTokens: () => Promise<{
+          conversationId: string | null
+          actualMessageTokens: number | null
+          includesSystemPrompt: boolean
+        } | null>
+        onActualContextTokens: (
+          cb: (p: {
+            conversationId: string | null
+            actualMessageTokens: number
+            includesSystemPrompt: boolean
+          }) => void,
+        ) => () => void
       }
       chatEvents: {
                 onRefresh: (
@@ -946,6 +974,33 @@ declare global {
           | { ok: false; error: string }
         >
       }
+      menu: {
+        /** Renderer → main: push the final per-section skill-route menu rows
+         *  for the active workspace (Dashboards / Tools / Developer). */
+        setSections: (sections: Array<{
+          id: string
+          label: string
+          items: Array<{
+            kind: 'route' | 'tab' | 'action'
+            title: string
+            key?: string
+            tab?: string
+            action?: string
+            sep?: boolean
+          }>
+        }>) => Promise<{ ok: true; sections: number }>
+        /** Main → renderer: the operator clicked an item in one of the synced
+         *  skill-route menus. */
+        onAction: (
+          cb: (item: {
+            kind: 'route' | 'tab' | 'action'
+            title: string
+            key?: string
+            tab?: string
+            action?: string
+          }) => void,
+        ) => () => void
+      }
       canvas: {
         /** Renderer → main: report the docked canvas' open state so the native
          *  Window-menu item label stays in sync. */
@@ -992,6 +1047,41 @@ declare global {
           filePath: string
           title?: string
         }) => Promise<{ ok: true } | { ok: false; error: string }>
+        /** Native open dialog; the picked file routes through canvas:show into
+         *  the active conversation's tab scope. */
+        pickFile: () => Promise<{ ok: true } | { ok: false; error: string }>
+        /** Persist this workspace's terminal/browser pool tabs (tiny JSON in
+         *  app data) so they reopen after a restart. */
+        savePoolTabs: (
+          workspaceId: string,
+          tabs: { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string }[],
+        ) => Promise<boolean>
+        /** Load the saved pool tabs for a workspace ([] when none). */
+        loadPoolTabs: (workspaceId: string) => Promise<
+          { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string }[]
+        >
+        // ── Agent checkpoints (per-turn undo; storage in app data only) ──
+        checkpoints: {
+          /** Undoable turns for a conversation (newest first), by assistant message id. */
+          list: (conversationId: string) => Promise<
+            { assistantMessageId: string; startedAt: number }[]
+          >
+          /** What restoring would change (files modified/added/deleted). */
+          preview: (
+            conversationId: string,
+            assistantMessageId: string,
+          ) => Promise<
+            | { ok: true; preview: { modified: string[]; added: string[]; deleted: string[] } }
+            | { ok: false; error: string }
+          >
+          /** Restore the pre-turn snapshot (safety-captures current state first). */
+          restore: (
+            conversationId: string,
+            assistantMessageId: string,
+          ) => Promise<
+            { ok: true; restored: number; removed: number } | { ok: false; error: string }
+          >
+        }
         // ── Live (subscribed) canvas — sibling to the snapshot surface above ──
                 onLiveShow: (
           cb: (p: {
@@ -1027,6 +1117,15 @@ declare global {
           | { liveId: string; kind: 'live-demo' | 'task-board'; title?: string; data?: unknown }
           | null
         >
+      }
+      terminal: {
+        create: (opts: { cwd?: string; cols?: number; rows?: number }) => Promise<{ id: string }>
+        attach: (id: string) => Promise<boolean>
+        write: (id: string, data: string) => void
+        resize: (id: string, cols: number, rows: number) => void
+        dispose: (id: string) => void
+        onData: (cb: (p: { id: string; data: string }) => void) => () => void
+        onExit: (cb: (p: { id: string; exitCode: number }) => void) => () => void
       }
       skillSurface: {
         onShow: (
@@ -1238,10 +1337,22 @@ declare global {
         braveQuota: () => Promise<Record<string, unknown> | null>
         onLifecycle: (cb: (payload: unknown) => void) => () => void
       }
-      personal: {
+            personal: {
         ops: () => Promise<string[]>
         rpc: (op: string, payload?: unknown) => Promise<unknown>
         settingsCard: () => Promise<unknown>
+        hostPlugins: () => Promise<
+          Array<{
+            id: string
+            source: 'local' | 'npm' | 'legacy'
+            dir: string
+            name: string
+            version: string | null
+            description: string | null
+            entryPresent: boolean
+            loaded: boolean
+          }>
+        >
       }
       userPackages: {
         list: () => Promise<
@@ -1552,6 +1663,28 @@ declare global {
           extensionEnabled: boolean
         }>
         onLifecycle: (cb: (payload: unknown) => void) => () => void
+      }
+      // ── Agent checkpoints (per-turn undo; storage in app data only) ──
+      checkpoints: {
+        /** Undoable turns for a conversation (newest first), by assistant message id. */
+        list: (conversationId: string) => Promise<
+          { assistantMessageId: string; startedAt: number }[]
+        >
+        /** What restoring would change (files modified/added/deleted). */
+        preview: (
+          conversationId: string,
+          assistantMessageId: string,
+        ) => Promise<
+          | { ok: true; preview: { modified: string[]; added: string[]; deleted: string[] } }
+          | { ok: false; error: string }
+        >
+        /** Restore the pre-turn snapshot (safety-captures current state first). */
+        restore: (
+          conversationId: string,
+          assistantMessageId: string,
+        ) => Promise<
+          { ok: true; restored: number; removed: number } | { ok: false; error: string }
+        >
       }
       thinkTank: {
         sessionGet: (sessionId: string) => Promise<Record<string, unknown> | null>

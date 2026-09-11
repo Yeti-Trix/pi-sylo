@@ -28,7 +28,7 @@ export const fieldLabel = 'block text-[0.78rem] text-text-secondary'
 
 const fieldControl =
 
-  'box-border w-full rounded-md border border-border bg-bg-primary px-2.5 py-2 text-[0.85rem] text-text-primary transition-[border-color,box-shadow] duration-[120ms] focus:border-accent/55 focus:shadow-[0_0_0_3px_rgb(107_159_255/0.18)] focus:outline-none'
+  'box-border w-full rounded-md border border-border bg-bg-primary px-2.5 py-2 text-[0.85rem] text-text-primary transition-[border-color,box-shadow] duration-[120ms] focus:border-accent/55 focus:shadow-[0_0_0_3px_rgb(255_255_255/0.14)] focus:outline-none'
 
 
 
@@ -70,7 +70,7 @@ export const btnPrimarySm = `${btnPrimary} px-2.5 py-1 text-[0.78rem] font-semib
 
 const btnDangerBase =
 
-  'cursor-pointer rounded-md border border-[rgb(255_107_107/0.4)] bg-[rgb(255_107_107/0.06)] text-[rgb(255_152_152)] transition-[border-color,background] duration-[120ms] hover:border-[rgb(255_107_107/0.6)] hover:bg-[rgb(255_107_107/0.14)] disabled:cursor-not-allowed disabled:opacity-50'
+  'cursor-pointer rounded-md border border-[rgb(241_106_80/0.4)] bg-[rgb(241_106_80/0.06)] text-[rgb(248_140_120)] transition-[border-color,background] duration-[120ms] hover:border-[rgb(241_106_80/0.6)] hover:bg-[rgb(241_106_80/0.14)] disabled:cursor-not-allowed disabled:opacity-50'
 
 
 
@@ -132,7 +132,7 @@ export const capSection = 'group mt-4'
 
 export const capSectionSummary =
 
-  'flex cursor-pointer list-none items-center gap-3 rounded-[10px] border border-border bg-bg-secondary px-3.5 py-2.5 transition-[border-color,background] duration-[120ms] hover:border-accent/32 hover:bg-bg-tertiary focus-visible:border-accent/60 focus-visible:shadow-[0_0_0_3px_rgb(107_159_255/0.18)] focus-visible:outline-none group-open:rounded-b-none group-open:border-b-transparent [&::-webkit-details-marker]:hidden [&::marker]:content-none'
+  'flex cursor-pointer list-none items-center gap-3 rounded-[10px] border border-border bg-bg-secondary px-3.5 py-2.5 transition-[border-color,background] duration-[120ms] hover:border-accent/32 hover:bg-bg-tertiary focus-visible:border-accent/60 focus-visible:shadow-[0_0_0_3px_rgb(255_255_255/0.14)] focus-visible:outline-none group-open:rounded-b-none group-open:border-b-transparent [&::-webkit-details-marker]:hidden [&::marker]:content-none'
 
 
 
@@ -176,7 +176,7 @@ export const capBannerWarn =
 
 export const capBannerError =
 
-  'border border-[rgb(255_107_107/0.35)] bg-[rgb(255_107_107/0.08)] text-text-primary'
+  'border border-[rgb(241_106_80/0.35)] bg-[rgb(241_106_80/0.08)] text-text-primary'
 
 
 
@@ -274,7 +274,7 @@ export const capStatusDot =
 
 export const capStatusDotOn =
 
-  'bg-[rgb(74_222_128)] opacity-100 shadow-[0_0_0_3px_rgb(74_222_128/0.16)]'
+  'bg-[rgb(61_214_140)] opacity-100 shadow-[0_0_0_3px_rgb(61_214_140/0.16)]'
 
 
 
@@ -550,7 +550,7 @@ export const capToolConflict =
 
 export const capSwitch =
 
-  'mr-auto inline-flex cursor-pointer select-none items-center gap-2.5 border-none bg-transparent p-0 text-left font-[inherit] text-[0.85rem] text-text-primary focus-visible:rounded-md focus-visible:shadow-[0_0_0_3px_rgb(107_159_255/0.22)] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50'
+  'mr-auto inline-flex cursor-pointer select-none items-center gap-2.5 border-none bg-transparent p-0 text-left font-[inherit] text-[0.85rem] text-text-primary focus-visible:rounded-md focus-visible:shadow-[0_0_0_3px_rgb(255_255_255/0.16)] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50'
 
 
 
@@ -566,7 +566,7 @@ export const capSwitchTrack =
 
 export const capSwitchTrackOn =
 
-  'border-[rgb(74_222_128/0.45)] bg-[rgb(74_222_128/0.22)]'
+  'border-[rgb(61_214_140/0.45)] bg-[rgb(61_214_140/0.22)]'
 
 
 
@@ -576,7 +576,7 @@ export const capSwitchKnob =
 
 
 
-export const capSwitchKnobOn = 'translate-x-4 bg-[rgb(74_222_128)] opacity-100'
+export const capSwitchKnobOn = 'translate-x-4 bg-[rgb(61_214_140)] opacity-100'
 
 
 
@@ -628,9 +628,37 @@ export const sidebarResizeBtn =
 
 export const sidebarResizeBtnCollapsed = `${sidebarResizeBtn} w-full`
 
+/** Cursor-style right-edge "Show Apps" strip (pane closed): slim vertical
+ *  button docked against the window's right edge. */
+export const showAppsStrip =
+  'flex w-[22px] shrink-0 cursor-pointer flex-col items-center justify-center gap-2 border-l border-border bg-bg-secondary text-text-muted transition-colors duration-[120ms] hover:bg-[#1e1e1e] hover:text-text-primary'
+
+export const showAppsStripLabel =
+  'font-mono text-[0.66rem] leading-none tracking-[0.18em] [writing-mode:vertical-rl]'
 
 
-export const sidebarConvList = 'mt-2 min-h-0 flex-1 overflow-auto'
+
+export const sidebarConvList = 'mt-1 min-h-0 flex-1 overflow-auto'
+
+/** Sidebar chat search (Cursor-style row above the chat list) */
+export const sidebarSearchInput =
+  'box-border h-8 w-full shrink-0 rounded-md border border-border bg-bg-primary px-2.5 py-1.5 font-[inherit] text-[0.82rem] text-text-primary placeholder:text-text-muted focus:border-accent/55 focus:shadow-[0_0_0_3px_rgb(255_255_255/0.14)] focus:outline-none'
+  /* bg-bg-primary (#101010) = inset darker field on the lighter sidebar — Cursor look */
+
+/** Workspace sections (Cursor Projects/Repositories style) */
+export const sidebarWsSection = 'group/ws m-0'
+
+export const sidebarWsSectionSummary =
+  'flex min-w-0 cursor-pointer list-none items-center gap-1.5 rounded-md border-none bg-transparent px-2 py-1.5 text-left font-[inherit] text-[0.8rem] font-medium text-text-secondary transition-[background,color] duration-[120ms] hover:bg-bg-tertiary hover:text-text-primary [&::-webkit-details-marker]:hidden [&::marker]:content-none'
+
+export const sidebarWsSectionChevron =
+  'flex shrink-0 items-center leading-none text-text-muted/90 transition-colors duration-[120ms] group-hover/ws:text-text-secondary'
+
+export const sidebarWsSectionName = 'min-w-0 flex-1 truncate'
+
+export const sidebarWsSectionActive = 'text-text-primary'
+
+export const sidebarConvEmpty = 'px-2 py-1.5 text-[0.78rem] text-text-muted'
 
 
 
@@ -692,7 +720,7 @@ export const sidebarWorkspaceEditBtn =
 
 export const sidebarFolderSelect =
 
-  'box-border w-full rounded-md border border-border bg-bg-secondary px-2 py-1.5 font-[inherit] text-[0.8rem] text-text-secondary focus:border-accent/55 focus:shadow-[0_0_0_3px_rgb(107_159_255/0.18)] focus:outline-none'
+  'box-border w-full rounded-md border border-border bg-bg-secondary px-2 py-1.5 font-[inherit] text-[0.8rem] text-text-secondary focus:border-accent/55 focus:shadow-[0_0_0_3px_rgb(255_255_255/0.14)] focus:outline-none'
 
 
 
@@ -722,7 +750,7 @@ export const workspaceSelectSearchWrap = 'shrink-0 border-b border-border p-2'
 
 export const workspaceSelectSearch =
 
-  'box-border w-full rounded-md border border-border bg-bg-primary px-2 py-1.5 font-[inherit] text-[0.8rem] text-text-primary placeholder:text-text-secondary focus:border-accent/55 focus:shadow-[0_0_0_3px_rgb(107_159_255/0.18)] focus:outline-none'
+  'box-border w-full rounded-md border border-border bg-bg-primary px-2 py-1.5 font-[inherit] text-[0.8rem] text-text-primary placeholder:text-text-secondary focus:border-accent/55 focus:shadow-[0_0_0_3px_rgb(255_255_255/0.14)] focus:outline-none'
 
 
 
@@ -747,12 +775,9 @@ export const workspaceSelectEmpty = 'px-2 py-2 text-[0.78rem] text-text-secondar
 /** Sidebar conversations */
 
 export const convRow =
+  'group/conv mb-0.5 flex min-w-0 flex-col items-stretch gap-0.5 rounded-md last:mb-0'
 
-  'group/conv mb-1 flex min-w-0 flex-col items-stretch gap-0.5 rounded-md last:mb-0'
-
-
-
-export const convRowSelected = 'bg-bg-tertiary outline outline-1 outline-accent-muted'
+export const convRowSelected = 'bg-[#1c1c1c]'
 
 
 
@@ -768,13 +793,15 @@ export const convRowSelect =
 
 export const convRowSelectLabel = 'min-w-0 flex-1 truncate'
 
+export const convTimestamp =
+  'shrink-0 self-center text-[0.72rem] leading-none tabular-nums text-text-muted'
+
 
 
 export const convStatusDot = 'inline-block h-2 w-2 shrink-0 rounded-full'
 
 
-
-export const convStatusDotRead = 'bg-text-muted/35'
+export const convStatusDotRead = 'h-1.5 w-1.5 bg-text-muted/30'
 
 
 
@@ -788,7 +815,7 @@ export const convStatusSpinner =
 
 
 
-export const convRowSelectActive = 'font-medium text-accent'
+export const convRowSelectActive = 'font-medium text-text-primary'
 
 
 
@@ -824,11 +851,11 @@ export const mainContent = 'flex h-full min-h-0 min-w-0 flex-col overflow-hidden
 
 
 
-export const banner = 'border-b border-border bg-[#3d2918] px-3 py-2 text-[0.85rem]'
+export const banner = 'border-b border-border bg-[#2b2418] px-3 py-2 text-[0.85rem]'
 
 
 
-export const bannerMuted = 'border-b border-border bg-[#252034] px-3 py-2 text-[0.85rem]'
+export const bannerMuted = 'border-b border-border bg-[#1e1e1e] px-3 py-2 text-[0.85rem]'
 
 
 
@@ -840,7 +867,7 @@ export const routeCtxItem =
 
 
 
-export const routeCtxItemDanger = 'text-danger hover:bg-[rgb(255_107_107/0.12)]'
+export const routeCtxItemDanger = 'text-danger hover:bg-[rgb(241_106_80/0.12)]'
 
 export const ctxMenuBackdrop = 'fixed inset-0 z-[11999]'
 
@@ -863,9 +890,9 @@ export const canvasResizeHandleCol =
 export const chatPane = 'flex min-h-0 min-w-0 flex-1 flex-col'
 
 export const chatArea =
-  'flex min-w-0 flex-1 flex-col gap-3 overflow-x-hidden overflow-y-auto overscroll-y-contain px-4 py-4 touch-pan-y [overflow-anchor:none]'
+  'flex min-w-0 flex-1 flex-col gap-3 overflow-x-hidden overflow-y-auto overscroll-y-contain px-5 py-5 touch-pan-y [overflow-anchor:none]'
 
-export const chatMessageList = 'flex w-full min-w-0 flex-col gap-3'
+export const chatMessageList = 'flex w-full min-w-0 flex-col gap-4'
 
 /** Message bubbles */
 export const chatMsgRow = 'flex w-full min-w-0'
@@ -874,28 +901,30 @@ export const chatMsgRowUser = 'justify-end'
 
 export const chatMsgRowAssistant = 'justify-start'
 
+/** Cursor chat: user = right-aligned #232323 bubble (r12, borderless);
+ *  assistant = flat text on the chat background. Padding lives on the variants
+ *  so the flat assistant body can span wider than the bubble. */
 export const chatMsgBubble =
-  'max-w-[92%] min-w-0 break-words rounded-lg px-3 py-2.5 text-[0.95rem] leading-[1.45] [overflow-wrap:anywhere]'
+  'max-w-[92%] min-w-0 break-words rounded-xl text-[0.94rem] leading-[1.55] [overflow-wrap:anywhere]'
 
-export const chatMsgUser = 'self-end border border-border bg-bg-tertiary'
+export const chatMsgUser = 'self-end bg-[#232323] px-3.5 py-2.5'
 
-export const chatMsgAssistant = 'self-start border border-border bg-bg-secondary'
+export const chatMsgAssistant = 'self-start px-1 py-1'
 
-export const chatMsgHead = 'mb-1.5 flex items-start justify-between gap-2.5'
+export const chatMsgHead = 'mb-1 flex items-start justify-between gap-2.5'
 
-export const chatMsgRoleRow =
-  'text-[0.75rem] font-semibold uppercase tracking-[0.03em] text-text-secondary'
+export const chatMsgRoleRow = 'text-[0.7rem] font-medium text-text-muted'
 
 export const chatMsgStatusMuted = 'font-medium normal-case tracking-normal'
 
 export const chatMsgWorkflow = '-mt-0.5 shrink-0'
 
-export const chatMsgBody = 'text-[0.95rem] text-text-primary'
+export const chatMsgBody = 'text-[0.94rem] leading-[1.55] text-text-primary'
 
 export const chatMsgBodyUser = 'whitespace-pre-wrap'
 
 export const chatLinkQuiet =
-  'cursor-pointer border-none bg-transparent p-0 font-[inherit] text-[0.75rem] text-accent underline underline-offset-2 hover:text-[#8cb4ff]'
+  'cursor-pointer border-none bg-transparent p-0 font-[inherit] text-[0.75rem] text-accent underline underline-offset-2 hover:text-[#ededed]'
 
 /** Interleaved assistant body */
 export const chatInterleaved =
@@ -931,11 +960,11 @@ export const chatSegmentPulse = 'animate-[chatSegmentPulse_1.6s_ease-in-out_infi
 export const chatSegmentStatusBase =
   'shrink-0 rounded-full px-1.5 py-px text-[0.7rem] uppercase tracking-[0.04em]'
 
-export const chatSegmentStatusOk = 'bg-[rgb(74_222_128/0.16)] text-[rgb(74_222_128)]'
+export const chatSegmentStatusOk = 'bg-[rgb(61_214_140/0.16)] text-[rgb(61_214_140)]'
 
-export const chatSegmentStatusErr = 'bg-[rgb(255_107_107/0.16)] text-[rgb(255_107_107)]'
+export const chatSegmentStatusErr = 'bg-[rgb(241_106_80/0.16)] text-[rgb(241_106_80)]'
 
-export const chatSegmentStatusLive = 'bg-[rgb(107_159_255/0.16)] text-accent'
+export const chatSegmentStatusLive = 'bg-[rgb(255_255_255/0.14)] text-accent'
 
 export const chatSegmentChevron =
   'ml-0.5 h-2 w-2 shrink-0 rotate-[-45deg] border-b-[1.5px] border-r-[1.5px] border-text-secondary transition-transform duration-[120ms] group-open:rotate-45'
@@ -963,16 +992,16 @@ export function chatSegmentRootClass(
 ): string {
   return cn(
     'group overflow-hidden rounded-lg border',
-    kind === 'thinking' && 'border-[rgb(107_159_255/0.32)] bg-[rgb(107_159_255/0.06)]',
+    kind === 'thinking' && 'border-[rgb(255_255_255/0.16)] bg-[rgb(255_255_255/0.05)]',
     kind === 'compaction' && 'border-[rgb(245_158_11/0.35)] bg-[rgb(245_158_11/0.06)]',
     kind === 'tool' && !opts.isError && 'border-border bg-bg-tertiary',
-    kind === 'tool' && opts.isError && 'border-[rgb(255_107_107/0.5)] bg-[rgb(255_107_107/0.06)]',
+    kind === 'tool' && opts.isError && 'border-[rgb(241_106_80/0.5)] bg-[rgb(241_106_80/0.06)]',
   )
 }
 
 /** Composer + status foot */
 export const chatStatusSubfoot =
-  'flex shrink-0 flex-wrap items-baseline justify-between gap-4 px-4 pb-3 pt-1.5 text-[0.76rem] text-text-secondary'
+  'flex shrink-0 flex-wrap items-baseline justify-between gap-4 px-5 pb-2.5 pt-1.5 text-[0.76rem] text-text-secondary'
 
 export const chatModelCaption =
   'min-w-[140px] flex-1 text-left font-mono text-[0.74rem] leading-[1.35]'
@@ -988,15 +1017,15 @@ export const chatTurnActions = 'ml-auto flex shrink-0 items-center gap-2'
 export const chatStopBtnCompact =
   'px-2.5 py-0.5 text-[0.72rem] leading-tight'
 
-export const chatComposer = 'bg-bg-secondary'
+export const chatComposer = ''
 
 export const chatComposerDrag =
-  'bg-[rgb(107_159_255/0.06)] outline outline-2 outline-[rgb(107_159_255/0.45)] outline-offset-[-2px]'
+  'bg-[rgb(255_255_255/0.05)] outline outline-2 outline-[rgb(255_255_255/0.3)] outline-offset-[-2px]'
 
-export const chatQueueStrip = 'flex flex-col gap-1.5 border-t border-border px-4 pt-2'
+export const chatQueueStrip = 'flex flex-col gap-1.5 px-5 pb-1 pt-2'
 
 export const chatQueueItem =
-  'flex items-center gap-2 rounded-lg border border-dashed border-border bg-[rgb(107_159_255/0.05)] px-2 py-1.5 text-[0.82rem]'
+  'flex items-center gap-2 rounded-lg border border-dashed border-border bg-[rgb(255_255_255/0.04)] px-2 py-1.5 text-[0.82rem]'
 
 export const chatQueueItemDragging = 'opacity-55'
 
@@ -1007,12 +1036,12 @@ export const chatQueueText =
   'min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap'
 
 export const chatQueueSendNow =
-  'shrink-0 cursor-pointer rounded-md border border-[rgb(107_159_255/0.45)] bg-[rgb(107_159_255/0.12)] px-2 py-0.5 text-[0.75rem] text-text-primary hover:bg-[rgb(107_159_255/0.22)] disabled:cursor-not-allowed disabled:opacity-50'
+  'shrink-0 cursor-pointer rounded-md border border-[rgb(255_255_255/0.3)] bg-[rgb(255_255_255/0.08)] px-2 py-0.5 text-[0.75rem] text-text-primary hover:bg-[rgb(255_255_255/0.16)] disabled:cursor-not-allowed disabled:opacity-50'
 
 export const chatQueueRemove =
   'shrink-0 cursor-pointer border-none bg-transparent px-1 py-0 text-base leading-none text-text-secondary hover:text-text-primary'
 
-export const chatAttachmentStrip = 'flex flex-wrap gap-2 border-t border-border px-4 pt-2'
+export const chatAttachmentStrip = 'flex flex-wrap gap-2 px-5 pb-1 pt-1'
 
 export const chatAttachmentChip =
   'inline-flex max-w-full items-center gap-2 rounded-lg border border-border bg-bg-primary py-1 pl-1 pr-2 text-[0.78rem]'
@@ -1028,16 +1057,23 @@ export const chatAttachmentChipName =
 export const chatAttachmentChipRemove =
   'shrink-0 cursor-pointer rounded border-none bg-transparent px-1 py-0 text-base leading-none text-text-secondary hover:bg-[rgb(255_255_255/0.06)] hover:text-text-primary'
 
-export const chatInputRow = 'flex gap-2 border-t border-border bg-bg-secondary px-4 py-3'
+/** Cursor-style composer: one rounded field holding the textarea + send.
+ *  Queue/attachment strips float above it (no border-t). */
+export const chatInputRow =
+  'mx-5 mb-3 mt-1 flex items-end gap-2 rounded-xl border border-border bg-[#1e1e1e] px-3 py-2.5'
 
 export const chatInputTextarea =
-  'min-h-11 max-h-[120px] flex-1 resize-none rounded-md border border-border bg-bg-primary px-2.5 py-2.5 font-[inherit] text-text-primary'
+  'max-h-[160px] min-h-9 flex-1 resize-none border-0 bg-transparent px-0 py-1 font-[inherit] text-[0.92rem] leading-[1.5] text-text-primary placeholder:text-text-muted focus:outline-none'
 
 export const chatInputSendBtn =
-  'cursor-pointer rounded-md border-none bg-accent px-4 py-2.5 font-semibold text-[#0a0c0f] disabled:cursor-not-allowed disabled:opacity-50'
+  'shrink-0 cursor-pointer self-end rounded-lg border-none bg-accent px-3.5 py-2 text-[0.85rem] font-medium text-[#111111] transition-[background,opacity] duration-[120ms] hover:bg-[#e2e2e2] disabled:cursor-not-allowed disabled:opacity-50'
+
+/** Quiet model-bar pills (ChatModelBar selects/inputs). */
+export const modelBarPill =
+  'box-border cursor-pointer rounded-full border border-border bg-bg-primary px-2.5 py-1 font-[inherit] text-[0.72rem] text-text-secondary transition-[border-color,color,background] duration-[120ms] hover:border-accent/40 hover:text-text-primary focus:border-accent/55 focus:outline-none'
 
 export const chatStopBtn =
-  'shrink-0 cursor-pointer rounded-md border border-[rgb(220_90_90/0.55)] bg-[rgb(220_90_90/0.12)] text-[#f0a8a8] hover:bg-[rgb(220_90_90/0.22)] disabled:cursor-not-allowed disabled:opacity-50'
+  'shrink-0 cursor-pointer rounded-md border border-[rgb(241_106_80/0.55)] bg-[rgb(241_106_80/0.12)] text-[#f6b3a4] hover:bg-[rgb(241_106_80/0.22)] disabled:cursor-not-allowed disabled:opacity-50'
 
 /** Panel shell — skills tab, skill-route tab */
 export const panelShell =
@@ -1047,14 +1083,14 @@ export const panelTitle = 'mt-0 text-base'
 
 /** Agent widget tool log */
 export const toolLogPre =
-  'mt-2 max-h-[200px] overflow-auto rounded-md bg-[#0a0c0f] p-2 font-mono text-[0.8rem]'
+  'mt-2 max-h-[200px] overflow-auto rounded-md bg-[#0d0d0d] p-2 font-mono text-[0.8rem]'
 
 /** Settings-style caption (workspace hints) */
 export const settingsCaption = 'm-0 text-[0.78rem] leading-[1.4] text-text-secondary'
 
 /** Centered app modals */
 export const modalOverlay =
-  'fixed inset-0 z-[10000] flex items-center justify-center bg-[rgb(8_10_14/0.75)] p-6 backdrop-blur-[3px]'
+  'fixed inset-0 z-[10000] flex items-center justify-center bg-[rgb(0_0_0/0.7)] p-6 backdrop-blur-[3px]'
 
 export const modalShell =
   'relative w-[min(380px,100%)] rounded-xl border border-border bg-bg-secondary p-[22px_24px] shadow-[0_20px_56px_rgb(0_0_0/0.55)]'
@@ -1080,7 +1116,7 @@ export const modalLabel =
   'mb-2 block text-[0.78rem] font-medium uppercase tracking-[0.04em] text-text-secondary'
 
 export const modalInput =
-  'box-border w-full rounded-lg border border-border bg-bg-primary px-3 py-2.5 font-[inherit] text-[0.92rem] text-text-primary outline-none focus:border-accent-muted focus:shadow-[0_0_0_2px_rgb(107_159_255/0.2)]'
+  'box-border w-full rounded-lg border border-border bg-bg-primary px-3 py-2.5 font-[inherit] text-[0.92rem] text-text-primary outline-none focus:border-accent-muted focus:shadow-[0_0_0_2px_rgb(255_255_255/0.14)]'
 
 export const modalInputFlex = `${modalInput} min-w-0 flex-1`
 
@@ -1104,7 +1140,7 @@ export const workspaceManageTableTd = 'border-b border-border px-2.5 py-1.5 alig
 
 export const workspaceTableColEdit = 'w-[1%] whitespace-nowrap text-right'
 
-export const workspaceTableRowActive = '[&_td]:bg-[rgb(107_159_255/0.1)]'
+export const workspaceTableRowActive = '[&_td]:bg-[rgb(255_255_255/0.07)]'
 
 export const workspaceTablePath =
   'block max-w-[min(52ch,100%)] overflow-hidden text-ellipsis whitespace-nowrap text-[0.78rem] text-text-secondary'
@@ -1119,7 +1155,7 @@ export const workspaceEditDisclosureInner = 'min-h-0 overflow-hidden'
 export const workspaceModalSection = 'mb-3'
 
 export const workspaceModalSectionAdd =
-  'mt-5 rounded-[10px] border border-[rgb(107_159_255/0.2)] bg-[rgb(107_159_255/0.05)] px-3 py-2.5'
+  'mt-5 rounded-[10px] border border-[rgb(255_255_255/0.14)] bg-[rgb(255_255_255/0.04)] px-3 py-2.5'
 
 export const workspaceModalSectionTitle =
   'mb-1.5 mt-0 text-[0.72rem] font-semibold uppercase tracking-[0.05em] text-text-secondary'

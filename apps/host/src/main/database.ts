@@ -38,6 +38,8 @@ export interface ConversationRow {
   image_model_provider: string | null
   /** Per-chat thinking-level override (off/minimal/low/medium/high/[xhigh|max]; null = Pi default). */
   thinking_level: string | null
+  /** Retention v2: ms timestamp when the chat was archived (auto or manual); NULL = active. */
+  archived_at?: number | null
 }
 
 /** Sylo workspace: Pi cwd segment + chat grouping + optional per-workspace excluded capabilities. */
@@ -280,6 +282,18 @@ function migrateLegacySchema(d: Database.Database, userDataPath: string): void {
   }
   if (!tableHasColumn(d, 'conversations', 'thinking_level')) {
     d.exec('ALTER TABLE conversations ADD COLUMN thinking_level TEXT')
+  }
+  // Side chats (apps pane, Phase 7): child conversations scoped to a parent
+  // chat. Hidden from the sidebar (listConversations filters them out); a
+  // parent's delete cascades to its side chats.
+  if (!tableHasColumn(d, 'conversations', 'parent_conversation_id')) {
+    d.exec('ALTER TABLE conversations ADD COLUMN parent_conversation_id TEXT')
+  }
+  // Auto-archive (retention v2): chats idle past the retention window are
+  // archived (hidden from the sidebar, kept in the DB) instead of deleted.
+  // ms timestamp of when it was archived; NULL = active.
+  if (!tableHasColumn(d, 'conversations', 'archived_at')) {
+    d.exec('ALTER TABLE conversations ADD COLUMN archived_at INTEGER')
   }
 
 
@@ -694,25 +708,26 @@ export function resetPrimaryWorkspacePiProjectDir(): string {
 }
 
 export function listConversations(workspaceId?: string): ConversationRow[] {
+  // Side chats (parent_conversation_id set) never appear in the sidebar.
   if (workspaceId === undefined) {
     return getDb()
       .prepare(
-        'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level FROM conversations ORDER BY updated_at DESC',
+        'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level FROM conversations WHERE parent_conversation_id IS NULL AND archived_at IS NULL ORDER BY updated_at DESC',
       )
       .all() as ConversationRow[]
   }
   return getDb()
     .prepare(
-      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level FROM conversations WHERE workspace_id = ? ORDER BY updated_at DESC',
+      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level FROM conversations WHERE workspace_id = ? AND parent_conversation_id IS NULL AND archived_at IS NULL ORDER BY updated_at DESC',
     )
     .all(workspaceId) as ConversationRow[]
 }
 
-/** Conversations whose last activity (`updated_at`) is before the cutoff (exclusive). */
+/** Non-archived, non-child conversations whose last activity is before the cutoff (used by the auto-archive sweep). */
 export function listConversationsUpdatedBefore(updatedBeforeMs: number): ConversationRow[] {
   return getDb()
     .prepare(
-      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level FROM conversations WHERE updated_at < ? ORDER BY updated_at ASC',
+      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level FROM conversations WHERE updated_at < ? AND parent_conversation_id IS NULL AND archived_at IS NULL ORDER BY updated_at ASC',
     )
     .all(updatedBeforeMs) as ConversationRow[]
 }
@@ -725,6 +740,8 @@ export function findLatestEmptyConversationId(workspaceId: string): string | und
     .prepare(
       `SELECT c.id FROM conversations c
        WHERE c.workspace_id = ?
+       AND c.parent_conversation_id IS NULL
+       AND c.archived_at IS NULL
        AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
        ORDER BY c.updated_at DESC
        LIMIT 1`,
@@ -756,6 +773,86 @@ export function createConversation(title = '', workspaceId?: string): Conversati
 export function setConversationWorkspace(id: string, workspaceId: string): void {
   const now = Date.now()
   getDb().prepare('UPDATE conversations SET workspace_id = ?, updated_at = ? WHERE id = ?').run(workspaceId, now, id)
+}
+
+// ── Archive (retention v2) ────────────────────────────────────────────
+
+/**
+ * Archive or unarchive a chat. Archive hides it from the sidebar main list
+ * without deleting anything; unarchive clears the stamp and bumps
+ * `updated_at` so the chat returns to the top of its workspace section.
+ */
+export function setConversationArchived(id: string, archived: boolean): void {
+  const d = getDb()
+  if (archived) {
+    d.prepare('UPDATE conversations SET archived_at = ? WHERE id = ?').run(Date.now(), id)
+  } else {
+    d.prepare('UPDATE conversations SET archived_at = NULL, updated_at = ? WHERE id = ?').run(Date.now(), id)
+  }
+}
+
+/** Archived top-level chats (side chats are never listed), most recently archived first. */
+export function listArchivedConversations(workspaceId?: string): ConversationRow[] {
+  const cols =
+    'id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, archived_at'
+  if (workspaceId === undefined) {
+    return getDb()
+      .prepare(
+        `SELECT ${cols} FROM conversations WHERE archived_at IS NOT NULL AND parent_conversation_id IS NULL ORDER BY archived_at DESC`,
+      )
+      .all() as ConversationRow[]
+  }
+  return getDb()
+    .prepare(
+      `SELECT ${cols} FROM conversations WHERE archived_at IS NOT NULL AND parent_conversation_id IS NULL AND workspace_id = ? ORDER BY archived_at DESC`,
+    )
+    .all(workspaceId) as ConversationRow[]
+}
+
+export function conversationHasMessages(id: string): boolean {
+  const row = getDb().prepare('SELECT 1 AS x FROM messages WHERE conversation_id = ? LIMIT 1').get(id)
+  return row !== undefined
+}
+
+// ── Side chats (apps pane, Phase 7) ────────────────────────────────────────
+
+/** Create a child conversation scoped to a parent chat (same workspace). */
+export function createSideConversation(
+  parentConversationId: string,
+  title = '',
+): ConversationRow | null {
+  const parent = getConversation(parentConversationId)
+  if (!parent) return null
+  const id = randomUUID()
+  const now = Date.now()
+  const finalTitle = title.trim() || `Side · ${parent.title.trim() || 'chat'}`.slice(0, 80)
+  getDb()
+    .prepare(
+      'INSERT INTO conversations (id, title, created_at, updated_at, workspace_id, pi_session_relpath, parent_conversation_id) VALUES (?, ?, ?, ?, ?, NULL, ?)',
+    )
+    .run(id, finalTitle, now, now, parent.workspace_id, parentConversationId)
+  return {
+    id,
+    title: finalTitle,
+    created_at: now,
+    updated_at: now,
+    workspace_id: parent.workspace_id,
+    pi_session_relpath: null,
+    model_provider: null,
+    model_id: null,
+    image_model_id: null,
+    image_model_provider: null,
+    thinking_level: null,
+  }
+}
+
+/** Side chats of one parent, oldest first (chat order). */
+export function listSideConversations(parentConversationId: string): ConversationRow[] {
+  return getDb()
+    .prepare(
+      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level FROM conversations WHERE parent_conversation_id = ? ORDER BY created_at ASC',
+    )
+    .all(parentConversationId) as ConversationRow[]
 }
 
 export function setConversationSessionRelPath(id: string, relpath: string | null): void {
@@ -1011,6 +1108,20 @@ export function deleteWorkspaceRow(id: string): boolean {
 export function deleteConversation(id: string): void {
   const d = getDb()
   d.transaction(() => {
+    // Cascade: a parent chat's side chats die with it (recursively, though
+    // side chats never nest deeper than one level).
+    const children = d
+      .prepare('SELECT id FROM conversations WHERE parent_conversation_id = ?')
+      .all(id) as { id: string }[]
+    for (const c of children) {
+      deleteWebAccessRunsForConversation(c.id, d)
+      deleteThinkTankSessionsForConversation(c.id, d)
+      if (tableExists(d, 'agent_tasks')) {
+        d.prepare('DELETE FROM agent_tasks WHERE conversation_id = ?').run(c.id)
+      }
+      d.prepare('DELETE FROM messages WHERE conversation_id = ?').run(c.id)
+      d.prepare('DELETE FROM conversations WHERE id = ?').run(c.id)
+    }
     deleteWebAccessRunsForConversation(id, d)
     deleteThinkTankSessionsForConversation(id, d)
     if (tableExists(d, 'agent_tasks')) {
@@ -1024,9 +1135,27 @@ export function deleteConversation(id: string): void {
 export function listMessages(conversationId: string): MessageRow[] {
   return getDb()
     .prepare(
-      'SELECT id, conversation_id, role, content, tool_calls_json, status, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC',
+      // rowid tiebreak: same-ms inserts (e.g. a backdated compaction notice vs the
+      // user row) render in insertion order instead of an unspecified order.
+      'SELECT id, conversation_id, role, content, tool_calls_json, status, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC',
     )
     .all(conversationId) as MessageRow[]
+}
+
+/** created_at of one message, or null when the id is unknown. */
+export function getMessageCreatedAt(id: string): number | null {
+  const row = getDb().prepare('SELECT created_at FROM messages WHERE id = ?').get(id) as
+    | { created_at: number }
+    | undefined
+  return row ? row.created_at : null
+}
+
+/** True when some message in the conversation already occupies this exact created_at. */
+export function messageCreatedAtExists(conversationId: string, createdAt: number): boolean {
+  const row = getDb()
+    .prepare('SELECT 1 FROM messages WHERE conversation_id = ? AND created_at = ? LIMIT 1')
+    .get(conversationId, createdAt)
+  return row != null
 }
 
 /**
@@ -1084,15 +1213,17 @@ export function insertMessage(
   role: MessageRole,
   content: string,
   status: MessageStatus = 'complete',
+  /** Override the row timestamp (e.g. backdating a compaction notice mid-turn). */
+  createdAt?: number,
 ): MessageRow {
   const id = randomUUID()
-  const now = Date.now()
+  const now = createdAt ?? Date.now()
   getDb()
     .prepare(
       'INSERT INTO messages (id, conversation_id, role, content, tool_calls_json, status, created_at) VALUES (?, ?, ?, ?, NULL, ?, ?)',
     )
     .run(id, conversationId, role, content, status, now)
-  getDb().prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').run(now, conversationId)
+  getDb().prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').run(Date.now(), conversationId)
   return {
     id,
     conversation_id: conversationId,

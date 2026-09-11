@@ -129,7 +129,7 @@ export function ChatMarkdownPath({ rawPath, block, workspaceId }: Props): React.
         </button>
       </span>
       {hint ?
-        <span className="shrink-0 text-[0.65rem] text-[rgb(255_152_152)]" role="status">
+        <span className="shrink-0 text-[0.65rem] text-[rgb(248_140_120)]" role="status">
           {hint}
         </span>
       : null}

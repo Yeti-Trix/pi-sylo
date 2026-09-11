@@ -1,4 +1,4 @@
-﻿import {
+import {
   classifySyloBuiltinExtension,
   syloBuiltinExtensionHint,
 } from './sylo-builtin-extensions.js'
@@ -49,7 +49,7 @@ export const SYLO_OPTIONAL_PACKAGES: readonly SyloOptionalPackage[] = [
     requiresSyloUi: false,
   },
   // 2026-09-02: sylo-template-docx-writer, sylo-machine-expert, sylo-codesys,
-  // sylo-logicforge, sylo-ignition, sylo-fieldbrain moved to the operator's
+  // sylo-allen-bradley, sylo-ignition, sylo-fieldbrain moved to the operator's
   // sylo-tools-controls bundle; sylo-onenote moved to sylo-tools-onenote.
   // Installed via ~/.pi/agent/settings.json packages (see README there).
   {

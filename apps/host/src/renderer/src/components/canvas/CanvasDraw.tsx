@@ -36,9 +36,9 @@ type Props = {
   backupRef: React.MutableRefObject<string | null>
 }
 
-const BG_DARK = '#0f1115'
+const BG_DARK = '#101010'
 const BG_LIGHT = '#ffffff'
-const COLORS = ['#e6e9ef', '#1a1d23', '#6b9fff', '#ff6b6b', '#69db7c', '#f5c518', '#c08bff']
+const COLORS = ['#e6e9ef', '#1a1d23', '#d4d4d4', '#f16a50', '#3dd68c', '#f5c518', '#c08bff']
 const WIDTHS = [2, 4, 7]
 
 export function CanvasDraw({ backupRef }: Props): React.ReactElement {

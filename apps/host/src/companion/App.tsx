@@ -19,6 +19,7 @@ import {
   logout,
     rebuildSylo,
   renameConversation,
+  setConversationArchived,
   sendMessage,
     steerTurn,
   deliverQueued,
@@ -155,6 +156,9 @@ export function App(): React.ReactElement {
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<Conversation | null>(null)
+  const [menuTarget, setMenuTarget] = useState<Conversation | null>(null)
+  const [showArchived, setShowArchived] = useState(false)
+  const [archivedConversations, setArchivedConversations] = useState<Conversation[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [liveDelta, setLiveDelta] = useState<Record<string, string>>({})
@@ -173,6 +177,7 @@ export function App(): React.ReactElement {
     id: t.id,
     label: t.label,
     icon: t.icon,
+    appBase: t.appBase,
   }))
   const [showChatsList, setShowChatsList] = useState(false)
   const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([])
@@ -187,6 +192,9 @@ export function App(): React.ReactElement {
   const pendingConvScrollRef = useRef(false)
   const prevMessagesLenRef = useRef(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const longPressTimerRef = useRef<number | null>(null)
+  const longPressFiredRef = useRef(false)
+  const pressStartRef = useRef<{ x: number; y: number } | null>(null)
   const activeIdRef = useRef<string | null>(null)
   const workspaceIdRef = useRef('')
   activeIdRef.current = activeId
@@ -704,11 +712,96 @@ export function App(): React.ReactElement {
         next.delete(target.id)
         return next
       })
-      if (workspaceId) await loadConversations(workspaceId, { silent: true })
+      if (workspaceId) {
+        await loadConversations(workspaceId, { silent: true })
+        await loadArchived(workspaceId)
+      }
     } catch (e) {
       setAuthError(e instanceof Error ? e.message : String(e))
     }
   }
+
+  const loadArchived = useCallback(async (wid: string) => {
+    if (!wid) return
+    try {
+      const res = await fetchConversations(wid, true)
+      setArchivedConversations(res.conversations)
+    } catch {
+      /* keep the previous archived list on failure */
+    }
+  }, [])
+
+  // Load the archived list up front so the "Archived (n)" toggle shows a count.
+  useEffect(() => {
+    if (workspaceId) void loadArchived(workspaceId)
+  }, [workspaceId, loadArchived])
+
+  const openChatMenu = useCallback((c: Conversation) => {
+    if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(10)
+    setMenuTarget(c)
+  }, [])
+
+  const endChatLongPress = useCallback(() => {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current)
+      longPressTimerRef.current = null
+    }
+    // Long-press fired: swallow the click that follows the touch-up.
+    if (longPressFiredRef.current) {
+      window.setTimeout(() => {
+        longPressFiredRef.current = false
+      }, 400)
+    }
+  }, [])
+
+  const startChatLongPress = useCallback(
+    (c: Conversation) => (e: { clientX: number; clientY: number }) => {
+      if (renamingId) return
+      pressStartRef.current = { x: e.clientX, y: e.clientY }
+      longPressFiredRef.current = false
+      if (longPressTimerRef.current !== null) window.clearTimeout(longPressTimerRef.current)
+      longPressTimerRef.current = window.setTimeout(() => {
+        longPressTimerRef.current = null
+        longPressFiredRef.current = true
+        openChatMenu(c)
+      }, 500)
+    },
+    [renamingId, openChatMenu],
+  )
+
+  const chatRowPointerMove = useCallback(
+    (e: { clientX: number; clientY: number }) => {
+      const start = pressStartRef.current
+      if (!start || longPressTimerRef.current === null) return
+      if (Math.abs(e.clientX - start.x) > 10 || Math.abs(e.clientY - start.y) > 10) endChatLongPress()
+    },
+    [endChatLongPress],
+  )
+
+  const handleArchiveToggle = useCallback(
+    async (c: Conversation) => {
+      setMenuTarget(null)
+      try {
+        const r = await setConversationArchived(c.id, c.archived_at == null)
+        if (!r.ok) {
+          setAuthError('Could not archive chat.')
+          return
+        }
+        if (c.archived_at == null && activeId === c.id) {
+          // Archived the open chat — drop back to the list.
+          setActiveId(null)
+          setMessages([])
+        }
+        if (workspaceId) {
+          await loadConversations(workspaceId, { silent: true })
+          await loadArchived(workspaceId)
+        }
+      } catch (e) {
+        setAuthError(e instanceof Error ? e.message : String(e))
+      }
+    },
+    [activeId, workspaceId, loadConversations, loadArchived],
+  )
 
   if (authenticated === null) {
     return (
@@ -737,7 +830,7 @@ export function App(): React.ReactElement {
         <div className="flex min-h-0 flex-1 flex-col">
           <iframe
             key={companionTab}
-            src={`${personalManifest!.appBase}?tab=${companionTab}`}
+            src={`${pluginTab.appBase ?? personalManifest!.appBase}?tab=${companionTab}`}
             title={pluginTab.label}
             className="min-h-0 w-full flex-1 border-0 bg-bg-primary"
           />
@@ -859,9 +952,9 @@ export function App(): React.ReactElement {
         <InstallHintBanner />
         <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border bg-bg-secondary px-4 py-2.5">
           <div className="min-w-0">
-            <h1 className="m-0 truncate text-base font-semibold">{personalManifest!.landing.title}</h1>
+            <h1 className="m-0 truncate text-base font-semibold">{personalManifest!.landing?.title ?? ''}</h1>
             <p className="m-0 truncate text-xs text-text-secondary">
-              {landingEntries!.length === 1 ? landingEntries![0]?.title || personalManifest!.landing.singleLabel : `${landingEntries!.length} ${personalManifest!.landing.countNoun}`}
+              {landingEntries!.length === 1 ? landingEntries![0]?.title || personalManifest!.landing?.singleLabel || '' : `${landingEntries!.length} ${personalManifest!.landing?.countNoun ?? ''}`}
             </p>
           </div>
           <button
@@ -875,8 +968,8 @@ export function App(): React.ReactElement {
         <div className="flex min-h-0 flex-1 flex-col">
           <iframe
             key="chat-landing-personal"
-            src={`${personalManifest!.appBase}?tab=${personalManifest!.tabs[0]?.id ?? ''}`}
-            title={personalManifest!.landing.title}
+            src={`${personalManifest!.tabs[0]?.appBase ?? personalManifest!.appBase}?tab=${personalManifest!.tabs[0]?.id ?? ''}`}
+            title={personalManifest!.landing?.title ?? ''}
             className="min-h-0 w-full flex-1 border-0 bg-bg-primary"
           />
         </div>
@@ -913,7 +1006,7 @@ export function App(): React.ReactElement {
                 className="shrink-0 rounded-lg border border-border px-3 py-2 text-sm text-accent"
                 onClick={() => setShowChatsList(false)}
               >
-                ← {personalManifest!.landing.title}
+                ← {personalManifest!.landing?.title ?? ''}
               </button>
             ) : null}
             <button type="button" className="shrink-0 text-sm text-text-secondary" onClick={() => void handleLogout()}>
@@ -950,17 +1043,50 @@ export function App(): React.ReactElement {
           <div className="p-4 text-sm text-danger">{authError}</div>
         : null}
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain">
+          <div className="flex items-center justify-between px-3 py-2 text-xs text-text-secondary">
+            {showArchived ? (
+              <button type="button" className="underline" onClick={() => setShowArchived(false)}>
+                ← All chats
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="underline"
+                onClick={() => {
+                  setShowArchived(true)
+                  if (workspaceId) void loadArchived(workspaceId)
+                }}
+              >
+                Archived ({archivedConversations.length})
+              </button>
+            )}
+          </div>
+          {showArchived && archivedConversations.length === 0 ? (
+            <p className="p-4 text-sm text-text-secondary">No archived chats.</p>
+          ) : null}
           {loadingList ?
             <p className="p-4 text-sm text-text-secondary">Loading…</p>
           : conversations.length === 0 ?
             <p className="p-4 text-sm text-text-secondary">No chats in {activeWorkspaceName}.</p>
-                    : conversations.map((c) => {
+                    : (showArchived ? archivedConversations : conversations).map((c) => {
             const status = convStatusDot({ running: runningIds.has(c.id), unread: unreadIds.has(c.id) })
+            const archived = c.archived_at != null
             const renaming = renamingId === c.id
             return (
               <div
                 key={c.id}
                 className="flex items-center gap-2 border-b border-border px-3 py-2.5 active:bg-bg-tertiary"
+                onPointerDown={(e) => startChatLongPress(c)(e)}
+                onPointerUp={endChatLongPress}
+                onPointerCancel={endChatLongPress}
+                onPointerLeave={endChatLongPress}
+                onPointerMove={chatRowPointerMove}
+                onContextMenu={(e) => {
+                  // Desktop/PWA right-click → same menu as long-press.
+                  e.preventDefault()
+                  endChatLongPress()
+                  openChatMenu(c)
+                }}
               >
                 <ConvStatusIndicator status={status} />
                 {renaming ? (
@@ -979,53 +1105,47 @@ export function App(): React.ReactElement {
                   <button
                     type="button"
                     className="min-w-0 flex-1 text-left"
-                    onClick={() => openConversation(c.id)}
+                    onClick={() => {
+                      if (longPressFiredRef.current) {
+                        longPressFiredRef.current = false
+                        return
+                      }
+                      openConversation(c.id)
+                    }}
                   >
                     <span className="block truncate font-medium">{c.title || 'Untitled chat'}</span>
                   </button>
                 )}
-                <div className="flex shrink-0 items-center gap-1">
-                  <button
-                    type="button"
-                    className="rounded-md px-2 py-1 text-text-secondary active:bg-bg-tertiary"
-                    aria-label={`Rename ${c.title || 'chat'}`}
-                    title="Rename"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setRenamingId(c.id)
-                      setRenameDraft(c.title || '')
-                    }}
-                  >
-                    ✎
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded-md px-2 py-1 text-text-secondary active:bg-bg-tertiary"
-                    aria-label={`Delete ${c.title || 'chat'}`}
-                    title="Delete"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setDeleteTarget(c)
-                    }}
-                  >
-                    ×
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  className="shrink-0 rounded-md px-2 py-1 text-text-secondary active:bg-bg-tertiary"
+                  aria-label={`Options for ${c.title || 'chat'}`}
+                  title="Chat options"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    openChatMenu(c)
+                  }}
+                >
+                  ⋯
+                </button>
               </div>
             )
           })
           }
         </div>
-        <footer className="shrink-0 border-t border-border p-3">
-          <button
-            type="button"
-            className="w-full rounded-lg bg-accent py-3 font-medium text-bg-primary disabled:opacity-40"
-            disabled={busy}
-            onClick={() => void handleNewChat()}
-          >
-            New chat
-          </button>
-        </footer>
+        {!showArchived ? (
+          <footer className="shrink-0 border-t border-border p-3">
+            <button
+              type="button"
+              className="w-full rounded-lg bg-accent py-3 font-medium text-bg-primary disabled:opacity-40"
+              disabled={busy}
+              onClick={() => void handleNewChat()}
+            >
+              New chat
+            </button>
+          </footer>
+        ) : null}
                 {showTabBar ?
           <BottomTabBar active={companionTab} onChange={setCompanionTab} pluginTabs={pluginTabs} />
         : null}
@@ -1052,6 +1172,48 @@ export function App(): React.ReactElement {
                   Delete
                 </button>
               </div>
+            </div>
+          </div>
+        ) : null}
+        {menuTarget ? (
+          <div className="fixed inset-0 z-50 bg-black/50" onClick={() => setMenuTarget(null)}>
+            <div
+              className="absolute inset-x-0 bottom-0 mx-auto max-w-md rounded-t-2xl border border-border bg-bg-secondary p-2 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="truncate px-3 py-2 text-xs font-medium text-text-secondary">
+                {menuTarget.title || 'Untitled chat'}
+              </div>
+              <button
+                type="button"
+                className="block w-full rounded-lg px-3 py-3 text-left text-sm text-text-primary active:bg-bg-tertiary"
+                onClick={() => {
+                  const id = menuTarget.id
+                  const title = menuTarget.title || ''
+                  setMenuTarget(null)
+                  setRenamingId(id)
+                  setRenameDraft(title)
+                }}
+              >
+                ✏️ Rename
+              </button>
+              <button
+                type="button"
+                className="block w-full rounded-lg px-3 py-3 text-left text-sm text-text-primary active:bg-bg-tertiary"
+                onClick={() => void handleArchiveToggle(menuTarget)}
+              >
+                {menuTarget.archived_at != null ? '📥 Unarchive' : '📤 Archive'}
+              </button>
+              <button
+                type="button"
+                className="block w-full rounded-lg px-3 py-3 text-left text-sm text-danger active:bg-bg-tertiary"
+                onClick={() => {
+                  setDeleteTarget(menuTarget)
+                  setMenuTarget(null)
+                }}
+              >
+                🗑 Delete
+              </button>
             </div>
           </div>
         ) : null}

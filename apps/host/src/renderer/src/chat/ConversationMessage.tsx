@@ -111,6 +111,10 @@ type ChatMessageRowProps = {
   localImageUrl?: (path: string) => string | null
   thinkTank?: ThinkTankBubbleMeta
   workspaceId?: string
+  /** Agent checkpoint (per-turn undo): this assistant reply has a pre-turn
+   *  snapshot, so the operator can restore the workspace to before it. */
+  canUndoTurn?: boolean
+  onUndoTurn?: () => void
 }
 
 function segmentOverridesEqualForMessage(
@@ -165,6 +169,8 @@ function messageRowPropsEqual(prev: ChatMessageRowProps, next: ChatMessageRowPro
   if (prev.liveWorkflowForMessage !== next.liveWorkflowForMessage) return false
   if (prev.localImageUrl !== next.localImageUrl) return false
   if (prev.workspaceId !== next.workspaceId) return false
+  if (prev.canUndoTurn !== next.canUndoTurn) return false
+  if (prev.onUndoTurn !== next.onUndoTurn) return false
   if (prev.onSegmentToggle !== next.onSegmentToggle) return false
   if (prev.subagentTasks !== next.subagentTasks) return false
   if (prev.onSubagentNotice !== next.onSubagentNotice) return false
@@ -182,6 +188,8 @@ type InlineSegmentProps = {
   segment: AssistantSegment
   autoOpen: boolean
   override: boolean | undefined
+  /** False once the turn's final message is in — everything defaults collapsed. */
+  messageStreaming: boolean
   onToggle: (next: boolean) => void
   resolveImageUrl?: (path: string) => string | null
 }
@@ -244,6 +252,7 @@ function InlineAssistantSegment({
   segment,
   autoOpen,
   override,
+  messageStreaming,
   onToggle,
   resolveImageUrl,
 }: InlineSegmentProps): React.ReactElement {
@@ -266,10 +275,10 @@ function InlineAssistantSegment({
     onToggle(detailsOpenFromToggleEvent(e))
   }
   const isLive =
-    segment.kind === 'thinking' ? segment.live
+    (segment.kind === 'thinking' ? segment.live
     : segment.kind === 'tool' ? segment.endTs === null
     : segment.kind === 'compaction' ? segment.live
-    : false
+    : false) && messageStreaming
   const cls = chatSegmentRootClass(
     segment.kind,
     { isError: segment.kind === 'tool' && segment.isError },
@@ -340,7 +349,7 @@ function InlineAssistantSegment({
       <details ref={detailsRef} className={cls} onToggle={handleToggle}>
         <summary className={chatSegmentSummary}>
           <span
-            className={cn(chatSegmentIcon, 'text-[rgb(107_159_255/0.9)]', isLive && chatSegmentPulse)}
+            className={cn(chatSegmentIcon, 'text-[rgb(255_255_255/0.75)]', isLive && chatSegmentPulse)}
             aria-hidden="true"
           >
             ◆
@@ -378,7 +387,7 @@ function InlineAssistantSegment({
         <span
           className={cn(
             chatSegmentIcon,
-            segment.isError ? 'text-[rgb(255_107_107)]' : 'text-text-secondary',
+            segment.isError ? 'text-[rgb(241_106_80)]' : 'text-text-secondary',
             segment.endTs === null && chatSegmentPulse,
           )}
           aria-hidden="true"
@@ -542,10 +551,38 @@ function InterleavedAssistantBody({
   )
 
   const pieces: React.ReactNode[] = []
+  const galleries: React.ReactNode[] = []
   let cursor = 0
+  /** Completed compaction that already renders as the persisted system-row card. */
+  const isCardCoveredCompaction = (seg: AssistantSegment): boolean =>
+    seg.kind === 'compaction' && !seg.live &&
+    (seg.tokensBefore != null || seg.tokensAfter != null || Boolean(seg.summary?.trim()))
+  // Cursor-style grouping: once the message completes, the whole work timeline
+  // (reasoning + tool calls + between-steps text) collapses into ONE expandable
+  // row; only tool-result galleries and the final answer text stay outside.
+  let lastVisibleIndex = -1
   ordered.forEach((seg, i) => {
+    if (!isCardCoveredCompaction(seg)) lastVisibleIndex = i
+  })
+  const grouped = !isStreaming && lastVisibleIndex >= 0
+  let groupEndOffset = 0
+  if (grouped) {
+    let c = 0
+    for (let i = 0; i <= lastVisibleIndex; i++) {
+      const seg = ordered[i]!
+      const rawOffset = seg.textOffset ?? body.length
+      c = Math.max(c, Math.min(rawOffset, body.length))
+    }
+    groupEndOffset = c
+  }
+  ordered.forEach((seg, i) => {
+    if (grouped && i > lastVisibleIndex) return
     const rawOffset = seg.textOffset ?? body.length
     const offset = Math.max(cursor, Math.min(rawOffset, body.length))
+    // Completed compactions with a persisted notice (tokens/summary present) are
+    // rendered once as the system-row card — skip the inline duplicate here.
+    // Live "Compacting context…" still shows inline as the only indicator.
+    const cardCoveredCompaction = isCardCoveredCompaction(seg)
     if (offset > cursor) {
       const chunk = body.slice(cursor, offset)
       if (chunk.trim().length > 0) {
@@ -561,17 +598,23 @@ function InterleavedAssistantBody({
       cursor = offset
     }
     const gap = gapByBeforeId.get(seg.id)
-    if (gap) {
+    if (gap && !cardCoveredCompaction) {
       pieces.push(
         <InlineTimingGap key={`gap-before-${seg.id}`} ms={gap.ms} label={gap.label} />,
       )
     }
+    if (cardCoveredCompaction) return
     const isLive =
       seg.kind === 'thinking' ? seg.live
       : seg.kind === 'tool' ? seg.endTs === null
       : seg.kind === 'compaction' ? seg.live
       : false
-    const autoOpen = isLive
+    // Cursor-style collapse: while the turn streams, live segments (thinking in
+    // progress, running tools) are open and completed ones close. Once the
+    // final message is in, EVERYTHING defaults collapsed — including a trailing
+    // reasoning block that never saw a flush event — and a manual expand via
+    // the chevron (override) still wins.
+    const autoOpen = isStreaming ? isLive : false
     const key = `${messageId}:${seg.id}`
     pieces.push(
       <InlineAssistantSegment
@@ -579,6 +622,7 @@ function InterleavedAssistantBody({
         segment={seg}
         autoOpen={autoOpen}
         override={overrides[key]}
+        messageStreaming={isStreaming}
         onToggle={(next) => onToggle(key, next)}
         resolveImageUrl={resolveImageUrl}
       />,
@@ -613,7 +657,9 @@ function InterleavedAssistantBody({
     if (seg.kind === 'tool' && seg.resultPreview != null) {
       const segImages = collectToolResultImages([seg.resultPreview])
       if (segImages.length > 0) {
-        pieces.push(
+        // Galleries stay outside the collapsed work group so images aren't
+        // buried behind the expand chevron.
+        ;(grouped ? galleries : pieces).push(
           <AssistantImageGallery
             key={`seg-images-${seg.id}-${i}`}
             images={segImages}
@@ -624,7 +670,7 @@ function InterleavedAssistantBody({
       }
       const segAudios = collectToolResultAudios([seg.resultPreview])
       if (segAudios.length > 0) {
-        pieces.push(
+        ;(grouped ? galleries : pieces).push(
           <AssistantAudioGallery
             key={`seg-audio-${seg.id}-${i}`}
             audios={segAudios}
@@ -635,8 +681,9 @@ function InterleavedAssistantBody({
     }
   })
 
-  if (cursor < body.length) {
-    const tail = body.slice(cursor)
+  const tailStart = grouped ? groupEndOffset : cursor
+  if (tailStart < body.length && !grouped) {
+    const tail = body.slice(tailStart)
     if (tail.trim().length > 0) {
       pieces.push(
         <ChatMarkdown key={`text-tail-${messageId}`} text={tail} resolveImageUrl={resolveImageUrl} workspaceId={workspaceId} />,
@@ -670,6 +717,53 @@ function InterleavedAssistantBody({
     }
     return <ChatMarkdown text={body} resolveImageUrl={resolveImageUrl} workspaceId={workspaceId} />
   }
+  if (grouped) {
+    const visibleSegs = ordered.filter((seg) => !isCardCoveredCompaction(seg))
+    const toolCount = visibleSegs.filter((s) => s.kind === 'tool').length
+    const thinkMs = visibleSegs.reduce(
+      (acc, s) =>
+        s.kind === 'thinking' && s.endTs != null ? acc + Math.max(0, s.endTs - s.startTs) : acc,
+      0,
+    )
+    const firstVisible = visibleSegs[0]!
+    const lastVisible = visibleSegs[visibleSegs.length - 1]!
+    const spanMs = Math.max(0, (lastVisible.endTs ?? lastVisible.startTs) - firstVisible.startTs)
+    const labelParts: string[] = []
+    if (toolCount > 0) labelParts.push(`Ran ${toolCount} tool call${toolCount === 1 ? '' : 's'}`)
+    if (thinkMs > 0) labelParts.push(`thought ${formatDurationMs(thinkMs)}`)
+    if (labelParts.length === 0) labelParts.push('Work')
+    labelParts.push(formatDurationMs(spanMs))
+    const tail = tailStart < body.length ? body.slice(tailStart) : ''
+    return (
+      <div className={chatInterleaved}>
+        <details className={chatSegmentRootClass('tool', {})}>
+          <summary className={chatSegmentSummary}>
+            <span className={cn(chatSegmentIcon, 'text-text-secondary')} aria-hidden="true">
+              ⚙
+            </span>
+            <span className={chatSegmentLabel}>{labelParts.join(' · ')}</span>
+            <span className={chatSegmentChevron} aria-hidden="true" />
+          </summary>
+          <div className="relative mt-1.5 ml-1 flex flex-col gap-1.5 pb-2.5 pl-3 pr-2.5">
+            <span
+              aria-hidden="true"
+              className="absolute bottom-3 left-0 top-0 w-px bg-[rgb(255_255_255/0.14)]"
+            />
+            {pieces}
+          </div>
+        </details>
+        {galleries.length > 0 ? galleries : null}
+        {tail.trim().length > 0 ?
+          <ChatMarkdown
+            key={`text-tail-${messageId}`}
+            text={tail}
+            resolveImageUrl={resolveImageUrl}
+            workspaceId={workspaceId}
+          />
+        : null}
+      </div>
+    )
+  }
   return <div className={chatInterleaved}>{pieces}</div>
 }
 
@@ -685,6 +779,8 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
   localImageUrl,
   thinkTank,
   workspaceId,
+  canUndoTurn,
+  onUndoTurn,
 }: ChatMessageRowProps): React.ReactElement {
   const liveWorkflowMap =
     liveWorkflowForMessage.length > 0 ? { [m.id]: liveWorkflowForMessage } : {}
@@ -705,6 +801,7 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
     segments.length === 0
 
   const showInterleavedWorkflow = segments.length > 0 || isStreaming
+  const [copied, setCopied] = useState(false)
   const finalDurationMs = useMemo(
     () => (m.role === 'assistant' ? assistantTurnDurationMs(telemetryRows, m.created_at) : null),
     [m.role, m.created_at, telemetryRows],
@@ -729,7 +826,7 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
     : null
 
   return (
-    <div className={cn(chatMsgRow, m.role === 'user' ? chatMsgRowUser : chatMsgRowAssistant)}>
+    <div className={cn(chatMsgRow, 'group', m.role === 'user' ? chatMsgRowUser : chatMsgRowAssistant)}>
       <div
         className={cn(
           chatMsgBubble,
@@ -760,6 +857,31 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
               <span className={chatMsgStatusMuted}> · {formatDurationMs(finalDurationMs)}</span>
             : null}
           </div>
+          <button
+            type="button"
+            title="Copy message text"
+            aria-label="Copy message text"
+            className="shrink-0 cursor-pointer rounded border-none bg-transparent px-1 py-0.5 text-[0.66rem] leading-none text-text-muted opacity-0 transition-opacity group-hover:opacity-100 hover:text-text-primary focus:opacity-100"
+            onClick={() => {
+              void navigator.clipboard.writeText(m.content).then(() => {
+                setCopied(true)
+                window.setTimeout(() => setCopied(false), 1200)
+              })
+            }}
+          >
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+          {m.role === 'assistant' && canUndoTurn ?
+            <button
+              type="button"
+              title="Restore the workspace to the state before this turn (current state is safety-captured first)"
+              aria-label="Undo this agent turn"
+              className="shrink-0 cursor-pointer rounded border-none bg-transparent px-1 py-0.5 text-[0.66rem] leading-none text-text-muted opacity-0 transition-opacity group-hover:opacity-100 hover:text-[#f6b3a4] focus:opacity-100"
+              onClick={() => onUndoTurn?.()}
+            >
+              Undo
+            </button>
+          : null}
           <span
             className="text-[0.68rem] text-text-secondary tabular-nums whitespace-nowrap shrink-0"
             title={new Date(m.created_at).toLocaleString()}

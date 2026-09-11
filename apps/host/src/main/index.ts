@@ -13,6 +13,23 @@ import {
 import { homedir } from 'node:os'
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path'
 import { migrateMonorepoPackageSpecs } from './package-spec-migration.js'
+import {
+  attachTerminal,
+  bindTerminalWindowGetter,
+  createTerminal,
+  disposeAllTerminals,
+  disposeTerminal,
+  resizeTerminal,
+  writeTerminal,
+} from './terminal-manager.js'
+import {
+  captureTurnStart,
+  listForConversation as listCheckpointsForConversation,
+  previewRestore,
+  pruneAll as pruneCheckpoints,
+  purgeConversation as purgeConversationCheckpoints,
+  restoreTurn,
+} from './checkpoint-store.js'
 import { execFile } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
@@ -177,9 +194,9 @@ import { deriveChatTitleFromUserText, isAutoTitleEligible } from './chat-title.j
 import { formatCompactionNoticeContent, type CompactionReason } from '../shared/compaction-notice.js'
 import {
   CONVERSATION_RETENTION_MS,
+  archiveStaleConversations,
   deleteWorkspaceFully,
   fullyRemoveConversation,
-  purgeStaleConversations,
 } from './conversation-lifecycle.js'
 import {
   ensurePasteImagesDir,
@@ -1118,10 +1135,56 @@ async function checkForAppUpdateViaMenu(): Promise<void> {
  *  IPC whenever the renderer's canvas open state changes. */
 let canvasOpenState = false
 
+/** Renderer-synced skill-route menu sections (Phase 1 of the Cursor-style
+ *  restyle). The renderer owns the nav-layout logic (hidden/pinned/order —
+ *  `skill-nav-layout.ts`), computes the final per-section rows for the active
+ *  workspace, and pushes them here via `menu:set-sections`. The main process
+ *  only renders this list into native top-level menus (Dashboards / Tools /
+ *  Developer) and forwards clicks back to the main window. */
+type MenuActionItem =
+  | { kind: 'route'; key: string; title: string; sep?: boolean }
+  | { kind: 'tab'; tab: string; title: string; sep?: boolean }
+  | { kind: 'action'; action: string; title: string; sep?: boolean }
+
+type MenuSectionSync = { id: string; label: string; items: MenuActionItem[] }
+
+let menuSectionsSync: MenuSectionSync[] = []
+
+function normalizeMenuSectionsSync(raw: unknown): MenuSectionSync[] {
+  if (!Array.isArray(raw)) return []
+  const out: MenuSectionSync[] = []
+  for (const sec of raw) {
+    if (!sec || typeof sec !== 'object') continue
+    const s = sec as Record<string, unknown>
+    const id = typeof s.id === 'string' ? s.id.trim() : ''
+    const label = typeof s.label === 'string' ? s.label.trim() : ''
+    if (!id || !label || !Array.isArray(s.items)) continue
+    const items: MenuActionItem[] = []
+    for (const it of s.items) {
+      if (!it || typeof it !== 'object') continue
+      const r = it as Record<string, unknown>
+      const title = typeof r.title === 'string' ? r.title.trim() : ''
+      const sep = r.sep === true
+      if (!title) continue
+      if (r.kind === 'route' && typeof r.key === 'string' && r.key.trim()) {
+        items.push({ kind: 'route', key: r.key.trim(), title, sep })
+      } else if (r.kind === 'tab' && typeof r.tab === 'string' && r.tab.trim()) {
+        items.push({ kind: 'tab', tab: r.tab.trim(), title, sep })
+      } else if (r.kind === 'action' && typeof r.action === 'string' && r.action.trim()) {
+        items.push({ kind: 'action', action: r.action.trim(), title, sep })
+      }
+    }
+    out.push({ id, label, items })
+  }
+  return out
+}
+
 /** Build the application menu. Preserves Electron's default File/Edit/View
  *  menus (via role menus, so undo/redo, copy/paste, reload, devtools, zoom and
- *  fullscreen all keep working) and replaces the Window menu with a hand-built
- *  submenu that adds a "Show/Hide Canvas" toggle for the docked canvas panel. */
+ *  fullscreen all keep working), injects renderer-synced skill-route sections
+ *  (Dashboards / Tools / Developer), and replaces the Window menu with a
+ *  hand-built submenu that adds a "Show/Hide Canvas" toggle for the docked
+ *  canvas panel. */
 function buildAppMenu(): Menu {
   const isMac = process.platform === 'darwin'
   const canvasItem: MenuItemConstructorOptions = {
@@ -1166,10 +1229,27 @@ function buildAppMenu(): Menu {
 
   const template: MenuItemConstructorOptions[] = []
   if (isMac) template.push({ role: 'appMenu' })
+  template.push({ role: 'fileMenu' }, { role: 'editMenu' }, { role: 'viewMenu' })
+  for (const sec of menuSectionsSync) {
+    if (sec.items.length === 0) continue
+    const submenu: MenuItemConstructorOptions[] = []
+    for (const item of sec.items) {
+      // `sep` means "separator before this item" (matches the renderer's in-app
+      // menu semantics). Electron renders type:'separator' rows with any
+      // label/click ignored — so the separator must be its own row, never
+      // merged into the item it precedes.
+      if (item.sep && submenu.length > 0) submenu.push({ type: 'separator' })
+      submenu.push({
+        label: item.title,
+        click: () => {
+          const mw = mainWindow
+          if (mw && !mw.isDestroyed()) mw.webContents.send('menu:action', item)
+        },
+      })
+    }
+    template.push({ label: sec.label, submenu })
+  }
   template.push(
-    { role: 'fileMenu' },
-    { role: 'editMenu' },
-    { role: 'viewMenu' },
     { label: 'Window', submenu: windowSubmenu },
     { label: 'Help', submenu: helpSubmenu },
   )
@@ -1183,6 +1263,10 @@ let brokerResolvedModel: BrokerResolvedModel | null = null
 let brokerSystemPromptStats: SystemPromptStats | null = null
 /** Actual context-window message tokens from broker (reflects Pi compaction). */
 let brokerActualMessageTokens: number | null = null
+/** Conversation whose session the context stats describe (primary broker focus). */
+let brokerContextStatsConvId: string | null = null
+/** True when the broker total came from provider usage (already includes the system prompt). */
+let brokerContextStatsIncludesSystem = false
 /** Surfaces broker failures when IPC fired before the renderer subscribed to broker:status */
 let brokerLastSurfaceError: string | undefined
 /** Last stderr/stdout from broker child — banner appendix */
@@ -2085,6 +2169,20 @@ async function ensureBrokerSessionForConversation(
     brokerLastSessionCwd = sessionCwd
     brokerLastDisabledFp = dfp
     brokerLastModelFp = mfp
+    // The broker emitted context_window_stats for the newly-bound session
+    // *before* switch_session_result, so that broadcast was stamped with the
+    // previous conversation's id and the renderer's conversation guard
+    // discarded it. The cache now holds the new session's values — re-stamp
+    // with the correct conversation so the footer's actual context survives
+    // conversation switches instead of falling back to the DB estimate.
+    if (brokerActualMessageTokens != null) {
+      brokerContextStatsConvId = convId
+      mainWindow?.webContents.send('broker:context-window-stats', {
+        conversationId: convId,
+        actualMessageTokens: brokerActualMessageTokens,
+        includesSystemPrompt: brokerContextStatsIncludesSystem,
+      })
+    }
   }
 }
 
@@ -2221,6 +2319,16 @@ async function startChatTurn(
   }
   const assistant = db.insertMessage(conversationId, 'assistant', '', 'streaming')
   const turnId = randomUUID()
+  // Agent checkpoint (per-turn undo): snapshot the workspace pre-images
+  // BEFORE the broker can touch files. Best-effort — failure just means this
+  // turn isn't undoable; chat behavior is unaffected.
+  try {
+    const conv = db.getConversation(conversationId)
+    const wsCwd = conv?.workspace_id ? effectivePiCwdForWorkspace(conv.workspace_id) : ''
+    if (wsCwd) captureTurnStart(conversationId, wsCwd, assistant.id)
+  } catch {
+    /* checkpoints are best-effort */
+  }
   pendingTurns.set(turnId, {
     convId: conversationId,
     assistantId: assistant.id,
@@ -2302,7 +2410,7 @@ function createSplashWindow(): void {
     resizable: false,
     movable: true,
     center: true,
-    backgroundColor: '#0f1115',
+    backgroundColor: '#101010',
     show: true,
     alwaysOnTop: true,
     skipTaskbar: true,
@@ -2632,6 +2740,7 @@ type BrokerMessageContext = {
 function persistCompactionChatNotice(
   convId: string,
   ev: Record<string, unknown>,
+  beforeAssistantId?: string,
 ): void {
   const reason = ev.reason
   const compactionReason: CompactionReason =
@@ -2653,7 +2762,16 @@ function persistCompactionChatNotice(
     aborted: aborted || undefined,
     errorMessage,
   })
-  db.insertMessage(convId, 'system', content, 'complete')
+  // Backdate the notice to just before the in-flight assistant row: compaction
+  // runs before/while the model generates, so the banner belongs between the
+  // user message and the assistant response — not rendered after the AI text.
+  let createdAt: number | undefined
+  const assistantCreatedAt = beforeAssistantId ? db.getMessageCreatedAt(beforeAssistantId) : null
+  if (assistantCreatedAt != null) {
+    createdAt = assistantCreatedAt - 1
+    while (db.messageCreatedAtExists(convId, createdAt)) createdAt -= 1
+  }
+  db.insertMessage(convId, 'system', content, 'complete', createdAt)
   emitChatRefresh(convId, 'messages')
 }
 
@@ -2935,7 +3053,13 @@ function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext
   if (msg.type === 'context_window_stats') {
     if (ctx.isPrimary) {
       brokerActualMessageTokens = msg.actualMessageTokens
-      mainWindow?.webContents.send('broker:context-window-stats', msg.actualMessageTokens)
+      brokerContextStatsConvId = brokerFocusedConversationId ?? null
+      brokerContextStatsIncludesSystem = msg.includesSystemPrompt === true
+      mainWindow?.webContents.send('broker:context-window-stats', {
+        conversationId: brokerContextStatsConvId,
+        actualMessageTokens: msg.actualMessageTokens,
+        includesSystemPrompt: brokerContextStatsIncludesSystem,
+      })
     }
     return
   }
@@ -3083,7 +3207,7 @@ function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext
       mainWindow?.webContents.send('chat:tool', toolPayload)
       emitCompanionEvent({ channel: 'chat:tool', payload: toolPayload })
       if (ev.type === 'compaction_end') {
-        persistCompactionChatNotice(pending.convId, ev as Record<string, unknown>)
+        persistCompactionChatNotice(pending.convId, ev as Record<string, unknown>, pending.assistantId)
       }
     }
   }
@@ -3428,6 +3552,12 @@ function registerIpc(): void {
       db.setPref('sylo.ui.active_workspace_id', wid)
     },
     listConversations: (workspaceId: string) => db.listConversations(workspaceId),
+    listArchivedConversations: (workspaceId?: string) => db.listArchivedConversations(workspaceId),
+    setConversationArchived: (id, archived) => {
+      const cid = id.trim()
+      if (!cid) return
+      db.setConversationArchived(cid, archived)
+    },
     findLatestEmptyConversation: (workspaceId: string) =>
       db.findLatestEmptyConversationId(workspaceId),
     createConversation: (title?: string, workspaceId?: string) =>
@@ -3484,6 +3614,7 @@ function registerIpc(): void {
     deleteConversation: (id) => {
       const cid = id.trim()
       if (!cid) return false
+      purgeConversationCheckpoints(cid)
       // Abort any in-flight turn for this conversation before removing it.
       const active = findPendingTurnForConversation(cid)
       if (active) {
@@ -3599,6 +3730,28 @@ function registerIpc(): void {
   })
   ipcMain.handle('conversations:setWorkspace', (_e, id: string, workspaceId: string) =>
     db.setConversationWorkspace(id, workspaceId),
+  )
+  // Archive (retention v2): hide-from-sidebar without deleting; retrievable.
+  ipcMain.handle('conversations:setArchived', (_e, id: unknown, archived: unknown) => {
+    if (typeof id !== 'string' || typeof archived !== 'boolean') return
+    db.setConversationArchived(id, archived)
+  })
+  ipcMain.handle('conversations:list-archived', (_e, workspaceId: unknown) =>
+    typeof workspaceId === 'string' ? db.listArchivedConversations(workspaceId) : db.listArchivedConversations(),
+  )
+  // ── Side chats (apps pane, Phase 7) ──────────────────────────────
+  ipcMain.handle('conversations:create-side', (_e, parentId: unknown, title?: unknown) => {
+    if (typeof parentId !== 'string' || !parentId.trim()) {
+      return { ok: false as const, error: 'missing_parent' }
+    }
+    const row = db.createSideConversation(
+      parentId.trim(),
+      typeof title === 'string' ? title : undefined,
+    )
+    return row ? { ok: true as const, conversation: row } : { ok: false as const, error: 'parent_not_found' }
+  })
+  ipcMain.handle('conversations:list-side', (_e, parentId: unknown) =>
+    typeof parentId === 'string' ? db.listSideConversations(parentId) : [],
   )
   ipcMain.handle('conversations:setModel', async (_e, id: unknown, model: unknown) => {
     if (typeof id !== 'string' || !id.trim()) return { ok: false as const, error: 'missing_id' }
@@ -3976,7 +4129,26 @@ function registerIpc(): void {
   })
   ipcMain.handle('conversations:delete', (_e, id: string) => {
     fullyRemoveConversation(app.getPath('userData'), hostAgentDir(), id)
+    purgeConversationCheckpoints(id)
     emitChatRefresh(id, 'conversationDeleted')
+  })
+  // ── Agent checkpoints (per-turn undo; storage in app data only) ──────────
+  ipcMain.handle('checkpoints:list', (_e, conversationId: string) => {
+    if (typeof conversationId !== 'string' || !conversationId.trim()) return []
+    return listCheckpointsForConversation(conversationId.trim())
+  })
+  ipcMain.handle('checkpoints:preview', (_e, conversationId: string, assistantMessageId: string) => {
+    if (typeof conversationId !== 'string' || typeof assistantMessageId !== 'string') {
+      return { ok: false as const, error: 'bad_args' }
+    }
+    const preview = previewRestore(conversationId.trim(), assistantMessageId.trim())
+    return preview ? { ok: true as const, preview } : { ok: false as const, error: 'checkpoint_not_found' }
+  })
+  ipcMain.handle('checkpoints:restore', (_e, conversationId: string, assistantMessageId: string) => {
+    if (typeof conversationId !== 'string' || typeof assistantMessageId !== 'string') {
+      return { ok: false as const, error: 'bad_args' }
+    }
+    return restoreTurn(conversationId.trim(), assistantMessageId.trim())
   })
   ipcMain.handle('messages:list', (_e, conversationId: string) => db.listMessages(conversationId))
   ipcMain.handle('prefs:get', (_e, key: string, fallback: unknown) => db.getPref(key, fallback))
@@ -4172,6 +4344,11 @@ function registerIpc(): void {
       disabledSkillPaths: disabled.skillPaths,
     })
   })
+  ipcMain.handle('menu:set-sections', (_e, sections: unknown) => {
+    menuSectionsSync = normalizeMenuSectionsSync(sections)
+    Menu.setApplicationMenu(buildAppMenu())
+    return { ok: true as const, sections: menuSectionsSync.length }
+  })
   ipcMain.handle('skill-route:open-popout', (_event, routeKey: string) => {
     const key = typeof routeKey === 'string' ? routeKey.trim() : ''
     if (!key) return { ok: false as const, error: 'empty_route_key' }
@@ -4182,7 +4359,7 @@ function registerIpc(): void {
       width: 960,
       height: 720,
       title: `Sylo — route`,
-      backgroundColor: '#0f1115',
+      backgroundColor: '#101010',
       ...appIconWindowOptions(),
       webPreferences: {
         preload: resolvePreloadPath(),
@@ -4224,6 +4401,61 @@ function registerIpc(): void {
     })
     return { ok: true as const }
   })
+  // Renderer asked for a native file pick (apps-pane `+` → File…): show an
+  // open dialog and route the picked file through the same canvas:show path
+  // as the chat chip View button so it lands in the active conversation's
+  // tab scope.
+  ipcMain.handle('canvas:pick-file', async () => {
+    const r = await dialog.showOpenDialog({
+      title: 'Open in canvas',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Canvas files', extensions: ['svg', 'md', 'markdown', 'txt'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    })
+    if (r.canceled || r.filePaths.length === 0) return { ok: false as const, error: 'canceled' }
+    const p = r.filePaths[0]!
+    const kind = p.toLowerCase().endsWith('.svg') ? ('svg' as const) : ('markdown' as const)
+    emitCanvasShow({
+      toolCallId: `show-file-${Date.now()}`,
+      kind,
+      title: p.replace(/^.*[/\\]/, ''),
+      filePath: p,
+      sourcePath: p,
+    })
+    return { ok: true as const }
+  })
+
+  // ── Terminal (apps pane, Phase 5) ────────────────────────────────────
+  ipcMain.handle('terminal:create', async (_event, payload: unknown) => {
+    const o = (payload && typeof payload === 'object' ? payload : {}) as {
+      cwd?: string
+      cols?: number
+      rows?: number
+    }
+    return createTerminal({ cwd: o.cwd, cols: o.cols, rows: o.rows })
+  })
+  ipcMain.handle('terminal:attach', (_event, payload: unknown) => {
+    const o = (payload && typeof payload === 'object' ? payload : {}) as { id?: string }
+    return attachTerminal(typeof o.id === 'string' ? o.id : '')
+  })
+  ipcMain.on('terminal:write', (_event, payload: unknown) => {
+    const o = (payload && typeof payload === 'object' ? payload : {}) as { id?: string; data?: string }
+    if (typeof o.id === 'string' && typeof o.data === 'string') writeTerminal(o.id, o.data)
+  })
+  ipcMain.on('terminal:resize', (_event, payload: unknown) => {
+    const o = (payload && typeof payload === 'object' ? payload : {}) as {
+      id?: string
+      cols?: number
+      rows?: number
+    }
+    if (typeof o.id === 'string') resizeTerminal(o.id, Number(o.cols), Number(o.rows))
+  })
+  ipcMain.on('terminal:dispose', (_event, payload: unknown) => {
+    const o = (payload && typeof payload === 'object' ? payload : {}) as { id?: string }
+    if (typeof o.id === 'string') disposeTerminal(o.id)
+  })
   ipcMain.handle('canvas:open-popout', (_event, payload: unknown) => {
     const snap = normalizeCanvasPopoutSnapshot(payload)
     if (!snap) return { ok: false as const, error: 'invalid_payload' }
@@ -4237,7 +4469,7 @@ function registerIpc(): void {
       minWidth: 420,
       minHeight: 320,
       title: title ? `Sylo — ${title}` : 'Sylo — Canvas',
-      backgroundColor: '#0f1115',
+      backgroundColor: '#101010',
       ...appIconWindowOptions(),
       webPreferences: {
         preload: resolvePreloadPath(),
@@ -4277,7 +4509,7 @@ function registerIpc(): void {
       minWidth: 420,
       minHeight: 320,
       title: title ? `Sylo — ${title}` : 'Sylo — Canvas',
-      backgroundColor: '#0f1115',
+      backgroundColor: '#101010',
       ...appIconWindowOptions(),
       webPreferences: {
         preload: resolvePreloadPath(),
@@ -4348,6 +4580,52 @@ function registerIpc(): void {
       /* best-effort mirror */
     }
     return true
+  })
+  // ── Workspace pool-tab persistence (terminal/browser panes across restarts)
+  // The renderer owns tab state; main just stores a per-workspace JSON so a
+  // restarted app can reopen the same pool. Contents are tiny (kind/title/
+  // cwd/URL) — scrollback and page state intentionally do not survive.
+  function poolTabsDir(): string {
+    return join(app.getPath('userData'), 'canvas-pool-tabs')
+  }
+  function sanitizeWsKey(wsKey: string): string {
+    return wsKey.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 120) || 'default'
+  }
+  ipcMain.handle('canvas:save-pool-tabs', (_event, wsKey: unknown, tabs: unknown) => {
+    if (typeof wsKey !== 'string' || !Array.isArray(tabs)) return false
+    try {
+      const dir = poolTabsDir()
+      mkdirSync(dir, { recursive: true })
+      const clean = (tabs as unknown[])
+        .filter(
+          (t): t is { kind: 'terminal' | 'browser'; title?: unknown; terminalCwd?: unknown; browserUrl?: unknown } =>
+            Boolean(t) &&
+            typeof t === 'object' &&
+            ((t as { kind?: unknown }).kind === 'terminal' || (t as { kind?: unknown }).kind === 'browser'),
+        )
+        .slice(0, 24)
+        .map((t) => ({
+          kind: t.kind,
+          title: typeof t.title === 'string' ? t.title.slice(0, 80) : undefined,
+          terminalCwd: typeof t.terminalCwd === 'string' ? t.terminalCwd : undefined,
+          browserUrl: typeof t.browserUrl === 'string' ? t.browserUrl.slice(0, 2000) : undefined,
+        }))
+      writeFileSync(join(dir, `${sanitizeWsKey(wsKey)}.json`), JSON.stringify(clean), 'utf8')
+      return true
+    } catch {
+      return false
+    }
+  })
+  ipcMain.handle('canvas:load-pool-tabs', (_event, wsKey: unknown) => {
+    if (typeof wsKey !== 'string') return []
+    try {
+      const parsed: unknown = JSON.parse(
+        readFileSync(join(poolTabsDir(), `${sanitizeWsKey(wsKey)}.json`), 'utf8'),
+      )
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return []
+    }
   })
   ipcMain.handle('canvas:set-open-state', (_event, open: unknown) => {
     const next = open === true
@@ -4737,6 +5015,13 @@ function registerIpc(): void {
   ipcMain.handle('personal:settingsCard', async () => {
     const { personalPluginSettingsCard } = await import('./personal-plugin.js')
     return personalPluginSettingsCard()
+  })
+  // Read-only host-plugin inventory for the Capability Manager (Phase 2 cards).
+  // NOTE: main is ESM ("type": "module") — use async import() like every other
+  // personal-plugin call site; bare require() is not defined here.
+  ipcMain.handle('personal:hostPlugins', async () => {
+    const { listHostPluginPackages } = await import('./personal-plugin.js')
+    return listHostPluginPackages(hostAgentDir())
   })
 
   // User-installed Pi packages (~/.pi/agent/settings.json packages[]) — generic
@@ -5465,7 +5750,11 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('broker:system-prompt-stats:get', () => brokerSystemPromptStats)
-  ipcMain.handle('broker:context-window-stats:get', () => brokerActualMessageTokens)
+  ipcMain.handle('broker:context-window-stats:get', () => ({
+    conversationId: brokerContextStatsConvId,
+    actualMessageTokens: brokerActualMessageTokens,
+    includesSystemPrompt: brokerContextStatsIncludesSystem,
+  }))
 
 
   ipcMain.handle('capabilities:settings', () => readSettingsJson())
@@ -6028,6 +6317,12 @@ function registerIpc(): void {
       const body = typeof text === 'string' ? text.trim() : ''
       if (!id) return { assistantMessageId: '', error: 'missing_conversation_id' as const }
       return chainConversationChatOp(id, async () => {
+        // Retention v2: sending into an archived chat (e.g. a resumed
+        // scheduled prompt) unarchives it first so it reappears in the
+        // sidebar instead of silently updating a hidden conversation.
+        if (db.getConversation(id)?.archived_at != null) {
+          db.setConversationArchived(id, false)
+        }
         const started = await startChatTurn(id, body, normalizeAttachments(attachments))
         if (!started.ok) {
           return { assistantMessageId: started.assistantMessageId, error: 'broker_not_ready' as const }
@@ -6317,7 +6612,7 @@ function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 820,
-    backgroundColor: '#0f1115',
+    backgroundColor: '#101010',
     show: !splashActive,
     ...appIconWindowOptions(),
     webPreferences: {
@@ -6325,9 +6620,12 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      // Apps-pane Browser tab (Phase 6): sandboxed <webview> guests run in a
+      // partitioned session (persist:apps-pane) — never the app's own session.
+      webviewTag: true,
     },
   })
-    let allowingClose = false
+  let allowingClose = false
   let closeCheckInFlight = false
   mainWindow.on('close', async (e) => {
     if (allowingClose) return
@@ -6385,6 +6683,9 @@ function createWindow(): void {
   })
 
   mainWindow.on('closed', () => {
+    // Terminal PTYs are per-window; kill them so closing the window never
+    // leaves orphan shells behind.
+    disposeAllTerminals()
     dismissSplash()
     mainWindow = undefined
   })
@@ -6470,7 +6771,8 @@ app.whenReady().then(() => {
     )
   }
   const userData = app.getPath('userData')
-  purgeStaleConversations(userData, hostAgentDir())
+  archiveStaleConversations(userData, hostAgentDir())
+  pruneCheckpoints()
   subagentTaskStore.pruneStaleHostSessions(Date.now() - CONVERSATION_RETENTION_MS)
   pruneStaleWebAccessRuns(Date.now() - CONVERSATION_RETENTION_MS)
   pruneOrphanChatAttachments(userData)
@@ -6511,6 +6813,7 @@ app.whenReady().then(() => {
     notifyChanged: () => mainWindow?.webContents.send('sweeps:changed', {}),
   })
   registerIpc()
+  bindTerminalWindowGetter(() => mainWindow)
   // Seed the canvas open state from the saved pref, then install the custom
   // application menu (preserves the default File/Edit/View menus and adds the
   // canvas toggle under Window). The renderer re-syncs `canvasOpenState` after
@@ -6561,6 +6864,7 @@ app.on('before-quit', () => {
   } catch {
     /* */
   }
+  disposeAllTerminals()
     shutdownSubagentTaskHostSession()
   shutdownScheduledPromptsService()
   shutdownSweepService()

@@ -94,24 +94,36 @@ export function deleteWorkspaceFully(
   return db.deleteWorkspaceRow(wid)
 }
 
-/** Delete conversations with no activity in the retention window. Clears active-chat pref if needed. */
-export function purgeStaleConversations(userDataPath: string, agentDir: string): { deletedIds: string[] } {
+/**
+ * Retention sweep (runs at startup): chats with no activity in the retention
+ * window are ARCHIVED, not deleted — the transcript, messages, attachments
+ * and session file all stay, the chat just leaves the sidebar main list
+ * (Cursor-style archive, retrievable via the sidebar's Archived section).
+ * Empty chats (zero messages) are still hard-deleted: there is nothing in
+ * them to lose. Clears the active-chat pref if the active chat was archived.
+ */
+export function archiveStaleConversations(userDataPath: string, agentDir: string): { archivedIds: string[]; deletedIds: string[] } {
   const cutoff = Date.now() - CONVERSATION_RETENTION_MS
   const stale = db.listConversationsUpdatedBefore(cutoff)
+  const archivedIds: string[] = []
   const deletedIds: string[] = []
   for (const row of stale) {
     try {
-      if (fullyRemoveConversation(userDataPath, agentDir, row.id)) {
-        deletedIds.push(row.id)
+      if (db.conversationHasMessages(row.id)) {
+        db.setConversationArchived(row.id, true)
+        archivedIds.push(row.id)
+      } else {
+        // Empty chat — nothing to preserve.
+        if (fullyRemoveConversation(userDataPath, agentDir, row.id)) deletedIds.push(row.id)
       }
     } catch (err) {
-      console.warn('[sylo] purgeStaleConversations: failed to delete conversation', row.id, err)
+      console.warn('[sylo] archiveStaleConversations: failed to process conversation', row.id, err)
     }
   }
   const activeRaw = db.getPref('sylo.ui.active_conversation_id', '') as string
   const active = typeof activeRaw === 'string' ? activeRaw.trim() : ''
-  if (active && deletedIds.includes(active)) {
+  if (active && archivedIds.includes(active)) {
     db.setPref('sylo.ui.active_conversation_id', '')
   }
-  return { deletedIds }
+  return { archivedIds, deletedIds }
 }

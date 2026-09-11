@@ -2,8 +2,10 @@
 const COUNCIL_BUBBLE_WIDTH = 'w-fit max-w-[92%] min-w-0'
 
 const MODERATOR_TONE = {
-  bubble: `${COUNCIL_BUBBLE_WIDTH} self-start border border-blue-500/45 bg-blue-500/[0.08]`,
-  role: 'text-blue-300',
+  // Moderator went neutral in the Cursor restyle (no blue anywhere); debater
+  // seats keep their distinct hues as functional identity coding.
+  bubble: `${COUNCIL_BUBBLE_WIDTH} self-start border border-[#525252] bg-[rgb(255_255_255/0.06)]`,
+  role: 'text-[#d4d4d4]',
 } as const
 
 /** Debater colors by seat id (seat-a green, seat-b red, seat-d yellow, seat-e purple, seat-f orange). */

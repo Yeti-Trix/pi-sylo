@@ -112,6 +112,86 @@ import {
   type PackageBundleSlice,
 } from './helpers'
 
+// ── Catalog row (shared by the pinned sylo-* strip and the main pi.dev list) ─
+
+type CatalogRow = {
+  name: string
+  description: string
+  installSpec: string
+  types: string[]
+  downloadsMonthly: number
+  publishedMs: number
+}
+
+function CatalogRowLi({
+  row,
+  installedOnDisk,
+  loadedForAgent,
+  installBusy,
+  cardBusy,
+  onInstall,
+  syloBadge,
+}: {
+  row: CatalogRow
+  installedOnDisk: boolean
+  loadedForAgent: boolean
+  installBusy: string | null
+  cardBusy: string | null
+  onInstall: (spec: string) => void
+  syloBadge?: boolean
+}): React.ReactElement {
+  return (
+    <li key={row.name} className={capCatalogRow}>
+      <div className={capCatalogRowInner}>
+        <div className={capCatalogRowBody}>
+          <div className={capCatalogRowHead}>
+            {installedOnDisk ?
+              <span
+                className={cn(capStatusDot, loadedForAgent ? capStatusDotOn : capStatusDotDisabled)}
+                title={
+                  loadedForAgent ?
+                    'Installed — loaded for agent'
+                  : 'Installed — not in packages[] (disabled for agent)'
+                }
+                aria-label={
+                  loadedForAgent ?
+                    'Installed and loaded for agent'
+                  : 'Installed but not loaded for agent'
+                }
+                role="img"
+              />
+            : null}
+            <span className={capCatalogName}>{row.name}</span>
+            {syloBadge ? <span className={cn(capOrigin, 'text-[0.72rem]')}>Sylo</span> : null}
+            <span className={cn(mutedText, capCatalogDl)}>
+              ~{row.downloadsMonthly.toLocaleString()} dl/mo
+            </span>
+          </div>
+          {row.types.length > 0 && (
+            <div className={capCatalogTypes}>
+              {row.types.map((t) => (
+                <span key={t} className={cn(capOrigin, 'text-[0.72rem]')}>
+                  {t}
+                </span>
+              ))}
+            </div>
+          )}
+          <div className={cn(mutedText, capCatalogDesc)}>{row.description}</div>
+        </div>
+        <button
+          type="button"
+          className={cn(btnPrimarySm, capCatalogInstallBtn)}
+          disabled={!!installBusy || !!cardBusy}
+          title={row.installSpec}
+          onClick={() => onInstall(row.installSpec)}
+        >
+          {installBusy === row.installSpec ? 'Installing…' : 'Install'}
+        </button>
+      </div>
+    </li>
+  )
+}
+
 export function CapabilityManagerPanel({
   capabilities,
   settingsJson,
@@ -180,9 +260,31 @@ export function CapabilityManagerPanel({
     page: number
     pageSize: number
     sourceUrl: string
+    syloPinned?: {
+      name: string
+      description: string
+      installSpec: string
+      types: string[]
+      downloadsMonthly: number
+      publishedMs: number
+    }[]
   } | null>(null)
   const [piDevBusy, setPiDevBusy] = useState(false)
   const [piDevErr, setPiDevErr] = useState<string | null>(null)
+  // Host-plugin packages discovered by the Sylo loader (Phase 2 unified cards —
+  // shows both kinds: bundled toggles above, installed host plugins here).
+  const [hostPlugins, setHostPlugins] = useState<
+    {
+      id: string
+      source: 'local' | 'npm' | 'legacy'
+      dir: string
+      name: string
+      version: string | null
+      description: string | null
+      entryPresent: boolean
+      loaded: boolean
+    }[]
+  >([])
   const [excludeAgentNotice, setExcludeAgentNotice] = useState<string | null>(null)
   const [extensionConfigPaths, setExtensionConfigPaths] = useState<Set<string>>(() => new Set())
   const [configModal, setConfigModal] = useState<
@@ -254,6 +356,23 @@ export function CapabilityManagerPanel({
       cancelled = true
     }
   }, [piDevPage, piDevNameApplied, piDevType, piDevSort])
+
+  // Host-plugin inventory (read-only). Refetch whenever the panel refreshes so
+  // newly installed/uninstalled host plugins show up.
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const list = await window.sylo.personal.hostPlugins()
+        if (!cancelled && Array.isArray(list)) setHostPlugins(list)
+      } catch {
+        /* inventory is advisory — never block the panel */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [onRefresh])
 
   const openSkillParamsEditor = useCallback(async (skillPath: string, title: string) => {
     setConfigModal({ kind: 'skill', path: skillPath, title })
@@ -1011,6 +1130,49 @@ export function CapabilityManagerPanel({
             restart the broker after either. Per-skill/per-extension <strong>disable</strong> (hide from AI only) is
             under <strong>Skills</strong> and <strong>Extensions</strong> above.
           </p>
+          {hostPlugins.length > 0 && (
+            <div className="mb-3">
+              <div className={capSubhead}>
+                <span className={capSubheadTitle}>Sylo host plugins</span>
+                <span className={cn(mutedText, capSubheadHint)}>
+                  Loaded by the Sylo app itself — Settings cards, phone-app tabs, RPC tools. Always on while
+                  installed; no toggle needed.
+                </span>
+              </div>
+              <ul className={rowList}>
+                {hostPlugins.map((p) => (
+                  <li key={p.id} className={capSkillRow}>
+                    <div className={rowHeadline}>
+                      <span
+                        className={cn(
+                          capStatusDot,
+                          p.loaded && p.entryPresent ? capStatusDotOn : capStatusDotDisabled,
+                        )}
+                        title={
+                          p.loaded && p.entryPresent ?
+                            'Loaded into the Sylo host'
+                          : 'Discovered but not loaded (restart broker/Sylo)'
+                        }
+                        aria-label={p.loaded && p.entryPresent ? 'Loaded' : 'Not loaded'}
+                        role="img"
+                      />
+                      <code className={capPkgCardName}>{p.id}</code>
+                      <span className={capPkgCardHint}>{p.version ? `v${p.version}` : p.name}</span>
+                      <span className={rowSpacer} />
+                      <OriginBadge origin={p.source === 'npm' ? 'npm-package' : 'sylo-repo'} />
+                    </div>
+                    {p.description ? <p className={cn(mutedText, 'mt-1 text-sm')}>{p.description}</p> : null}
+                    <p className={cn(mutedText, 'mt-1 text-xs')}>{p.dir}</p>
+                    {!p.entryPresent ?
+                      <p className={cn(mutedText, 'mt-1 text-xs text-danger')}>
+                        Host entry missing on disk — cannot load.
+                      </p>
+                    : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {installedItemCards.length === 0 && (
             <p className={cn(mutedText, capEmptyNote)}>
               No packages installed yet — install from the catalog below, then Restart broker.
@@ -1291,64 +1453,59 @@ export function CapabilityManagerPanel({
               {piDevErr}
             </p>
           )}
+          {(() => {
+            const syloPinned = piDevResult?.syloPinned ?? []
+            if (syloPinned.length === 0) return null
+            return (
+              <div className="mb-3">
+                <div className={capSubhead}>
+                  <span className={capSubheadTitle}>Sylo packages</span>
+                  <span className={cn(mutedText, capSubheadHint)}>
+                    First-party <code>sylo-*</code> packages pinned above the pi.dev ranking.
+                  </span>
+                </div>
+                <ul className={capCatalogList}>
+                  {syloPinned.map((row) => {
+                    const canonFolder = folderIdFromSpec(
+                      knownPackagePrimarySpec(normalizeNpmInstallSpec(row.installSpec)),
+                    )
+                    return (
+                      <CatalogRowLi
+                        key={`sylo-pinned-${row.name}`}
+                        row={row}
+                        installedOnDisk={piDevRowLoadedByCanonFolder.has(canonFolder)}
+                        loadedForAgent={piDevRowLoadedByCanonFolder.get(canonFolder) === true}
+                        installBusy={installBusy}
+                        cardBusy={cardBusy}
+                        onInstall={runInstall}
+                        syloBadge
+                      />
+                    )
+                  })}
+                </ul>
+              </div>
+            )
+          })()}
           {piDevResult && piDevResult.packages.length > 0 && (
             <ul className={capCatalogList}>
-          {piDevResult.packages.map((row) => {
-            const canonFolder = folderIdFromSpec(
-              knownPackagePrimarySpec(normalizeNpmInstallSpec(row.installSpec)),
-            )
-            const installedOnDisk = piDevRowLoadedByCanonFolder.has(canonFolder)
-            const loadedForAgent = piDevRowLoadedByCanonFolder.get(canonFolder) === true
-            return (
-            <li key={row.name} className={capCatalogRow}>
-              <div className={capCatalogRowInner}>
-                <div className={capCatalogRowBody}>
-                  <div className={capCatalogRowHead}>
-                    {installedOnDisk ?
-                      <span
-                        className={cn(capStatusDot, loadedForAgent ? capStatusDotOn : capStatusDotDisabled)}
-                        title={
-                          loadedForAgent ?
-                            'Installed — loaded for agent'
-                          : 'Installed — not in packages[] (disabled for agent)'
-                        }
-                        aria-label={
-                          loadedForAgent ?
-                            'Installed and loaded for agent'
-                          : 'Installed but not loaded for agent'
-                        }
-                        role="img"
-                      />
-                    : null}
-                    <span className={capCatalogName}>{row.name}</span>
-                    <span className={cn(mutedText, capCatalogDl)}>
-                      ~{row.downloadsMonthly.toLocaleString()} dl/mo
-                    </span>
-                  </div>
-                  {row.types.length > 0 && (
-                    <div className={capCatalogTypes}>
-                      {row.types.map((t) => (
-                        <span key={t} className={cn(capOrigin, "text-[0.72rem]")}>
-                          {t}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  <div className={cn(mutedText, capCatalogDesc)}>{row.description}</div>
-                </div>
-                <button
-                  type="button"
-                  className={cn(btnPrimarySm, capCatalogInstallBtn)}
-                  disabled={!!installBusy || !!cardBusy}
-                  title={row.installSpec}
-                  onClick={() => void runInstall(row.installSpec)}
-                >
-                  {installBusy === row.installSpec ? 'Installing…' : 'Install'}
-                </button>
-              </div>
-            </li>
-            )
-          })}
+              {piDevResult.packages.map((row) => {
+                const canonFolder = folderIdFromSpec(
+                  knownPackagePrimarySpec(normalizeNpmInstallSpec(row.installSpec)),
+                )
+                const installedOnDisk = piDevRowLoadedByCanonFolder.has(canonFolder)
+                const loadedForAgent = piDevRowLoadedByCanonFolder.get(canonFolder) === true
+                return (
+                  <CatalogRowLi
+                    key={row.name}
+                    row={row}
+                    installedOnDisk={installedOnDisk}
+                    loadedForAgent={loadedForAgent}
+                    installBusy={installBusy}
+                    cardBusy={cardBusy}
+                    onInstall={runInstall}
+                  />
+                )
+              })}
             </ul>
           )}
           {piDevResult && !piDevBusy && !piDevErr && piDevResult.packages.length === 0 && (

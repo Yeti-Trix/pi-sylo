@@ -22,11 +22,14 @@ import { normalizeOllamaOriginUi } from './panels/ollama-ui'
 import {
   type WorkflowStampedEntry,
 } from './workflowTimeline'
-import { WorkspaceSelect } from './components/WorkspaceSelect'
 import { CanvasPanel } from './components/canvas/CanvasPanel'
 import { CanvasPopoutView } from './components/canvas/CanvasPopoutView'
 import { CanvasResizeHandle } from './components/canvas/CanvasResizeHandle'
 import { useCanvasTabs } from './components/canvas/useCanvasTabs'
+import { useTerminalSessions } from './components/canvas/useTerminalSessions'
+import type { AppTabKind } from './components/canvas/canvasTypes'
+import { APP_TAB_KIND_LABEL, tabKind } from './components/canvas/canvasTypes'
+import { storedSrcForTab } from './components/canvas/BrowserPane'
 import {
   CANVAS_SIZE_DEFAULT,
   clampCanvasSize,
@@ -78,32 +81,29 @@ import {
   convStatusDotRead,
   convStatusDotUnread,
   convStatusSpinner,
+  convTimestamp,
   leadText,
   mainContent,
   mutedText,
   navBtn,
-  navBtnActive,
-  navBtnRoute,
-  navRouteRow,
-  navSectionDetails,
-  navSectionSummary,
   routeCtxItem,
   routeCtxItemDanger,
   shellGrid,
   sidebar,
   sidebarBrandRow,
   sidebarBrandTitle,
-  sidebarChatFolderBar,
   sidebarAsideCollapsed,
+  sidebarConvEmpty,
   sidebarConvList,
-  sidebarDevList,
-  sidebarDevPanel,
   sidebarDragHandle,
   sidebarResizeBtn,
   sidebarResizeBtnCollapsed,
-  sidebarWorkspaceEditBtn,
-  sidebarWorkspaceLabel,
-  sidebarWorkspaceLabelRow,
+  sidebarSearchInput,
+  sidebarWsSection,
+  sidebarWsSectionSummary,
+  sidebarWsSectionChevron,
+  sidebarWsSectionName,
+  sidebarWsSectionActive,
   chatPane,
   chatArea,
   chatStatusSubfoot,
@@ -114,6 +114,8 @@ import {
   chatStopBtnCompact,
   agentWidgetHost,
   chatWorkbench,
+  showAppsStrip,
+  showAppsStripLabel,
   ctxMenuBackdrop,
   ctxMenuShell,
   folderNewPathWrap,
@@ -327,6 +329,19 @@ function ConvStatusIndicator({ status }: { status: ConvActivityStatus }): React.
   )
 }
 
+/** Cursor-style compact relative timestamp for sidebar chat rows ("14m", "3h", "6d", "Mar 2"). */
+function relTime(ts: number): string {
+  const diff = Math.max(0, Date.now() - ts)
+  const m = Math.floor(diff / 60_000)
+  if (m < 1) return 'now'
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h`
+  const d = Math.floor(h / 24)
+  if (d < 7) return `${d}d`
+  return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
 function truncatePathMiddle(s: string, maxLen: number): string {
   const t = s.trim()
   if (t.length <= maxLen) return t
@@ -480,19 +495,6 @@ async function persistWithPiProjectDirConfirm(
   return false
 }
 
-function skillNavSectionHeading(section: SkillRouteNavSection): string {
-  switch (section) {
-    case 'domain':
-      return 'Dashboards'
-    case 'tools':
-      return 'Tools'
-    case 'library':
-      return 'Library routes'
-    case 'dev':
-      return 'Developer'
-  }
-}
-
 /** React 19 may null `currentTarget` on `<details onToggle>`; prefer nativeEvent.target. */
 function detailsOpenFromToggleEvent(e: React.SyntheticEvent<HTMLDetailsElement>): boolean {
   const t = e.nativeEvent.target
@@ -601,11 +603,21 @@ export function App(): React.ReactElement {
   const [updateStatus, setUpdateStatus] = useState<AppUpdateStatus | null>(null)
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null)
   const [conversations, setConversations] = useState<Conv[]>([])
+  /** Archived chats (retention v2): hidden from the main list, retrievable via the sidebar's Archived section. */
+  const [archivedConversations, setArchivedConversations] = useState<
+    { id: string; title: string; updated_at: number; archived_at: number | null; workspace_id: string | null }[]
+  >([])
   const [activeId, setActiveId] = useState<string | undefined>()
   const activeIdRef = useRef<string | undefined>(undefined)
   activeIdRef.current = activeId
   const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([])
   const [sidebarWorkspaceId, setSidebarWorkspaceId] = useState<string>('')
+  /** Sidebar chat-search filter (title substring within the active workspace). */
+  const [convSearch, setConvSearch] = useState('')
+  /** Whether the active workspace's chat section is expanded (others always collapsed). */
+  const [activeWsOpen, setActiveWsOpen] = useState(true)
+  /** Minute ticker so relative chat timestamps stay fresh without a conversation refresh. */
+  const [, bumpConvTimestamps] = useState(0)
       const [workspaceManageOpen, setWorkspaceManageOpen] = useState(false)
   const [onboardingNameOpen, setOnboardingNameOpen] = useState(false)
   const [onboardingName, setOnboardingName] = useState('')
@@ -826,7 +838,10 @@ export function App(): React.ReactElement {
     sections: { label: string; chars: number; tokens: number; pct: number }[]
   } | null>(null)
   const [systemPromptStatsOpen, setSystemPromptStatsOpen] = useState(false)
-  const [actualMessageTokens, setActualMessageTokens] = useState<number | null>(null)
+  const [actualContextByConv, setActualContextByConv] = useState<Record<string, {
+    tokens: number
+    includesSystemPrompt: boolean
+  }>>({})
 
   /** Full context-window token estimate: system prompt + all messages + tool calls + live streaming. */
   const contextStats = useMemo(() => {
@@ -834,6 +849,9 @@ export function App(): React.ReactElement {
     let userTokens = 0
     let assistantTokens = 0
     let toolTokens = 0
+    // Live streaming deltas for THIS conversation only — other chats' buffers
+    // must not inflate the visible counter.
+    let liveActive = 0
     for (const m of messages) {
       const contentLen = (m.content ?? '').length
       if (m.role === 'user') {
@@ -845,18 +863,26 @@ export function App(): React.ReactElement {
         }
         // Add live streaming delta for in-flight assistant messages
         const live = liveDelta[m.id]
-        if (live) assistantTokens += Math.ceil(live.length / 4)
+        if (live) {
+          assistantTokens += Math.ceil(live.length / 4)
+          liveActive += Math.ceil(live.length / 4)
+        }
       } else {
         // system messages (compaction notices, etc.)
         assistantTokens += Math.ceil(contentLen / 4)
       }
     }
     const total = sysTokens + userTokens + assistantTokens + toolTokens
-    // Actual context from broker (reflects Pi compaction): system prompt + post-compaction messages
-    // During streaming, add live delta so the number grows in real-time
-    const actualBase = actualMessageTokens != null ? actualMessageTokens + sysTokens : null
-    const liveTotal = Object.values(liveDelta).reduce((sum, d) => sum + Math.ceil(d.length / 4), 0)
-    const actualTokens = actualBase != null ? actualBase + liveTotal : null
+    // Actual context from broker (reflects Pi compaction) — keyed per
+    // conversation so a stale entry from another chat never shows here.
+    // usage-based broker totals already include the system prompt; the estimate
+    // fallback does not.
+    const actualForActive = activeId != null ? actualContextByConv[activeId] : undefined
+    const actualBase =
+      actualForActive?.tokens != null
+        ? actualForActive.tokens + (actualForActive.includesSystemPrompt ? 0 : sysTokens)
+        : null
+    const actualTokens = actualBase != null ? actualBase + liveActive : null
     const sections = [
       { label: 'System prompt', tokens: sysTokens },
       { label: 'User messages', tokens: userTokens },
@@ -864,7 +890,7 @@ export function App(): React.ReactElement {
       { label: 'Tool calls + results', tokens: toolTokens },
     ].map((s) => ({ ...s, pct: total > 0 ? Math.round((s.tokens / total) * 1000) / 10 : 0 }))
     return { totalTokens: total, actualTokens, sections }
-  }, [messages, systemPromptStats, liveDelta, actualMessageTokens])
+  }, [messages, systemPromptStats, liveDelta, actualContextByConv, activeId])
   const [diagnostics, setDiagnostics] = useState({
     userData: '',
     db: '',
@@ -883,6 +909,8 @@ export function App(): React.ReactElement {
 
   const [renameConvModal, setRenameConvModal] = useState<{ id: string; draft: string } | null>(null)
   const [deleteConvModal, setDeleteConvModal] = useState<{ id: string; title: string } | null>(null)
+  /** Bulk confirm for "Delete all…" in the Archived section. */
+  const [deleteAllArchivedOpen, setDeleteAllArchivedOpen] = useState(false)
 
   const [agentWidgetPayload, setAgentWidgetPayload] = useState<{
     toolCallId: string
@@ -915,11 +943,6 @@ export function App(): React.ReactElement {
   const [popoutResolved, setPopoutResolved] = useState(() => routePopoutKey === null)
 
   const [navLayout, setNavLayout] = useState<SkillNavLayoutState>(DEFAULT_SKILL_NAV_LAYOUT)
-  const [routeContextMenu, setRouteContextMenu] = useState<{
-    route: SkillRouteRow
-    clientX: number
-    clientY: number
-  } | null>(null)
   const [convContextMenu, setConvContextMenu] = useState<{
     id: string
     title: string
@@ -934,14 +957,6 @@ export function App(): React.ReactElement {
   } | null>(null)
   const [routeActionDraft, setRouteActionDraft] = useState('')
 
-  /** Collapsible Developer route bucket (sidebar). */
-  const [devNavOpen, setDevNavOpen] = useState(false)
-  /** Collapsible sidebar route buckets (Developer uses {@link devNavOpen}). */
-  const [routeBucketsOpen, setRouteBucketsOpen] = useState<Record<'domain' | 'tools' | 'library', boolean>>({
-    domain: true,
-    tools: false,
-    library: false,
-  })
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_WIDTH_DEFAULT)
   const sidebarResizeRef = useRef<{ pointerId: number; startX: number; startW: number } | null>(null)
@@ -1374,6 +1389,7 @@ export function App(): React.ReactElement {
     const wid = sidebarWorkspaceId.trim()
     if (!wid) {
       setConversations([])
+      setArchivedConversations([])
       return
     }
     let list: Conv[] = (await window.sylo.conversations.list(wid)) as Conv[]
@@ -1383,6 +1399,21 @@ export function App(): React.ReactElement {
     }
 
     setConversations(list)
+
+    // Archived (retention v2): kept chats idle past the retention window.
+    try {
+      setArchivedConversations(
+        (await window.sylo.conversations.listArchived(wid)) as {
+          id: string
+          title: string
+          updated_at: number
+          archived_at: number | null
+          workspace_id: string | null
+        }[],
+      )
+    } catch {
+      /* keep previous list */
+    }
 
     const saved = (await window.sylo.prefs.get('sylo.ui.active_conversation_id', '')) as string
     const savedTrim = typeof saved === 'string' ? saved.trim() : ''
@@ -1472,11 +1503,6 @@ export function App(): React.ReactElement {
     }
   }, [sidebarWorkspaceId])
 
-  const persistNavLayout = useCallback(async (next: SkillNavLayoutState) => {
-    setNavLayout(next)
-    await window.sylo.prefs.set('sylo.nav.layout', next)
-  }, [])
-
   /** Sync agent UX + banner copy from main (handles missed IPC events). */
   const refreshBrokerFromMain = useCallback(async () => {
     const st = await window.sylo.broker.getStatus()
@@ -1496,9 +1522,18 @@ export function App(): React.ReactElement {
       }
       try {
         const actual = await window.sylo.broker.getActualContextTokens()
-        setActualMessageTokens(actual)
+        if (actual && actual.conversationId === activeIdRef.current && typeof actual.actualMessageTokens === 'number') {
+          const convId = actual.conversationId as string
+          setActualContextByConv((prev) => ({
+            ...prev,
+            [convId]: {
+              tokens: actual.actualMessageTokens as number,
+              includesSystemPrompt: actual.includesSystemPrompt === true,
+            },
+          }))
+        }
       } catch {
-        setActualMessageTokens(null)
+        /* best-effort UI nicety — leave any existing entries alone */
       }
     } else if (st.initError) {
       setAgentReady(false)
@@ -1545,20 +1580,112 @@ export function App(): React.ReactElement {
     void window.sylo.canvas?.reportOpenState?.(canvasOpen)
   }, [canvasOpen, canvasPopoutKey, routePopoutKey])
 
+  // Phase 1 (Cursor restyle): push the final skill-route menu rows for the
+  // active workspace to the native menu bar (Dashboards / Tools / Developer).
+  // The renderer owns nav-layout sorting (hidden/pinned/order are still
+  // respected from `sylo.nav.layout`); the main process renders the menus and
+  // forwards clicks back via `menu:action`. Skipped in popout windows.
+  useEffect(() => {
+    if (canvasPopoutKey !== null || routePopoutKey !== null) return
+    const routes = SYLO_SKILL_SURFACE_CAPABILITY_DESCRIPTOR.supports_route ? skillRoutes : []
+    const routeItems = (section: SkillRouteNavSection) =>
+      sortedRoutesForNavSection(section, routes, navLayout).map((r) => ({
+        kind: 'route' as const,
+        key: skillRouteRowKey(r),
+        title: r.title,
+      }))
+    void window.sylo.menu.setSections([
+      { id: 'domain', label: 'Dashboards', items: routeItems('domain') },
+      {
+        id: 'tools',
+        label: 'Tools',
+        items: [
+          { kind: 'tab' as const, tab: 'schedules', title: 'Schedules' },
+          ...routeItems('tools'),
+          ...routeItems('library').map((it, i) => ({ ...it, sep: i === 0 })),
+        ],
+      },
+      {
+        id: 'dev',
+        label: 'Developer',
+        items: [
+          ...routeItems('dev'),
+          { kind: 'tab' as const, tab: 'proposals', title: 'Proposals', sep: true },
+          { kind: 'tab' as const, tab: 'evals', title: 'Testing' },
+          { kind: 'tab' as const, tab: 'skills', title: 'Capability manager' },
+          { kind: 'tab' as const, tab: 'settings', title: 'Settings' },
+          { kind: 'action' as const, action: 'restart-broker', title: 'Restart broker', sep: true },
+          ...(safeMode ?
+            [{ kind: 'action' as const, action: 'clear-safe-mode', title: 'Clear safe mode' }]
+          : []),
+        ],
+      },
+    ])
+  }, [skillRoutes, navLayout, safeMode, canvasPopoutKey, routePopoutKey])
+
+  // Native menu click → resolve to a route tab / builtin tab / broker action.
+  useEffect(() => {
+    if (canvasPopoutKey !== null || routePopoutKey !== null) return
+    return window.sylo.menu.onAction((item) => {
+      if (item.kind === 'route' && item.key) {
+        const hit = skillRoutes.find((r) => skillRouteRowKey(r) === item.key)
+        if (hit) {
+          setActiveSkillRoute(hit)
+          setTab('skill-route')
+        }
+        return
+      }
+      if (item.kind === 'tab' && item.tab) {
+        setTab(item.tab as Tab)
+        return
+      }
+      if (item.kind === 'action') {
+        if (item.action === 'restart-broker') {
+          void (async () => {
+            await window.sylo.broker.restart()
+            await refreshCapabilities()
+            await refreshBrokerFromMain()
+          })()
+        } else if (item.action === 'clear-safe-mode') {
+          void (async () => {
+            await window.sylo.safeMode.clear()
+            setSafeMode(false)
+            await window.sylo.broker.restart()
+            await refreshCapabilities()
+            await refreshBrokerFromMain()
+          })()
+        }
+      }
+    })
+  }, [skillRoutes, refreshCapabilities, refreshBrokerFromMain, canvasPopoutKey, routePopoutKey])
+
+  // Minute ticker so sidebar relative timestamps stay fresh.
+  useEffect(() => {
+    const t = setInterval(() => bumpConvTimestamps((n) => n + 1), 60_000)
+    return () => clearInterval(t)
+  }, [])
+
   const collapseCanvas = useCallback(() => {
     setCanvasOpen(false)
     void window.sylo.prefs.set('sylo.canvas.open', false)
   }, [])
+
+  // Terminal sessions (apps pane) — registry keyed by apps-tab id; the pty
+  // lives in main and survives tab/chat switches. cwd resolves per create.
+  const terminals = useTerminalSessions()
+  const workspaceCwdRef = useRef('')
+  workspaceCwdRef.current = activeWorkspaceForSettings.resolvedPiCwd ?? ''
 
   const openCanvasPanel = useCallback(() => {
     setCanvasOpen(true)
     void window.sylo.prefs.set('sylo.canvas.open', true)
   }, [])
 
-  // Docked-canvas tabs (per workspace). Owns the canvas:show / canvas:live-*
-  // listeners and the workspace-switch tab swap/restore — see useCanvasTabs.ts
-  // for the model (each tab owns exactly one view; live tabs stay subscribed
-  // in the background).
+  // Docked apps pane tabs (per active conversation, workspace fallback —
+  // task boards stay workspace-scoped). Owns the canvas:show / canvas:live-*
+  // listeners and the scope-switch tab swap/restore — see useCanvasTabs.ts
+  // for the model (each tab owns exactly one view or an app-pane kind; live
+  // tabs stay subscribed in the background).
   const {
     tabs: canvasTabs,
     activeTabId: canvasActiveTabId,
@@ -1566,12 +1693,69 @@ export function App(): React.ReactElement {
     setActiveTab: onCanvasSelectTab,
     closeTab: closeCanvasTab,
     updateActiveSnapshot: updateActiveCanvasSnapshot,
+    openAppTab: openAppsPaneTab,
   } = useCanvasTabs({
     workspaceId: sidebarWorkspaceId,
+    conversationId: activeId,
     workspaceCwd: activeWorkspaceForSettings.resolvedPiCwd ?? '',
     activeWorkspaceCwdRef,
     onOpenPanel: openCanvasPanel,
+    onTerminalRestored: (tabId, cwd) => terminals.ensure(tabId, cwd || workspaceCwdRef.current),
   })
+
+  // ── Workspace pool persistence: save terminal/browser tabs (debounced) ────
+  // The cleanup path saves synchronously so a quick workspace switch can't
+  // lose the last mutation. Scrollback/page state intentionally do not
+  // survive restarts — only kind, title, terminal cwd, last browser URL.
+  useEffect(() => {
+    if (!sidebarWorkspaceId) return
+    const pool = canvasTabs
+      .map((t) => ({ t, k: tabKind(t) }))
+      .filter(({ k }) => k === 'terminal' || k === 'browser')
+      .map(({ t, k }) => ({
+        kind: k as 'terminal' | 'browser',
+        title: t.title ?? APP_TAB_KIND_LABEL[k],
+        terminalCwd:
+          k === 'terminal' ? terminals.get(t.id)?.cwd ?? workspaceCwdRef.current : undefined,
+        browserUrl: k === 'browser' ? storedSrcForTab(t.id) ?? t.browserUrl : undefined,
+      }))
+    const save = () => void window.sylo.canvas.savePoolTabs?.(sidebarWorkspaceId, pool)
+    const timer = window.setTimeout(save, 800)
+    return () => {
+      window.clearTimeout(timer)
+      save()
+    }
+  }, [canvasTabs, sidebarWorkspaceId, terminals])
+
+  // Session lifecycle for Terminal app-panes: create the pty when a Terminal
+  // tab opens, kill it when that tab closes. Sessions persist across tab,
+  // conversation and panel switches by design (cwd is captured at create).
+  const openAppsPaneTabWithSessions = useCallback(
+    (kind: AppTabKind) => {
+      // Pool tabs (terminal/browser) carry the originating chat's name as a
+      // muted chip so a shared workspace pool stays traceable.
+      const origin = activeId ? (conversations.find((c) => c.id === activeId)?.title ?? '') : ''
+      const id = openAppsPaneTab(kind, origin)
+      if (kind === 'terminal') terminals.ensure(id, workspaceCwdRef.current)
+    },
+    [openAppsPaneTab, terminals, activeId, conversations],
+  )
+  const closeCanvasTabsWithSessions = useCallback(
+    (ids: string[]) => {
+      ids.forEach((id) => {
+        terminals.dispose(id)
+        closeCanvasTab(id)
+      })
+    },
+    [closeCanvasTab, terminals],
+  )
+  const closeCanvasTabWithSessions = useCallback(
+    (tabId: string) => {
+      terminals.dispose(tabId)
+      closeCanvasTab(tabId)
+    },
+    [closeCanvasTab, terminals],
+  )
 
   const openCanvasPopout = useCallback(() => {
     // Pop out the ACTIVE tab's view — snapshot first, mirroring the render
@@ -1635,18 +1819,15 @@ export function App(): React.ReactElement {
   }, [routePopoutKey])
 
   useEffect(() => {
-    if (!routeContextMenu && !convContextMenu) return
+    if (!convContextMenu) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setRouteContextMenu(null)
-        setConvContextMenu(null)
-      }
+      if (e.key === 'Escape') setConvContextMenu(null)
     }
     document.addEventListener('keydown', onKey)
     return () => {
       document.removeEventListener('keydown', onKey)
     }
-  }, [routeContextMenu, convContextMenu])
+  }, [convContextMenu])
 
   useEffect(() => {
     void (async () => {
@@ -1862,23 +2043,21 @@ export function App(): React.ReactElement {
   }, [chatTimeline.length, activeThinkTankBubbles.length, activeId, scrollChatToEnd, tab])
 
   useEffect(() => {
-    if (!renameConvModal && !deleteConvModal) return
+    if (!renameConvModal && !deleteConvModal && !deleteAllArchivedOpen) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setRenameConvModal(null)
         setDeleteConvModal(null)
+        setDeleteAllArchivedOpen(false)
       }
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [renameConvModal, deleteConvModal])
+  }, [renameConvModal, deleteConvModal, deleteAllArchivedOpen])
 
   useEffect(() => {
-    if (!routeContextMenu && !convContextMenu) return
-    const dismiss = () => {
-      setRouteContextMenu(null)
-      setConvContextMenu(null)
-    }
+    if (!convContextMenu) return
+    const dismiss = () => setConvContextMenu(null)
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') dismiss()
     }
@@ -1890,7 +2069,7 @@ export function App(): React.ReactElement {
       document.removeEventListener('keydown', onKey)
       window.removeEventListener('wheel', onWheel, { capture: true })
     }
-  }, [routeContextMenu, convContextMenu])
+  }, [convContextMenu])
 
   useEffect(() => {
     const u = window.sylo.skillSurface.onShow((p) => {
@@ -1937,9 +2116,26 @@ export function App(): React.ReactElement {
     const u_sp = window.sylo.broker.onSystemPromptStats((p) => {
       if (p && typeof p === 'object') setSystemPromptStats(p as { totalChars: number; totalTokens: number; sections: { label: string; chars: number; tokens: number; pct: number }[] })
     })
-        const u_ac = window.sylo.broker.onActualContextTokens((tokens) => {
-      if (typeof tokens === 'number') setActualMessageTokens(tokens)
-    })
+        const u_ac = window.sylo.broker.onActualContextTokens((p) => {
+          // Conversation-scoped: store per conversation. Only entries for the
+          // conversation being viewed are accepted — the primary broker is
+          // shared/rebound, so a mid-switch broadcast can carry a stale
+          // conversation stamp, and background chats' turns must never move
+          // the viewed counter.
+          if (
+            p && typeof p.actualMessageTokens === 'number' &&
+            p.conversationId && p.conversationId === activeIdRef.current
+          ) {
+            const convId = p.conversationId as string
+            setActualContextByConv((prev) => ({
+              ...prev,
+              [convId]: {
+                tokens: p.actualMessageTokens as number,
+                includesSystemPrompt: p.includesSystemPrompt === true,
+              },
+            }))
+          }
+        })
     const u3 = window.sylo.chatEvents.onRefresh((p) => {
       if (!p?.conversationId) return
       if (p.conversationId === activeId) void refreshMessages()
@@ -2251,7 +2447,7 @@ export function App(): React.ReactElement {
       )
       if (!hit) {
         window.alert(
-          'LogicForge route not found — enable sylo-logicforge + logicforge skill, then restart Sylo.',
+          'LogicForge route not found - enable sylo-logicforge + logicforge skill, then restart Sylo.',
         )
         return
       }
@@ -2286,6 +2482,70 @@ export function App(): React.ReactElement {
     [skillRoutes],
   )
 
+  // ── Agent checkpoints (per-turn undo; storage in app data only) ───────────
+  // Assistant replies with a pre-turn workspace snapshot get a hover "Undo".
+  const [undoableTurnIds, setUndoableTurnIds] = useState<Set<string>>(new Set())
+  useEffect(() => {
+    let dead = false
+    setUndoableTurnIds(new Set())
+    if (!activeId) return
+    void (async () => {
+      try {
+        const entries = await window.sylo.checkpoints.list(activeId)
+        if (dead) return
+        setUndoableTurnIds(new Set(entries.map((e) => e.assistantMessageId)))
+      } catch {
+        /* checkpoints are optional */
+      }
+    })()
+    return () => {
+      dead = true
+    }
+  }, [activeId, chatTimeline.length])
+
+  const [undoTurnModal, setUndoTurnModal] = useState<{
+    assistantId: string
+    preview: { modified: string[]; added: string[]; deleted: string[] }
+    busy: boolean
+  } | null>(null)
+  useEffect(() => {
+    if (!undoTurnModal) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !undoTurnModal.busy) setUndoTurnModal(null)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [undoTurnModal])
+  const openUndoTurnModal = useCallback(
+    async (assistantId: string) => {
+      if (!activeId) return
+      const r = await window.sylo.checkpoints.preview(activeId, assistantId)
+      if (!r.ok) {
+        window.alert(`Could not preview this checkpoint: ${r.error}`)
+        return
+      }
+      setUndoTurnModal({ assistantId, preview: r.preview, busy: false })
+    },
+    [activeId],
+  )
+  const confirmUndoTurn = async () => {
+    if (!undoTurnModal || !activeId) return
+    setUndoTurnModal({ ...undoTurnModal, busy: true })
+    const r = await window.sylo.checkpoints.restore(activeId, undoTurnModal.assistantId)
+    if (!r.ok) {
+      window.alert(`Restore failed: ${r.error}`)
+      setUndoTurnModal(null)
+      return
+    }
+    setUndoTurnModal(null)
+    try {
+      const entries = await window.sylo.checkpoints.list(activeId)
+      setUndoableTurnIds(new Set(entries.map((e) => e.assistantMessageId)))
+    } catch {
+      /* ignore */
+    }
+  }
+
   const renderChatTimelineRow = useCallback(
     (row: ChatTimelineRow) => {
       if (row.kind === 'message') {
@@ -2301,6 +2561,8 @@ export function App(): React.ReactElement {
             onSubagentNotice={handleSubagentNotice}
             onOpenLogicForgeIoReview={(runDir) => void handleOpenLogicForgeIoReview(runDir)}
             workspaceId={sidebarWorkspaceId}
+            canUndoTurn={m.role === 'assistant' && undoableTurnIds.has(m.id)}
+            onUndoTurn={() => void openUndoTurnModal(m.id)}
           />
         )
       }
@@ -2337,6 +2599,8 @@ export function App(): React.ReactElement {
       segmentOverrides,
       thinkTankUiBySession,
       sidebarWorkspaceId,
+      undoableTurnIds,
+      openUndoTurnModal,
     ],
   )
 
@@ -2515,21 +2779,22 @@ export function App(): React.ReactElement {
     prefillChatPrompt('/skill:sylo-skill-author ')
   }, [prefillChatPrompt])
 
-  const newChat = async () => {
-    const wid = sidebarWorkspaceId.trim()
-    if (!wid) return
-    const reuseId = await window.sylo.conversations.findLatestEmpty(wid)
+  const newChatIn = async (wid: string) => {
+    const id = wid.trim()
+    if (!id) return
+    const reuseId = await window.sylo.conversations.findLatestEmpty(id)
     if (reuseId) {
       await refreshConversations()
       setActiveId(reuseId)
       setTab('chat')
       return
     }
-    const c = await window.sylo.conversations.create('', wid)
+    const c = await window.sylo.conversations.create('', id)
     await refreshConversations()
     setActiveId(c.id)
     setTab('chat')
   }
+  const newChat = () => void newChatIn(sidebarWorkspaceId)
 
   const handleAttachUiFolder = useCallback(async () => {
     const p = await window.sylo.dialog.openDirectory({
@@ -2573,6 +2838,58 @@ export function App(): React.ReactElement {
     const id = deleteConvModal.id
     setDeleteConvModal(null)
     await performDeleteConversation(id)
+  }
+
+  /** Archive a chat (retention v2): hidden from the sidebar, nothing deleted. If it was active, fall back to the auto-picked chat. */
+  const performArchiveConversation = async (id: string) => {
+    await window.sylo.conversations.setArchived(id, true)
+    if (activeId === id) {
+      activeIdRef.current = undefined
+      setActiveId(undefined)
+    }
+    await refreshConversations()
+  }
+
+  /** Unarchive from the sidebar's Archived section and open the chat. */
+  const unarchiveConversation = async (id: string) => {
+    await window.sylo.conversations.setArchived(id, false)
+    activeIdRef.current = id
+    setActiveId(id)
+    setTab('chat')
+    await refreshConversations()
+  }
+
+  /** Bulk: unarchive every archived chat in the workspace (no chat is opened). */
+  const restoreAllArchived = async () => {
+    const ids = archivedConversations.map((c) => c.id)
+    if (ids.length === 0) return
+    for (const id of ids) {
+      try {
+        await window.sylo.conversations.setArchived(id, false)
+      } catch {
+        /* keep going — refresh reports reality */
+      }
+    }
+    await refreshConversations()
+  }
+
+  /** Bulk: permanently delete every archived chat in the workspace. */
+  const confirmDeleteAllArchived = async () => {
+    const ids = archivedConversations.map((c) => c.id)
+    setDeleteAllArchivedOpen(false)
+    if (ids.length === 0) return
+    for (const id of ids) {
+      try {
+        await window.sylo.conversations.delete(id)
+      } catch {
+        /* keep going — refresh reports reality */
+      }
+    }
+    if (ids.includes(activeId ?? '')) {
+      activeIdRef.current = undefined
+      setActiveId(undefined)
+    }
+    await refreshConversations()
   }
 
   // const workflowModalMessage =
@@ -2627,33 +2944,6 @@ export function App(): React.ReactElement {
     const next = { ...settingsJson, packages: nextPkgs }
     await window.sylo.capabilities.writeSettings(next)
     setSettingsJson(next)
-  }
-
-  const reorderRouteWithinSection = (
-    section: SkillRouteNavSection,
-    draggedKey: string,
-    targetKey: string,
-  ) => {
-    if (draggedKey === targetKey) return
-    const keys = sortedRoutesForNavSection(section, skillRoutes, navLayout).map(skillRouteRowKey)
-    const fi = keys.indexOf(draggedKey)
-    const ti = keys.indexOf(targetKey)
-    if (fi < 0 || ti < 0 || fi === ti) return
-    const next = [...keys]
-    next.splice(fi, 1)
-    next.splice(ti, 0, draggedKey)
-    void persistNavLayout({
-      ...navLayout,
-      order: { ...navLayout.order, [section]: next },
-    })
-  }
-
-  const togglePinSkillRouteKey = (k: string) => {
-    const arr = [...navLayout.pinned]
-    const ix = arr.indexOf(k)
-    if (ix >= 0) arr.splice(ix, 1)
-    else arr.push(k)
-    void persistNavLayout({ ...navLayout, pinned: arr })
   }
 
     const bridgeTargetRoute = routePopoutKey ? popoutRoute : activeSkillRoute
@@ -3253,6 +3543,18 @@ export function App(): React.ReactElement {
               <button
                 type="button"
                 className={sidebarResizeBtn}
+                aria-label="Manage workspaces"
+                title="Add or edit workspaces"
+                onClick={() => {
+                  setWorkspaceManageOpen(true)
+                  void refreshWorkspaces()
+                }}
+              >
+                ✎
+              </button>
+              <button
+                type="button"
+                className={sidebarResizeBtn}
                 aria-label="Collapse sidebar"
                 title="Collapse sidebar"
                 onClick={() => setSidebarCollapsed(true)}
@@ -3261,118 +3563,129 @@ export function App(): React.ReactElement {
               </button>
             </div>
 
-        {SYLO_SKILL_SURFACE_CAPABILITY_DESCRIPTOR.supports_route &&
-          ROUTE_NAV_SECTION_SEQUENCE.filter((s) => s !== 'dev').map((section) => {
-            const rows = sortedRoutesForNavSection(section, skillRoutes, navLayout)
-            const showBuiltinToolsNav = section === 'tools'
-            if (rows.length === 0 && !showBuiltinToolsNav) return null
+        <input
+          type="text"
+          className={sidebarSearchInput}
+          placeholder="Search chats…"
+          aria-label="Search chats in this workspace"
+          value={convSearch}
+          onChange={(e) => setConvSearch(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              setConvSearch('')
+              ;(e.target as HTMLInputElement).blur()
+            }
+          }}
+        />
+
+        <button type="button" className={navBtn} onClick={() => void newChat()}>
+          + New chat
+        </button>
+
+        <div className={sidebarConvList}>
+          {workspaces.map((ws) => {
+            const wsActive = ws.id === sidebarWorkspaceId
+            const q = convSearch.trim().toLowerCase()
+            const searching = q !== ''
+            const wsConvs = wsActive
+              ? conversations.filter((c) => !searching || (c.title || '').toLowerCase().includes(q))
+              : []
             return (
               <details
-                key={section}
-                className={navSectionDetails}
-                open={routeBucketsOpen[section]}
-                onToggle={(e) =>
-                  setRouteBucketsOpen((prev) => ({
-                    ...prev,
-                    [section]: detailsOpenFromToggleEvent(e),
-                  }))
-                }
+                key={ws.id}
+                className={sidebarWsSection}
+                open={wsActive ? activeWsOpen || searching : false}
+                onToggle={(e) => {
+                  const nowOpen = detailsOpenFromToggleEvent(e)
+                  if (nowOpen && !wsActive) {
+                    // Expanding another workspace's section switches to it.
+                    setActiveWsOpen(true)
+                    setSidebarWorkspaceId(ws.id)
+                    void window.sylo.prefs.set('sylo.ui.active_workspace_id', ws.id)
+                  } else if (wsActive) {
+                    setActiveWsOpen(nowOpen)
+                  }
+                }}
               >
-                <summary className={navSectionSummary}>{skillNavSectionHeading(section)}</summary>
-                {rows.map((r) => {
-                  const k = skillRouteRowKey(r)
-                  const active =
-                    tab === 'skill-route' &&
-                    activeSkillRoute?.skillFolderName === r.skillFolderName &&
-                    activeSkillRoute.routeId === r.routeId
-                  return (
-                    <div
-                      key={k}
-                      className={navRouteRow}
-                      onDragOver={(e) => {
-                        e.preventDefault()
-                        e.dataTransfer.dropEffect = 'move'
-                      }}
-                      onDrop={(e) => {
-                        e.preventDefault()
-                        const from = e.dataTransfer.getData('sylo/route')
-                        if (!from || from === k) return
-                        reorderRouteWithinSection(section, from, k)
-                      }}
+                <summary
+                  className={cn(
+                    sidebarWsSectionSummary,
+                    'group/wsrow',
+                    wsActive && sidebarWsSectionActive,
+                  )}
+                >
+                  <span className={sidebarWsSectionChevron} aria-hidden="true">
+                    {/* Folder glyph swaps closed ↔ open via the <details> state. */}
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.6"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      className="h-3.5 w-3.5 group-open/ws:hidden"
                     >
-                      <button
-                        type="button"
-                        draggable
-                        onDragStart={(e) => {
-                          e.dataTransfer.setData('sylo/route', k)
-                          e.dataTransfer.effectAllowed = 'move'
-                        }}
-                        className={cn(navBtnRoute, active && navBtnActive)}
-                        onClick={() => {
-                          setActiveSkillRoute(r)
-                          setTab('skill-route')
-                        }}
-                        onContextMenu={(e) => {
-                          e.preventDefault()
-                          setRouteContextMenu({ route: r, clientX: e.clientX, clientY: e.clientY })
-                        }}
-                      >
-                        {navLayout.pinned.includes(k) ? '◆ ' : ''}
-                        {r.title}
-                      </button>
-                    </div>
-                  )
-                })}
-                {showBuiltinToolsNav ?
-                  <div className={navRouteRow}>
-                    <button
-                      type="button"
-                      className={cn(navBtnRoute, tab === 'schedules' && navBtnActive)}
-                      onClick={() => setTab('schedules')}
+                      <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+                    </svg>
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.6"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      className="hidden h-3.5 w-3.5 group-open/ws:block"
                     >
-                      Schedules
-                    </button>
+                      <path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v2" />
+                    </svg>
+                  </span>
+                  <span className={sidebarWsSectionName} title={ws.name}>
+                    {ws.name}
+                  </span>
+                  {/* Per-folder + (Cursor-style): new chat in THIS workspace. Shown on
+                      row hover and while the section is open. preventDefault keeps the
+                      click from toggling the <details> folder. */}
+                  <button
+                    type="button"
+                    title={`New chat in ${ws.name}`}
+                    aria-label={`New chat in ${ws.name}`}
+                    className={cn(
+                      'flex h-5 w-5 shrink-0 items-center justify-center rounded text-text-muted opacity-0',
+                      'transition-opacity duration-[120ms] hover:bg-bg-tertiary hover:text-text-primary',
+                      'focus-visible:opacity-100 focus-visible:text-text-primary',
+                      'group-hover/wsrow:opacity-100',
+                      wsActive && activeWsOpen && !searching && 'opacity-100',
+                    )}
+                    onClick={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      if (!wsActive) {
+                        setSidebarWorkspaceId(ws.id)
+                        void window.sylo.prefs.set('sylo.ui.active_workspace_id', ws.id)
+                      }
+                      setActiveWsOpen(true)
+                      void newChatIn(ws.id)
+                    }}
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      className="h-3.5 w-3.5"
+                      aria-hidden="true"
+                    >
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
+                  </button>
+                </summary>
+                {wsActive && wsConvs.length === 0 ? (
+                  <div className={sidebarConvEmpty}>
+                    {searching ? `No chats matching "${convSearch.trim()}"` : 'No chats yet'}
                   </div>
-                : null}
-              </details>
-            )
-          })}
-
-        <hr className="w-full border-border" />
-        <div className={sidebarChatFolderBar}>
-          <div className={sidebarWorkspaceLabelRow}>
-            <span className={sidebarWorkspaceLabel} id="sidebar-workspace-heading">
-              Workspaces
-            </span>
-            <button
-              type="button"
-              className={sidebarWorkspaceEditBtn}
-              aria-label="Edit workspaces"
-              title="Add or edit workspaces"
-              onClick={() => {
-                setWorkspaceManageOpen(true)
-                void refreshWorkspaces()
-              }}
-            >
-              Edit
-            </button>
-          </div>
-          <WorkspaceSelect
-            id="sidebar-workspace-select"
-            aria-labelledby="sidebar-workspace-heading"
-            workspaces={workspaces}
-            value={sidebarWorkspaceId}
-            onChange={(v) => {
-              setSidebarWorkspaceId(v)
-              void window.sylo.prefs.set('sylo.ui.active_workspace_id', v)
-            }}
-          />
-        </div>
-        <button type="button" className={navBtn} onClick={() => void newChat()}>
-          + Conversation
-        </button>
-        <div className={sidebarConvList}>
-          {conversations.map((c) => {
+                ) : null}
+          {wsConvs.map((c) => {
             const selected = c.id === activeId
             const activity = convActivityStatus(c.id, sendingConvIds, unreadConvIds)
             return (
@@ -3401,6 +3714,12 @@ export function App(): React.ReactElement {
                 >
                   <ConvStatusIndicator status={activity} />
                   <span className={convRowSelectLabel}>{c.title || '(untitled)'}</span>
+                  <span
+                    className={convTimestamp}
+                    title={new Date(c.updated_at).toLocaleString()}
+                  >
+                    {relTime(c.updated_at)}
+                  </span>
                 </button>
                 <div className={convRowActions}>
                   <button
@@ -3444,120 +3763,113 @@ export function App(): React.ReactElement {
             </div>
             )
           })}
-        </div>
-        <div className={sidebarDevPanel}>
-          <details
-            className={navSectionDetails}
-            open={devNavOpen}
-            onToggle={(e) => setDevNavOpen(detailsOpenFromToggleEvent(e))}
-          >
-            <summary className={navSectionSummary}>{skillNavSectionHeading('dev')}</summary>
-            <div className={sidebarDevList}>
-              {SYLO_SKILL_SURFACE_CAPABILITY_DESCRIPTOR.supports_route ?
-                sortedRoutesForNavSection('dev', skillRoutes, navLayout).map((r) => {
-                  const k = skillRouteRowKey(r)
-                  const active =
-                    tab === 'skill-route' &&
-                    activeSkillRoute?.skillFolderName === r.skillFolderName &&
-                    activeSkillRoute?.routeId === r.routeId
-                  return (
-                    <div
-                      key={k}
-                      className={navRouteRow}
-                      onDragOver={(e) => {
-                        e.preventDefault()
-                        e.dataTransfer.dropEffect = 'move'
-                      }}
-                      onDrop={(e) => {
-                        e.preventDefault()
-                        const from = e.dataTransfer.getData('sylo/route')
-                        if (!from || from === k) return
-                        reorderRouteWithinSection('dev', from, k)
-                      }}
-                    >
-                      <button
-                        type="button"
-                        draggable
-                        onDragStart={(e) => {
-                          e.dataTransfer.setData('sylo/route', k)
-                          e.dataTransfer.effectAllowed = 'move'
-                        }}
-                        className={cn(navBtnRoute, active && navBtnActive)}
-                        onClick={() => {
-                          setActiveSkillRoute(r)
-                          setTab('skill-route')
-                        }}
-                        onContextMenu={(e) => {
-                          e.preventDefault()
-                          setRouteContextMenu({ route: r, clientX: e.clientX, clientY: e.clientY })
-                        }}
-                      >
-                        {navLayout.pinned.includes(k) ? '◆ ' : ''}
-                        {r.title}
-                      </button>
-                    </div>
-                  )
-                })
-              : null}
-              <button
-                type="button"
-                className={cn(navBtnRoute, tab === 'proposals' && navBtnActive)}
-                onClick={() => setTab('proposals')}
-              >
-                Proposals
-              </button>
-              <button
-                type="button"
-                className={cn(navBtnRoute, tab === 'evals' && navBtnActive)}
-                onClick={() => setTab('evals')}
-              >
-                Testing
-              </button>
-              <button
-                type="button"
-                className={cn(navBtnRoute, tab === 'skills' && navBtnActive)}
-                onClick={() => setTab('skills')}
-              >
-                Capability manager
-              </button>
-              <button
-                type="button"
-                className={cn(navBtnRoute, tab === 'settings' && navBtnActive)}
-                onClick={() => setTab('settings')}
-              >
-                Settings
-              </button>
-              <button
-                type="button"
-                className={navBtnRoute}
-                onClick={() =>
-                  void (async () => {
-                    await window.sylo.broker.restart()
-                    await refreshCapabilities()
-                    await refreshBrokerFromMain()
-                  })()
-                }
-              >
-                Restart broker
-              </button>
-              {safeMode ?
+              </details>
+            )
+          })}
+          {(() => {
+            // Archived section: filtered by the sidebar search too, auto-expanded
+            // while searching, with bulk Restore-all / Delete-all (the manual
+            // purge path — nothing auto-destroys).
+            const aq = convSearch.trim().toLowerCase()
+            const archivedMatches = archivedConversations.filter(
+              (c) => !aq || (c.title || '').toLowerCase().includes(aq),
+            )
+            return archivedConversations.length > 0 ? (
+            <details
+              className={cn(sidebarWsSection, 'mt-1 border-t border-border/50 pt-1')}
+              title="Chats idle for 30+ days are archived here automatically — nothing is deleted"
+              open={aq ? true : undefined}
+            >
+              <summary className={cn(sidebarWsSectionSummary, 'text-text-muted')}>
+                <span className={sidebarWsSectionChevron} aria-hidden="true">
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="h-3 w-3 transition-transform duration-[120ms] group-open/ws:rotate-90"
+                  >
+                    <path d="m9 18 6-6-6-6" />
+                  </svg>
+                </span>
+                <span className={sidebarWsSectionName}>Archived</span>
+                <span className="shrink-0 rounded-full bg-bg-tertiary px-1.5 py-0.5 text-[0.62rem] leading-none tabular-nums text-text-muted">
+                  {archivedMatches.length === archivedConversations.length
+                    ? archivedConversations.length
+                    : `${archivedMatches.length}/${archivedConversations.length}`}
+                </span>
+              </summary>
+              <div className="flex items-center gap-1.5 px-2 pb-1">
                 <button
                   type="button"
-                  className={navBtnRoute}
-                  onClick={() =>
-                    void (async () => {
-                      await window.sylo.safeMode.clear()
-                      await window.sylo.broker.restart()
-                      await refreshCapabilities()
-                      await refreshBrokerFromMain()
-                    })()
-                  }
+                  className="cursor-pointer rounded border-none bg-transparent px-1.5 py-0.5 text-[0.68rem] text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                  title="Unarchive every archived chat in this workspace"
+                  disabled={archivedMatches.length === 0}
+                  onClick={() => void restoreAllArchived()}
                 >
-                  Clear safe mode
+                  Restore all
                 </button>
-              : null}
-            </div>
-          </details>
+                <button
+                  type="button"
+                  className="cursor-pointer rounded border-none bg-transparent px-1.5 py-0.5 text-[0.68rem] text-text-secondary hover:bg-[rgb(241_106_80/0.12)] hover:text-[#f6b3a4]"
+                  title="Permanently delete every archived chat in this workspace (files + messages)"
+                  disabled={archivedConversations.length === 0}
+                  onClick={() => setDeleteAllArchivedOpen(true)}
+                >
+                  Delete all…
+                </button>
+              </div>
+              {archivedMatches.map((c) => (
+                <div key={c.id} className={convRow} role="presentation">
+                  <div className={convRowMain}>
+                    <button
+                      type="button"
+                      className={convRowSelect}
+                      title="Unarchive and open this chat"
+                      onClick={() => void unarchiveConversation(c.id)}
+                    >
+                      <span className={cn(convStatusDot, convStatusDotRead)} aria-hidden="true" />
+                      <span className={cn(convRowSelectLabel, 'text-text-muted')}>
+                        {c.title || '(untitled)'}
+                      </span>
+                      <span className={convTimestamp} title={new Date(c.archived_at ?? c.updated_at).toLocaleString()}>
+                        {relTime(c.archived_at ?? c.updated_at)}
+                      </span>
+                    </button>
+                    <div className={convRowActions}>
+                      <button
+                        type="button"
+                        className={convActionBtn}
+                        aria-label={`Unarchive ${c.title || 'conversation'}`}
+                        title="Unarchive and open"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          void unarchiveConversation(c.id)
+                        }}
+                      >
+                        ⤴
+                      </button>
+                      <button
+                        type="button"
+                        className={cn(convActionBtn, convActionDanger)}
+                        aria-label={`Delete ${c.title || 'conversation'} forever`}
+                        title="Delete forever"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setDeleteConvModal({ id: c.id, title: c.title || '(untitled)' })
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </details>
+            ) : null
+          })()}
         </div>
           </>
         }
@@ -3747,14 +4059,14 @@ export function App(): React.ReactElement {
                       </button>
                     : null}
                     {systemPromptStatsOpen && contextStats.totalTokens > 0 ?
-                      <div className={cn(mutedText, 'text-[0.72rem] leading-tight border border-zinc-700/50 rounded px-2 py-1.5 mb-1')}>
+                      <div className={cn(mutedText, 'text-[0.72rem] leading-tight border border-border rounded px-2 py-1.5 mb-1')}>
                         {contextStats.sections.map((s, i) => (
                           <div key={i} className="flex justify-between gap-4">
                             <span className="truncate">{s.label}</span>
                             <span className="tabular-nums">{s.tokens.toLocaleString()} tok · {s.pct}%</span>
                           </div>
                         ))}
-                        <div className="flex justify-between gap-4 pt-1 border-t border-zinc-700/30 mt-1">
+                        <div className="flex justify-between gap-4 pt-1 border-t border-border/70 mt-1">
                           <span className="font-semibold">Total</span>
                           <span className="tabular-nums font-semibold">{(contextStats.actualTokens ?? contextStats.totalTokens).toLocaleString()} tok</span>
                         </div>
@@ -3817,7 +4129,11 @@ export function App(): React.ReactElement {
                   tabs={canvasTabs}
                   activeTabId={canvasActiveTabId}
                   onSelectTab={onCanvasSelectTab}
-                  onCloseTab={closeCanvasTab}
+                  onCloseTab={closeCanvasTabWithSessions}
+                  onCloseTabs={closeCanvasTabsWithSessions}
+                  onAddTab={openAppsPaneTabWithSessions}
+                  terminals={terminals}
+                  sideChatParentId={activeId ?? null}
                   onUpdatePayload={(p) => updateActiveCanvasSnapshot(() => p)}
                   className="shrink-0"
                   style={{ width: canvasSize }}
@@ -3833,7 +4149,9 @@ export function App(): React.ReactElement {
                   }}
                 />
               </div>
-            : <div className={chatPane}>
+            : (
+              <div className="flex min-h-0 min-w-0 flex-1">
+                <div className={chatPane}>
                 <div
                   ref={chatAreaRef}
                   className={chatArea}
@@ -3931,14 +4249,14 @@ export function App(): React.ReactElement {
                     </button>
                   : null}
                   {systemPromptStatsOpen && contextStats.totalTokens > 0 ?
-                    <div className={cn(mutedText, 'text-[0.72rem] leading-tight border border-zinc-700/50 rounded px-2 py-1.5 mb-1')}>
+                    <div className={cn(mutedText, 'text-[0.72rem] leading-tight border border-border rounded px-2 py-1.5 mb-1')}>
                       {contextStats.sections.map((s, i) => (
                         <div key={i} className="flex justify-between gap-4">
                           <span className="truncate">{s.label}</span>
                           <span className="tabular-nums">{s.tokens.toLocaleString()} tok · {s.pct}%</span>
                         </div>
                       ))}
-                      <div className="flex justify-between gap-4 pt-1 border-t border-zinc-700/30 mt-1">
+                      <div className="flex justify-between gap-4 pt-1 border-t border-border/70 mt-1">
                         <span className="font-semibold">Total</span>
                         <span className="tabular-nums font-semibold">{(contextStats.actualTokens ?? contextStats.totalTokens).toLocaleString()} tok</span>
                       </div>
@@ -3990,7 +4308,19 @@ export function App(): React.ReactElement {
                     : null}
                   </div>
                 </div>
+                </div>
+                <button
+                  type="button"
+                  className={showAppsStrip}
+                  title="Show Apps — Terminal, Browser, Canvas, Side chat"
+                  aria-label="Show Apps"
+                  onClick={openCanvasPanel}
+                >
+                  <span aria-hidden className="text-[0.8rem] leading-none">◫</span>
+                  <span aria-hidden className={showAppsStripLabel}>APPS</span>
+                </button>
               </div>
+            )
             }
             <ChatComposer
               ref={composerRef}
@@ -4855,7 +5185,7 @@ export function App(): React.ReactElement {
                               aria-selected={active}
                               className={cn(
                                 'flex w-full items-start gap-2 border-b border-border px-2.5 py-1.5 text-left last:border-b-0',
-                                active ? 'bg-[rgb(107_159_255/0.12)]' : 'hover:bg-bg-tertiary',
+                                active ? 'bg-[rgb(255_255_255/0.08)]' : 'hover:bg-bg-tertiary',
                               )}
                               onClick={() => pickGhRepo(r)}
                             >
@@ -5213,6 +5543,105 @@ export function App(): React.ReactElement {
         )
       : null}
 
+      {deleteAllArchivedOpen ?
+        createPortal(
+          <div
+            className={modalOverlay}
+            role="presentation"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) setDeleteAllArchivedOpen(false)
+            }}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="sylo-delete-archived-all-title"
+              className={modalShell}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <h3 id="sylo-delete-archived-all-title" className={modalTitle}>
+                Delete all archived chats?
+              </h3>
+              <p className={modalBody}>
+                All <strong>{archivedConversations.length}</strong> archived chat
+                {archivedConversations.length === 1 ? '' : 's'} in this workspace will be removed permanently,
+                including their messages and session files. This cannot be undone.
+              </p>
+              <div className={modalActions}>
+                <button type="button" className={btnGhost} onClick={() => setDeleteAllArchivedOpen(false)}>
+                  Cancel
+                </button>
+                <button type="button" className={btnDanger} onClick={() => void confirmDeleteAllArchived()}>
+                  Delete {archivedConversations.length === 1 ? 'chat' : `all ${archivedConversations.length}`}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )
+      : null}
+
+      {undoTurnModal ?
+        createPortal(
+          <div
+            className={modalOverlay}
+            role="presentation"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget && !undoTurnModal.busy) setUndoTurnModal(null)
+            }}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="sylo-undo-turn-title"
+              className={cn(modalShell, modalShellWide)}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <h3 id="sylo-undo-turn-title" className={modalTitle}>
+                Undo this agent turn?
+              </h3>
+              <p className={modalBody}>
+                Restores the workspace files to the state <em>before</em> this turn ran. The current
+                state is safety-captured first, so you can undo the undo from the same menu.
+              </p>
+              <div className="max-h-56 overflow-auto rounded-md border border-border bg-bg-secondary p-2 font-mono text-[0.72rem] leading-[1.5]">
+                <p className="m-0 text-text-primary">
+                  {undoTurnModal.preview.modified.length} modified ·{' '}
+                  {undoTurnModal.preview.added.length} added ·{' '}
+                  {undoTurnModal.preview.deleted.length} deleted
+                </p>
+                {[
+                  ...undoTurnModal.preview.modified.map((p) => `M ${p}`),
+                  ...undoTurnModal.preview.added.map((p) => `+ ${p}`),
+                  ...undoTurnModal.preview.deleted.map((p) => `- ${p}`),
+                ]
+                  .slice(0, 200)
+                  .map((line) => (
+                    <div
+                      key={line}
+                      className={cn(
+                        'whitespace-pre',
+                        line.startsWith('- ') ? 'text-[#f6b3a4]' : 'text-text-secondary',
+                      )}
+                    >
+                      {line}
+                    </div>
+                  ))}
+              </div>
+              <div className={modalActions}>
+                <button type="button" className={btnGhost} disabled={undoTurnModal.busy} onClick={() => setUndoTurnModal(null)}>
+                  Cancel
+                </button>
+                <button type="button" className={btnDanger} disabled={undoTurnModal.busy} onClick={() => void confirmUndoTurn()}>
+                  {undoTurnModal.busy ? 'Restoring…' : 'Undo turn'}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )
+      : null}
+
     </div>
       ) : !popoutResolved ? (
         <div className={routePopoutLoading}>Loading route…</div>
@@ -5248,56 +5677,6 @@ export function App(): React.ReactElement {
           </div>
         </div>
       )}
-
-      {routeContextMenu ?
-        createPortal(
-          <>
-            <div
-              role="presentation"
-              aria-hidden="true"
-              className={ctxMenuBackdrop}
-              onMouseDown={() => setRouteContextMenu(null)}
-              onWheel={() => setRouteContextMenu(null)}
-            />
-            <div
-              className={ctxMenuShell}
-              style={{
-                left: routeContextMenu.clientX,
-                top: routeContextMenu.clientY,
-              }}
-              role="menu"
-              onMouseDown={(e) => e.stopPropagation()}
-            >
-            <button
-              type="button"
-              className={routeCtxItem}
-              role="menuitem"
-              onClick={() => {
-                togglePinSkillRouteKey(skillRouteRowKey(routeContextMenu.route))
-                setRouteContextMenu(null)
-              }}
-            >
-              {navLayout.pinned.includes(skillRouteRowKey(routeContextMenu.route)) ? 'Unpin' : 'Pin to top'}
-                        </button>
-            <button
-              type="button"
-              className={routeCtxItem}
-              role="menuitem"
-              onClick={() => {
-                const k = skillRouteRowKey(routeContextMenu.route)
-                setRouteContextMenu(null)
-                void window.sylo.skillRoutes.openPopoutWindow(k).then((r) => {
-                  if (!r.ok) window.alert(`Could not open window: ${r.error}`)
-                })
-              }}
-            >
-              Open in new window
-            </button>
-          </div>
-          </>,
-          document.body,
-        )
-      : null}
 
       {convContextMenu ?
         createPortal(
@@ -5351,6 +5730,19 @@ export function App(): React.ReactElement {
                 }}
               >
                 Rename
+              </button>
+              <button
+                type="button"
+                className={routeCtxItem}
+                role="menuitem"
+                title="Hide from the sidebar without deleting — find it in the Archived section at the bottom of the sidebar"
+                onClick={() => {
+                  const { id } = convContextMenu
+                  setConvContextMenu(null)
+                  void performArchiveConversation(id)
+                }}
+              >
+                Archive
               </button>
               <button
                 type="button"

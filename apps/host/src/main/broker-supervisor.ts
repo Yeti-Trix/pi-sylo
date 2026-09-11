@@ -165,7 +165,7 @@ export type BrokerOutMessage =
   | { type: 'fork_result'; requestId: string; ok: true; sessionFileAbs: string }
   | { type: 'fork_result'; requestId: string; ok: false; error: string }
   | { type: 'system_prompt_stats'; stats: SystemPromptStats }
-  | { type: 'context_window_stats'; actualMessageTokens: number }
+  | { type: 'context_window_stats'; actualMessageTokens: number; includesSystemPrompt?: boolean }
 
 export interface BrokerConfig {
   brokerScriptPath: string

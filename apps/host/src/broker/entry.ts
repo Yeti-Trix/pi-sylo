@@ -334,10 +334,18 @@ function sendContextWindowStats(): void {
     let actualMessageTokens = 0
     let lastUsageTokens = 0
     let lastUsageIndex = -1
+    // Compaction invalidates older usage readings (they describe the pre-compaction
+    // context). Only apply the guard to the session the compaction ran in.
+    const compactionGuardAt =
+      lastCompaction && lastCompaction.session === session ? lastCompaction.at : null
     // Find last assistant message with valid usage for an accurate baseline
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i] as unknown as Record<string, unknown>
       if (m.role === 'assistant' && m.usage && m.stopReason !== 'aborted' && m.stopReason !== 'error') {
+        // Usage from before the most recent compaction is stale — scanning
+        // backward, every older reading is stale too, so stop and estimate.
+        const mTs = typeof m.timestamp === 'number' ? (m.timestamp as number) : null
+        if (compactionGuardAt != null && mTs != null && mTs < compactionGuardAt) break
         const usage = m.usage as Record<string, number>
         const total = usage.totalTokens || (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0)
         if (total > 0) {
@@ -346,7 +354,7 @@ function sendContextWindowStats(): void {
           break
         }
       }
-    }
+        }
     if (lastUsageIndex >= 0) {
       // Add estimated tokens for messages after the last usage
       for (let i = lastUsageIndex + 1; i < messages.length; i++) {
@@ -357,7 +365,10 @@ function sendContextWindowStats(): void {
       // No usage data — estimate all messages
       for (const m of messages) actualMessageTokens += estimateTokens(m)
     }
-        process.send?.({ type: 'context_window_stats', actualMessageTokens })
+    // usage-based totals already include the system prompt; the estimate
+    // fallback counts session.messages only (system prompt excluded) — the host
+    // uses this flag to decide whether to add system prompt tokens on top.
+    process.send?.({ type: 'context_window_stats', actualMessageTokens, includesSystemPrompt: lastUsageIndex >= 0 })
   } catch (e) {
     console.error('[broker] sendContextWindowStats failed:', e instanceof Error ? e.message : String(e))
   }
@@ -537,6 +548,14 @@ let brokerPiBuiltinPref: PiBuiltinToolsPref = normalizePiBuiltinToolsPref(null)
 let brokerChatOnly = false
 /** Routes extension notify/error IPC to the active chat turn. */
 let activePromptTurnId: string | undefined
+/**
+ * Set on successful compaction_end. A provider usage reading taken before a
+ * compaction describes the PRE-compaction context — until a fresh post-compaction
+ * reading lands (next turn), such readings must be ignored so the token counter
+ * doesn't sit at the stale pre-compaction value. Tracked per session object so a
+ * compaction in one conversation doesn't affect another session's stats.
+ */
+let lastCompaction: { session: unknown; at: number } | null = null
 /**
  * Effective main model for the active session. Promoted to module scope (not a
  * `handleInit` closure capture) so `handleSwitchSession` can update them before
@@ -1283,11 +1302,15 @@ async function handlePrompt(msg: BrokerPrompt): Promise<void> {
       // the post-compaction context size from the live session messages so the
       // host can show a before/after pair. Uses the same chars/4 heuristic as
       // Pi's `estimateTokens` (the fallback path of `estimateContextTokens`).
-      if (
+            if (
         slim.type === 'compaction_end' &&
         !slim.aborted &&
         !slim.errorMessage
       ) {
+        // Any usage reading taken before this point describes the pre-compaction
+        // context — invalidate it for context-window stats until a fresh
+        // post-compaction usage arrives with the next model response.
+        lastCompaction = { session: currentSession, at: Date.now() }
         let tokensAfter: number | undefined
         try {
           let sum = 0

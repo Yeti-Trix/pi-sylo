@@ -31,6 +31,25 @@ contextBridge.exposeInMainWorld('sylo', {
     setTitle: (id: string, title: string) => ipcRenderer.invoke('conversations:setTitle', id, title),
     setWorkspace: (id: string, workspaceId: string) =>
       ipcRenderer.invoke('conversations:setWorkspace', id, workspaceId),
+    /** Apps pane (Phase 7): create a side chat (DB child conversation). */
+    createSide: (parentId: string, title?: string) =>
+      ipcRenderer.invoke('conversations:create-side', parentId, title) as Promise<
+        | { ok: true; conversation: { id: string; title: string; workspace_id: string | null } }
+        | { ok: false; error: string }
+      >,
+    /** Apps pane (Phase 7): list a parent chat's side chats (oldest first). */
+    listSide: (parentId: string) =>
+      ipcRenderer.invoke('conversations:list-side', parentId) as Promise<
+        { id: string; title: string; created_at: number }[]
+      >,
+    /** Archive (retention v2): archive/unarchive a chat (archive hides it from the sidebar; nothing is deleted). */
+    setArchived: (id: string, archived: boolean) =>
+      ipcRenderer.invoke('conversations:setArchived', id, archived) as Promise<void>,
+    /** Archive (retention v2): archived chats (most recently archived first). */
+    listArchived: (workspaceId?: string) =>
+      ipcRenderer.invoke('conversations:list-archived', workspaceId) as Promise<
+        { id: string; title: string; updated_at: number; archived_at: number | null; workspace_id: string | null }[]
+      >,
         setModel: (id: string, model: {
       model_provider: string | null
       model_id: string | null
@@ -425,9 +444,19 @@ contextBridge.exposeInMainWorld('sylo', {
       return () => ipcRenderer.removeListener('broker:system-prompt-stats', ch)
     },
     getActualContextTokens: () =>
-      ipcRenderer.invoke('broker:context-window-stats:get') as Promise<number | null>,
-    onActualContextTokens: (cb: (tokens: number) => void) => {
-      const ch = (_: unknown, p: number) => cb(p)
+      ipcRenderer.invoke('broker:context-window-stats:get') as Promise<{
+        conversationId: string | null
+        actualMessageTokens: number | null
+        includesSystemPrompt: boolean
+      } | null>,
+    onActualContextTokens: (
+      cb: (p: {
+        conversationId: string | null
+        actualMessageTokens: number
+        includesSystemPrompt: boolean
+      }) => void,
+    ) => {
+      const ch = (_: unknown, p: unknown) => cb(p as Parameters<typeof cb>[0])
       ipcRenderer.on('broker:context-window-stats', ch)
       return () => ipcRenderer.removeListener('broker:context-window-stats', ch)
     },
@@ -782,6 +811,23 @@ contextBridge.exposeInMainWorld('sylo', {
       ipcRenderer.invoke('canvas:show-file', payload) as Promise<
         { ok: true } | { ok: false; error: string }
       >,
+    /** Renderer → main: native open dialog; the picked file routes through
+     *  the canvas:show path into the active conversation's tab scope. */
+    pickFile: () =>
+      ipcRenderer.invoke('canvas:pick-file') as Promise<
+        { ok: true } | { ok: false; error: string }
+      >,
+    /** Renderer → main: persist this workspace's terminal/browser pool tabs
+     *  (tiny JSON in app data) so they reopen after a restart. */
+    savePoolTabs: (
+      workspaceId: string,
+      tabs: { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string }[],
+    ) => ipcRenderer.invoke('canvas:save-pool-tabs', workspaceId, tabs) as Promise<boolean>,
+    /** Renderer → main: load the saved pool tabs for a workspace ([] when none). */
+        loadPoolTabs: (workspaceId: string) =>
+      ipcRenderer.invoke('canvas:load-pool-tabs', workspaceId) as Promise<
+        { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string }[]
+      >,
         // ── Live (subscribed) canvas — sibling to the snapshot surface above ──
     /** Main → renderer: open a live subscription on the docked canvas.
      *  `workspaceKey` is set for `task-board` shows so the renderer can ignore
@@ -857,6 +903,31 @@ contextBridge.exposeInMainWorld('sylo', {
         | { liveId: string; kind: 'live-demo' | 'task-board'; title?: string; data?: unknown }
         | null
       >,
+  },
+  terminal: {
+    /** Renderer → main: spawn a pty session. Backlog starts buffering
+     *  immediately; attach flushes it through the same data channel. */
+    create: (opts: { cwd?: string; cols?: number; rows?: number }) =>
+      ipcRenderer.invoke('terminal:create', opts) as Promise<{ id: string }>,
+    /** Renderer → main: start live output for a session (flushes backlog). */
+    attach: (id: string) =>
+      ipcRenderer.invoke('terminal:attach', { id }) as Promise<boolean>,
+    write: (id: string, data: string) => ipcRenderer.send('terminal:write', { id, data }),
+    resize: (id: string, cols: number, rows: number) =>
+      ipcRenderer.send('terminal:resize', { id, cols, rows }),
+    dispose: (id: string) => ipcRenderer.send('terminal:dispose', { id }),
+    /** Main → renderer: pty output bytes (backlog flush + live). */
+    onData: (cb: (p: { id: string; data: string }) => void) => {
+      const ch = (_: unknown, p: { id: string; data: string }) => cb(p)
+      ipcRenderer.on('terminal:data', ch)
+      return () => ipcRenderer.removeListener('terminal:data', ch)
+    },
+    /** Main → renderer: the shell exited. */
+    onExit: (cb: (p: { id: string; exitCode: number }) => void) => {
+      const ch = (_: unknown, p: { id: string; exitCode: number }) => cb(p)
+      ipcRenderer.on('terminal:exit', ch)
+      return () => ipcRenderer.removeListener('terminal:exit', ch)
+    },
   },
   skillSurface: {
     onShow: (cb: (p: { toolCallId: string; html?: string; path?: string; data: unknown }) => void) => {
@@ -944,6 +1015,32 @@ contextBridge.exposeInMainWorld('sylo', {
   skillSurfaces: {
     lintBatch: (paths: string[]) => ipcRenderer.invoke('skill-surfaces:lint-batch', paths),
   },
+  menu: {
+    /** Renderer → main: push the final per-section skill-route menu rows for
+     *  the active workspace (renderer owns nav-layout sorting; main just
+     *  renders the native Dashboards / Tools / Developer menus). */
+    setSections: (sections: Array<{
+      id: string
+      label: string
+      items: Array<{ kind: 'route' | 'tab' | 'action'; title: string; key?: string; tab?: string; action?: string; sep?: boolean }>
+    }>) => ipcRenderer.invoke('menu:set-sections', sections) as Promise<{ ok: true; sections: number }>,
+    /** Main → renderer: the operator clicked an item in one of the synced
+     *  skill-route menus. The renderer resolves it to a route tab / builtin
+     *  tab / broker action. */
+    onAction: (
+      cb: (item: {
+        kind: 'route' | 'tab' | 'action'
+        title: string
+        key?: string
+        tab?: string
+        action?: string
+      }) => void,
+    ) => {
+      const ch = (_: unknown, item: unknown) => cb(item as Parameters<typeof cb>[0])
+      ipcRenderer.on('menu:action', ch)
+      return () => ipcRenderer.removeListener('menu:action', ch)
+    },
+  },
   skillRoutes: {
     list: (workspaceId?: string) => ipcRenderer.invoke('skill-routes:list', workspaceId),
     openPopoutWindow: (routeKey: string) =>
@@ -979,6 +1076,19 @@ contextBridge.exposeInMainWorld('sylo', {
     rpc: (op: string, payload?: unknown) =>
       ipcRenderer.invoke('personal:rpc', op, payload) as Promise<unknown>,
     settingsCard: () => ipcRenderer.invoke('personal:settingsCard') as Promise<unknown>,
+    hostPlugins: () =>
+      ipcRenderer.invoke('personal:hostPlugins') as Promise<
+        {
+          id: string
+          source: 'local' | 'npm' | 'legacy'
+          dir: string
+          name: string
+          version: string | null
+          description: string | null
+          entryPresent: boolean
+          loaded: boolean
+        }[]
+      >,
   },
   // User-installed Pi packages (personal bundles, community tools) — generic
   // Capability-manager card data. Always-on; no toggle.
@@ -1172,6 +1282,22 @@ contextBridge.exposeInMainWorld('sylo', {
       ipcRenderer.on('subagents:lifecycle', ch)
       return () => ipcRenderer.removeListener('subagents:lifecycle', ch)
     },
+  },
+  // ── Agent checkpoints (per-turn undo; storage in app data only) ──
+  checkpoints: {
+    list: (conversationId: string) =>
+      ipcRenderer.invoke('checkpoints:list', conversationId) as Promise<
+        { assistantMessageId: string; startedAt: number }[]
+      >,
+    preview: (conversationId: string, assistantMessageId: string) =>
+      ipcRenderer.invoke('checkpoints:preview', conversationId, assistantMessageId) as Promise<
+        | { ok: true; preview: { modified: string[]; added: string[]; deleted: string[] } }
+        | { ok: false; error: string }
+      >,
+    restore: (conversationId: string, assistantMessageId: string) =>
+      ipcRenderer.invoke('checkpoints:restore', conversationId, assistantMessageId) as Promise<
+        { ok: true; restored: number; removed: number } | { ok: false; error: string }
+      >,
   },
   thinkTank: {
     sessionGet: (sessionId: string) => ipcRenderer.invoke('thinkTank:sessionGet', sessionId),

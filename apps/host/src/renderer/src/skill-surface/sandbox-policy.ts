@@ -51,10 +51,10 @@ export function assertWidgetMarkupPassesPolicy(doc: Document): void {
 /** Theme CSS variables + base body styles for skill iframes. */
 export function skillSurfaceThemeStyleBlock(): string {
   return `:root {
-  --color-surface: #1a1b1e;
-  --color-text: #e8e9ec;
-  --color-border: #3d3f45;
-  --color-accent: #6b9fff;
+  --color-surface: #1e1e1e;
+  --color-text: #e8e8e8;
+  --color-border: #3a3a3a;
+  --color-accent: #d4d4d4;
 }
 body {
   margin: 0;

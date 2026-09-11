@@ -72,7 +72,7 @@ export function ThinkTankChatInline({
         </div>
 
         {session.error ?
-          <p className="text-[0.85rem] text-[rgb(255_107_107)]">{session.error}</p>
+          <p className="text-[0.85rem] text-[rgb(241_106_80)]">{session.error}</p>
         : null}
 
         {session.status === 'complete' && !session.error ?
