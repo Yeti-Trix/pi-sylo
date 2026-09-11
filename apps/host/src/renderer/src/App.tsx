@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { ChatConversationMessageRow, type ChatMessageRowModel } from './chat/ConversationMessage'
+import { ingestAskQuestionPayload } from './chat/askQuestionClient'
 import { ChatComposer, type ChatComposerHandle } from './chat/ChatComposer'
 import { ChatModelBar } from './chat/ChatModelBar'
 import { LiveElapsedLabel } from './chat/LiveElapsedLabel'
@@ -2069,6 +2070,9 @@ export function App(): React.ReactElement {
       pending.set(ev.messageId, (pending.get(ev.messageId) ?? '') + ev.delta)
       scheduleLiveDeltaFlush()
     })
+    const uAsk = window.sylo.chatEvents.onAskQuestion?.((p) => {
+      ingestAskQuestionPayload(p as Record<string, unknown>)
+    })
     const u5 = window.sylo.chatEvents.onTool((x) => {
       const pending = liveWorkflowPendingRef.current
       const rows = pending.get(x.messageId)
@@ -2086,6 +2090,7 @@ export function App(): React.ReactElement {
       u3()
       u4()
       u5()
+      uAsk?.()
       if (liveDeltaFlushTimerRef.current != null) {
         clearTimeout(liveDeltaFlushTimerRef.current)
         liveDeltaFlushTimerRef.current = null

@@ -207,6 +207,15 @@ export async function sendMessage(
   })
 }
 
+export async function submitAskQuestion(
+  payload: { requestId?: string; toolCallId?: string; answers: unknown },
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  return apiFetch('/api/ask-question/submit', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 export async function abortTurn(
   conversationId: string,
 ): Promise<{ ok: boolean; error?: string }> {
@@ -315,6 +324,7 @@ export type StreamHandlers = {
   onRefresh: (payload: { conversationId: string; kind: string }) => void
   onStream: (payload: { conversationId: string; messageId: string; delta: string }) => void
   onTool: (payload: { conversationId: string; messageId: string; event: unknown; ts: number }) => void
+  onAskQuestion?: (payload: Record<string, unknown>) => void
   onBrokerStatus: (payload: Record<string, unknown>) => void
   /** Called after the SSE socket reconnects (mobile backgrounding often kills it). */
   onReconnect?: () => void
@@ -344,6 +354,13 @@ export function connectEvents(handlers: StreamHandlers): () => void {
     source.addEventListener('chat:tool', (ev) => {
       try {
         handlers.onTool(JSON.parse((ev as MessageEvent).data))
+      } catch {
+        /* */
+      }
+    })
+    source.addEventListener('chat:ask-question', (ev) => {
+      try {
+        handlers.onAskQuestion?.(JSON.parse((ev as MessageEvent).data))
       } catch {
         /* */
       }

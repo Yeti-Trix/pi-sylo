@@ -660,6 +660,14 @@ declare global {
         onTool: (
           cb: (p: { conversationId: string; messageId: string; event: unknown; ts: number }) => void,
         ) => () => void
+        onAskQuestion: (cb: (p: Record<string, unknown>) => void) => () => void
+      }
+      askQuestion: {
+        submit: (payload: {
+          requestId?: string
+          toolCallId?: string
+          answers: unknown
+        }) => Promise<{ ok: true } | { ok: false; error: string }>
       }
       capabilities: {
         settings: () => Promise<Record<string, unknown>>

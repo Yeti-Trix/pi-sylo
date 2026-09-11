@@ -62,6 +62,11 @@ export type CompanionHostApi = {
   personalRpc: (op: string, payload: unknown) => unknown | Promise<unknown>
   /** Plugin-declared companion manifest (tabs + landing), or null when absent. */
   personalManifest: () => unknown | Promise<unknown>
+  submitAskQuestion: (input: {
+    requestId?: string
+    toolCallId?: string
+    answers: unknown
+  }) => { ok: true } | { ok: false; error: string }
 }
 
 let api: CompanionHostApi | null = null

@@ -128,7 +128,7 @@ export type BrokerOutMessage =
       query?: string
       limit?: number
     }
-  | {
+    | {
       type: 'sylo_schedule_rpc'
       turnId?: string
       requestId: string
@@ -144,6 +144,14 @@ export type BrokerOutMessage =
       catchup_on_startup?: boolean
       id?: string
       patch?: Record<string, unknown>
+    }
+  | {
+      type: 'sylo_ask_question'
+      turnId?: string
+      requestId: string
+      toolCallId: string
+      title?: string
+      questions: unknown
     }
     | {
       type: 'sylo-tasks:changed'
@@ -216,6 +224,8 @@ export interface BrokerConfig {
   subagentsExtension?: string
   /** Repo path to @sylo/sylo-scheduler (schedule_* tools + sylo_schedule_rpc IPC) */
   schedulerExtension?: string
+  /** Repo path to @sylo/sylo-ask-question (sylo_ask_question + host wait) */
+  askQuestionExtension?: string
   /** Enabled Sylo optional package extension paths (repo-bundled Pi packages). */
   optionalExtensionPaths?: string[]
   /** Absolute path to sylo-web-access config JSON for the broker child (optional). */
@@ -309,6 +319,7 @@ export class BrokerSupervisor {
       skillSurfaceExtension: cfg.skillSurfaceExtension,
       subagentsExtension: cfg.subagentsExtension,
       schedulerExtension: cfg.schedulerExtension,
+      askQuestionExtension: cfg.askQuestionExtension,
       optionalExtensionPaths: cfg.optionalExtensionPaths,
       webAccessConfigPath: cfg.webAccessConfigPath,
       ttsConfigPath: cfg.ttsConfigPath,
@@ -388,6 +399,9 @@ export class BrokerSupervisor {
         : {}),
         ...(this.cfg.schedulerExtension ?
           { SYLO_SCHEDULER_EXTENSION: this.cfg.schedulerExtension }
+        : {}),
+        ...(this.cfg.askQuestionExtension ?
+          { SYLO_ASK_QUESTION_EXTENSION: this.cfg.askQuestionExtension }
         : {}),
         ...(this.cfg.optionalExtensionPaths && this.cfg.optionalExtensionPaths.length > 0 ?
           { SYLO_OPTIONAL_EXTENSION_PATHS: JSON.stringify(this.cfg.optionalExtensionPaths) }

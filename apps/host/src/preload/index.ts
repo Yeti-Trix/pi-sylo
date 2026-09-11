@@ -473,6 +473,17 @@ contextBridge.exposeInMainWorld('sylo', {
       ipcRenderer.on('chat:tool', ch)
       return () => ipcRenderer.removeListener('chat:tool', ch)
     },
+    onAskQuestion: (cb: (p: Record<string, unknown>) => void) => {
+      const ch = (_: unknown, p: Record<string, unknown>) => cb(p)
+      ipcRenderer.on('chat:ask-question', ch)
+      return () => ipcRenderer.removeListener('chat:ask-question', ch)
+    },
+  },
+  askQuestion: {
+    submit: (payload: { requestId?: string; toolCallId?: string; answers: unknown }) =>
+      ipcRenderer.invoke('ask-question:submit', payload) as Promise<
+        { ok: true } | { ok: false; error: string }
+      >,
   },
   capabilities: {
     settings: () => ipcRenderer.invoke('capabilities:settings'),

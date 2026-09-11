@@ -169,6 +169,7 @@ type BrokerMessageIn =
   // sylo-tasks extension's edit listener, or think-tank/schedule RPC waiters).
   | { type: 'sylo_think_tank_rpc_result' }
   | { type: 'sylo_schedule_rpc_result' }
+  | { type: 'sylo_ask_question_result' }
   | { type: 'sylo-tasks:apply-edit' }
 
 function safeJson(x: unknown): unknown {
@@ -567,7 +568,8 @@ function installSubagentTurnIdBridge(): void {
         msgType === 'sylo_web_access' ||
         msgType === 'sylo_think_tank' ||
         msgType === 'sylo_think_tank_rpc' ||
-        msgType === 'sylo_schedule_rpc') &&
+        msgType === 'sylo_schedule_rpc' ||
+        msgType === 'sylo_ask_question') &&
       activePromptTurnId &&
       !(msg as { turnId?: string }).turnId
     ) {
@@ -822,6 +824,13 @@ async function handleInit(msg: BrokerInit): Promise<void> {
       const norm = normalizeSyloCapabilityPath(schedulerPath)
       if (!norm || !disabledExtensionPathsSet.has(norm)) {
         extraExtensionPaths.push(schedulerPath)
+      }
+    }
+    const askQuestionPath = process.env.SYLO_ASK_QUESTION_EXTENSION
+    if (askQuestionPath && existsSync(askQuestionPath)) {
+      const norm = normalizeSyloCapabilityPath(askQuestionPath)
+      if (!norm || !disabledExtensionPathsSet.has(norm)) {
+        extraExtensionPaths.push(askQuestionPath)
       }
     }
     try {
@@ -1515,6 +1524,9 @@ function handleMessage(msg: unknown): void {
     return
   }
   if (m.type === 'sylo_schedule_rpc_result') {
+    return
+  }
+  if (m.type === 'sylo_ask_question_result') {
     return
   }
   if (m.type === 'sylo-tasks:apply-edit') {

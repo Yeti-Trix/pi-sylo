@@ -614,6 +614,10 @@ export function CapabilityManagerPanel({
           setExcludeAgentNotice(
             `Built-in sylo-subagents disabled. subagent delegation will be unavailable. ${restartNote}`,
           )
+        } else if (builtinExtKind === 'ask-question' && excluded) {
+          setExcludeAgentNotice(
+            `Built-in sylo-ask-question disabled. In-chat multiple-choice questions will be unavailable. ${restartNote}`,
+          )
         } else {
           setExcludeAgentNotice(restartNote)
         }
@@ -634,6 +638,10 @@ export function CapabilityManagerPanel({
         } else if (builtinExtKind === 'subagents' && excluded) {
           setExcludeAgentNotice(
             `Built-in sylo-subagents disabled. subagent delegation will be unavailable. ${restartNote}`,
+          )
+        } else if (builtinExtKind === 'ask-question' && excluded) {
+          setExcludeAgentNotice(
+            `Built-in sylo-ask-question disabled. In-chat multiple-choice questions will be unavailable. ${restartNote}`,
           )
         } else {
           setExcludeAgentNotice(restartNote)

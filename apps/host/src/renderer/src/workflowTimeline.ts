@@ -535,6 +535,7 @@ export type AssistantSegment =
       kind: 'tool'
       id: string
       toolName: string
+      toolCallId?: string
       args: unknown
       startTs: number
       endTs: number | null
@@ -647,6 +648,7 @@ export function buildAssistantSegments(
         kind: 'tool',
         id: `tool-${id}-${row.ts}`,
         toolName: typeof o.toolName === 'string' ? o.toolName : '?',
+        toolCallId: id,
         args: 'args' in o ? o.args : undefined,
         startTs: row.ts,
         endTs: null,
@@ -671,6 +673,7 @@ export function buildAssistantSegments(
         id: segId,
         toolName:
           start?.toolName ?? (typeof o.toolName === 'string' ? o.toolName : '?'),
+        toolCallId: id,
         args: start?.args,
         startTs,
         endTs,

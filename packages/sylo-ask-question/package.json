@@ -1,0 +1,30 @@
+{
+  "name": "@sylo/sylo-ask-question",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Cursor-style multiple-choice questions in Sylo chat — agent waits for operator submit",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "extensions",
+    "skills",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ],
+    "skills": [
+      "./skills/ask-question"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2"
+  },
+  "dependencies": {
+    "typebox": "^1.1.24"
+  }
+}

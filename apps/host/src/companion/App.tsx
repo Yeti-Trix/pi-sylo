@@ -20,6 +20,7 @@ import {
     rebuildSylo,
   renameConversation,
   sendMessage,
+  submitAskQuestion,
     steerTurn,
   deliverQueued,
   setActiveWorkspace,
@@ -39,6 +40,10 @@ import { BottomTabBar, type CompanionTab } from './BottomTabBar'
 import { InstallHintBanner } from './InstallHintBanner'
 import { CertificateSetupPanel } from './CertificateSetupPanel'
 import { CompanionModelBar } from './CompanionModelBar'
+import {
+  ingestAskQuestionPayload,
+  setAskQuestionSubmitImpl,
+} from '@renderer/chat/askQuestionClient'
 
 const CHAT_NEAR_BOTTOM_PX = 120
 
@@ -198,6 +203,11 @@ export function App(): React.ReactElement {
     () => conversations.find((c) => c.id === activeId) ?? null,
     [conversations, activeId],
   )
+
+  useEffect(() => {
+    setAskQuestionSubmitImpl((payload) => submitAskQuestion(payload))
+    return () => setAskQuestionSubmitImpl(null)
+  }, [])
 
   useEffect(() => {
     void (async () => {
@@ -415,6 +425,9 @@ export function App(): React.ReactElement {
           ...prev,
           [payload.messageId]: [...(prev[payload.messageId] ?? []), { ts: payload.ts, event: payload.event }],
         }))
+      },
+      onAskQuestion: (payload) => {
+        ingestAskQuestionPayload(payload)
       },
       onBrokerStatus: (payload) => {
         const status = typeof payload.status === 'string' ? payload.status : ''

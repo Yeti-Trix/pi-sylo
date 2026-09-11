@@ -37,7 +37,8 @@
     "test:schedule-recurrence": "esbuild src/shared/schedule-recurrence.ts --bundle --platform=node --format=esm --outfile=out/shared/schedule-recurrence.mjs --packages=external && node src/shared/schedule-recurrence.test.mjs",
     "diagnose:shell": "npm run build:broker && node scripts/diagnose-pi-shell.mjs",
     "test:global-agents": "esbuild src/main/global-agents.test.mjs --bundle --platform=node --format=esm --outfile=out/test/global-agents.test.mjs --packages=external && node --test out/test/global-agents.test.mjs",
-    "test:chatgpt-codex": "esbuild src/shared/chatgpt-codex.ts --bundle --platform=node --format=esm --outfile=out/test/chatgpt-codex.mjs --packages=external && node --test src/shared/chatgpt-codex.test.mjs"
+    "test:chatgpt-codex": "esbuild src/shared/chatgpt-codex.ts --bundle --platform=node --format=esm --outfile=out/test/chatgpt-codex.mjs --packages=external && node --test src/shared/chatgpt-codex.test.mjs",
+    "test:ask-question": "esbuild src/shared/ask-question.ts --bundle --platform=node --format=esm --outfile=out/test/ask-question.mjs --packages=external && node --test src/shared/ask-question.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.84.2",

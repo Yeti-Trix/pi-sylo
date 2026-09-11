@@ -62,6 +62,8 @@ export function deriveExtensionDisplayName(path: string): string {
   const builtin = classifySyloBuiltinExtension(path)
   if (builtin === 'skill-surface') return 'sylo-skill-surface'
   if (builtin === 'subagents') return 'sylo-subagents'
+  if (builtin === 'scheduler') return 'sylo-scheduler'
+  if (builtin === 'ask-question') return 'sylo-ask-question'
   if (builtin === 'tools-guard') return 'sylo-builtin-tools-guard'
 
   const optional = classifySyloOptionalPackageId(path)

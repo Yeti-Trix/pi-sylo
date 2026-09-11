@@ -4,6 +4,8 @@ import {
   SubagentRunBlock,
   SubagentRunBlockPending,
 } from '../components/subagent/SubagentRunBlock'
+import { AskQuestionBlock } from './AskQuestionBlock'
+import { SYLO_ASK_QUESTION_TOOL } from '../../../shared/ask-question'
 import { LogicForgeIoReviewAction } from '../components/logicforge/LogicForgeIoReviewAction'
 import { logicForgeMatchRunDir } from '../components/logicforge/logicForgeMatchRunDir'
 import { mapSubagentBatchesToMessage } from '../components/subagent/matchSubagentBatches'
@@ -578,16 +580,22 @@ function InterleavedAssistantBody({
     // subagent payloads are huge. Reasoning still opens while it is streaming.
     const autoOpen = isLive && seg.kind !== 'tool'
     const key = `${messageId}:${seg.id}`
-    pieces.push(
-      <InlineAssistantSegment
-        key={`seg-${seg.id}-${i}`}
-        segment={seg}
-        autoOpen={autoOpen}
-        override={overrides[key]}
-        onToggle={(next) => onToggle(key, next)}
-        resolveImageUrl={resolveImageUrl}
-      />,
-    )
+    const isAskQuestion = seg.kind === 'tool' && seg.toolName === SYLO_ASK_QUESTION_TOOL
+    if (!isAskQuestion) {
+      pieces.push(
+        <InlineAssistantSegment
+          key={`seg-${seg.id}-${i}`}
+          segment={seg}
+          autoOpen={autoOpen}
+          override={overrides[key]}
+          onToggle={(next) => onToggle(key, next)}
+          resolveImageUrl={resolveImageUrl}
+        />,
+      )
+    }
+    if (isAskQuestion) {
+      pieces.push(<AskQuestionBlock key={`ask-question-${seg.id}`} segment={seg} />)
+    }
     if (seg.kind === 'tool' && seg.toolName === 'subagent') {
       const batch = subagentBatchBySegment.get(seg.id)
       if (batch) {

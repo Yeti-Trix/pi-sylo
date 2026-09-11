@@ -343,6 +343,11 @@ import {
   classifySyloBuiltinExtension,
 } from '../shared/sylo-builtin-extensions.js'
 import {
+  parseAskQuestionAnswers,
+  parseAskQuestionSpecs,
+  type AskQuestionAnswer,
+} from '../shared/ask-question.js'
+import {
   classifySyloOptionalPackageId,
   normalizeSyloOptionalPackagesPref,
   syloExtensionHintForPath,
@@ -397,6 +402,7 @@ const SYLO_REPO_ROOT = join(__dirname, '../../../..')
 const SYLO_SKILL_SURFACE_EXTENSION = join(SYLO_REPO_ROOT, 'packages/skill-surface-extension/src/index.ts')
 const SYLO_SUBAGENTS_EXTENSION = join(SYLO_REPO_ROOT, 'packages/sylo-subagents/extensions/index.ts')
 const SYLO_SCHEDULER_EXTENSION = join(SYLO_REPO_ROOT, 'packages/sylo-scheduler/extensions/index.ts')
+const SYLO_ASK_QUESTION_EXTENSION = join(SYLO_REPO_ROOT, 'packages/sylo-ask-question/extensions/index.ts')
 const SYLO_BUILTIN_TOOLS_GUARD_EXTENSION = join(
   SYLO_REPO_ROOT,
   'apps/host/src/broker/sylo-builtin-tools-guard.ts',
@@ -915,6 +921,14 @@ function discoverFilesystemCapabilities(
       ),
     )
   }
+  if (existsSync(SYLO_ASK_QUESTION_EXTENSION)) {
+    extBuckets.push(
+      ...tagExtensions(
+        [{ name: 'sylo-ask-question', path: SYLO_ASK_QUESTION_EXTENSION }],
+        'sylo-builtin',
+      ),
+    )
+  }
   if (existsSync(SYLO_BUILTIN_TOOLS_GUARD_EXTENSION)) {
     extBuckets.push(
       ...tagExtensions(
@@ -1280,6 +1294,68 @@ type PendingTurn = {
 
 const pendingTurns = new Map<string, PendingTurn>()
 
+type PendingAskQuestion = {
+  requestId: string
+  toolCallId: string
+  turnId?: string
+  conversationId?: string
+  messageId?: string
+  replyBroker: BrokerSupervisor
+}
+
+const pendingAskQuestions = new Map<string, PendingAskQuestion>()
+
+function replyAskQuestion(
+  pending: PendingAskQuestion,
+  result:
+    | { ok: true; answers: AskQuestionAnswer[] }
+    | { ok: false; cancelled: true; error: string },
+): void {
+  pendingAskQuestions.delete(pending.requestId)
+  pending.replyBroker.sendChildMessage({
+    type: 'sylo_ask_question_result',
+    requestId: pending.requestId,
+    ...result,
+  })
+}
+
+function cancelPendingAskQuestions(match: {
+  turnId?: string
+  conversationId?: string
+  broker?: BrokerSupervisor
+  error: string
+}): void {
+  for (const pending of [...pendingAskQuestions.values()]) {
+    if (match.turnId && pending.turnId !== match.turnId) continue
+    if (match.conversationId && pending.conversationId !== match.conversationId) continue
+    if (match.broker && pending.replyBroker !== match.broker) continue
+    replyAskQuestion(pending, { ok: false, cancelled: true, error: match.error })
+  }
+}
+
+function submitPendingAskQuestion(input: {
+  requestId?: string
+  toolCallId?: string
+  answers: unknown
+}): { ok: true } | { ok: false; error: string } {
+  const requestId = typeof input.requestId === 'string' ? input.requestId.trim() : ''
+  const toolCallId = typeof input.toolCallId === 'string' ? input.toolCallId.trim() : ''
+  let pending = requestId ? pendingAskQuestions.get(requestId) : undefined
+  if (!pending && toolCallId) {
+    for (const row of pendingAskQuestions.values()) {
+      if (row.toolCallId === toolCallId) {
+        pending = row
+        break
+      }
+    }
+  }
+  if (!pending) return { ok: false, error: 'no_pending_question' }
+  const answers = parseAskQuestionAnswers(input.answers)
+  if (answers.length === 0) return { ok: false, error: 'empty_answers' }
+  replyAskQuestion(pending, { ok: true, answers })
+  return { ok: true }
+}
+
 /** Schedule a debounced content flush (at most one per CONTENT_FLUSH_MS). */
 function scheduleContentFlush(pending: PendingTurn): void {
   if (pending.contentFlushTimer) return
@@ -1378,6 +1454,12 @@ function finalizePendingTurn(
     db.updateMessageContent(pending.assistantId, pending.chunks || '', 'complete')
   }
   pendingTurns.delete(turnId)
+  if (status === 'cancelled') {
+    cancelPendingAskQuestions({
+      turnId,
+      error: 'Cancelled: operator stopped the turn',
+    })
+  }
   turnBrokerPool.releaseTurn(turnId, broker)
   emitChatRefresh(pending.convId, 'turnFinished')
 }
@@ -2893,6 +2975,43 @@ function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext
     })()
     return
   }
+  if (msg.type === 'sylo_ask_question') {
+    const pendingTurn = msg.turnId ? pendingTurns.get(msg.turnId) : undefined
+    const requestId = typeof msg.requestId === 'string' ? msg.requestId : ''
+    const toolCallId = typeof msg.toolCallId === 'string' ? msg.toolCallId : ''
+    const replyBroker = ctx.isPrimary ? broker : ctx.overflowSlot?.supervisor
+    const questions = parseAskQuestionSpecs(msg.questions)
+    if (!requestId || !toolCallId || !replyBroker || questions.length === 0) {
+      replyBroker?.sendChildMessage({
+        type: 'sylo_ask_question_result',
+        requestId,
+        ok: false,
+        cancelled: true,
+        error: 'Invalid ask-question payload',
+      })
+      return
+    }
+    const title = typeof msg.title === 'string' ? msg.title.trim() : ''
+    pendingAskQuestions.set(requestId, {
+      requestId,
+      toolCallId,
+      turnId: msg.turnId,
+      conversationId: pendingTurn?.convId,
+      messageId: pendingTurn?.assistantId,
+      replyBroker,
+    })
+    const payload = {
+      requestId,
+      toolCallId,
+      conversationId: pendingTurn?.convId ?? null,
+      messageId: pendingTurn?.assistantId ?? null,
+      ...(title ? { title } : {}),
+      questions,
+    }
+    mainWindow?.webContents.send('chat:ask-question', payload)
+    emitCompanionEvent({ channel: 'chat:ask-question', payload })
+    return
+  }
   if (msg.type === 'sylo_schedule_rpc') {
     const convId = msg.turnId ? pendingTurns.get(msg.turnId)?.convId : undefined
     const requestId = typeof msg.requestId === 'string' ? msg.requestId : ''
@@ -3218,6 +3337,7 @@ function buildBrokerSupervisorOptions(
     skillSurfaceExtension: existsSync(SYLO_SKILL_SURFACE_EXTENSION) ? SYLO_SKILL_SURFACE_EXTENSION : undefined,
     subagentsExtension: existsSync(SYLO_SUBAGENTS_EXTENSION) ? SYLO_SUBAGENTS_EXTENSION : undefined,
     schedulerExtension: existsSync(SYLO_SCHEDULER_EXTENSION) ? SYLO_SCHEDULER_EXTENSION : undefined,
+    askQuestionExtension: existsSync(SYLO_ASK_QUESTION_EXTENSION) ? SYLO_ASK_QUESTION_EXTENSION : undefined,
     optionalExtensionPaths: enabledOptionalExtensionPaths(
       SYLO_REPO_ROOT,
       readSyloOptionalPackagesPref(),
@@ -3270,6 +3390,10 @@ async function spawnOverflowBroker(
         }),
       onExit: (code, signal, capturedLogs) => {
         if (spawnGen !== slot.spawnGeneration) return
+        cancelPendingAskQuestions({
+          broker: slot.supervisor,
+          error: 'Cancelled: broker exited',
+        })
         turnBrokerPool.markOverflowFailed(slot)
         if (typeof code === 'number' && code !== 0 && capturedLogs.trim()) {
           console.error('[sylo overflow broker] exit', code, signal, '\n', capturedLogs)
@@ -3350,6 +3474,10 @@ function registerBroker(): void {
         }),
       onExit: (code, signal, capturedLogs) => {
         if (spawnGen !== brokerSpawnGeneration) return
+        cancelPendingAskQuestions({
+          broker,
+          error: 'Cancelled: broker exited',
+        })
         onBrokerExitOrphanTasks()
         const wasReady = brokerAgentReady
         brokerAgentReady = false
@@ -3657,6 +3785,7 @@ function registerIpc(): void {
       const { personalPluginCompanionManifest } = await import('./personal-plugin.js')
       return personalPluginCompanionManifest()
     },
+    submitAskQuestion: (input) => submitPendingAskQuestion(input),
   })
 
   // Phone personal-app root is registered by the personal bundle itself
@@ -6218,6 +6347,20 @@ function registerIpc(): void {
       return chainConversationChatOp(id, () =>
         deliverQueuedMessage(id, body, normalizeAttachments(attachments)),
       )
+    },
+  )
+
+  ipcMain.handle(
+    'ask-question:submit',
+    (
+      _e,
+      input: { requestId?: string; toolCallId?: string; answers?: unknown },
+    ): { ok: true } | { ok: false; error: string } => {
+      return submitPendingAskQuestion({
+        requestId: input?.requestId,
+        toolCallId: input?.toolCallId,
+        answers: input?.answers,
+      })
     },
   )
 
