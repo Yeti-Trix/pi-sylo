@@ -14,6 +14,7 @@ import {
   askQuestionCard,
   askQuestionFooter,
   askQuestionHead,
+  askQuestionSummary,
   askQuestionOption,
   askQuestionOptionDisabled,
   askQuestionOptionSelected,
@@ -21,6 +22,12 @@ import {
   askQuestionOtherInput,
   askQuestionPrompt,
   btnPrimarySm,
+  chatSegmentArgs,
+  chatSegmentChevron,
+  chatSegmentLabel,
+  chatSegmentStatusBase,
+  chatSegmentStatusErr,
+  chatSegmentStatusOk,
   mutedText,
 } from '../panels/ui-classes'
 import type { AssistantSegment } from '../workflowTimeline'
@@ -56,6 +63,19 @@ function optionLabel(question: AskQuestionSpec, optionId: string, otherText?: st
     return extra ? `${OTHER_LABEL}: ${extra}` : OTHER_LABEL
   }
   return question.options.find((o) => o.id === optionId)?.label ?? optionId
+}
+
+function collapsedAnswerPreview(
+  questions: AskQuestionSpec[],
+  answers: AskQuestionAnswer[],
+): string {
+  const parts = questions.map((q) => {
+    const answer = answers.find((a) => a.id === q.id)
+    const selected = answer?.selectedOptionIds ?? []
+    if (selected.length === 0) return null
+    return selected.map((id) => optionLabel(q, id, answer?.otherText)).join(', ')
+  })
+  return parts.filter((p): p is string => !!p).join(' · ')
 }
 
 export function AskQuestionBlock({
@@ -128,9 +148,11 @@ export function AskQuestionBlock({
     if (toolCallId) clearAskQuestionPrompt(toolCallId)
   }
 
-  return (
-    <div className={askQuestionCard} data-ask-question={waiting ? 'pending' : 'done'}>
-      <div className={askQuestionHead}>{title?.trim() || 'Question'}</div>
+  const heading = title?.trim() || (questions.length === 1 ? 'Question' : 'Questions')
+  const preview = collapsedAnswerPreview(questions, answers)
+  const statusLabel = segment.isError ? 'Cancelled' : 'Submitted'
+  const form = (
+    <>
       <div className={askQuestionBody}>
         {questions.map((q) => {
           const answer = answers.find((a) => a.id === q.id)
@@ -205,12 +227,37 @@ export function AskQuestionBlock({
             {busy ? 'Submitting…' : 'Submit'}
           </button>
         </div>
-      : <div className={askQuestionFooter}>
-          <span className={cn(mutedText, 'text-[0.76rem]')}>
-            {segment.isError ? 'Cancelled' : 'Submitted'}
-          </span>
-        </div>
-      }
-    </div>
+      : null}
+    </>
+  )
+
+  if (!readOnly) {
+    return (
+      <div className={askQuestionCard} data-ask-question="pending">
+        <div className={askQuestionHead}>{heading}</div>
+        {form}
+      </div>
+    )
+  }
+
+  return (
+    <details className={askQuestionCard} data-ask-question="done">
+      <summary className={askQuestionSummary}>
+        <span className={chatSegmentLabel}>{heading}</span>
+        <span className={chatSegmentArgs} title={preview}>
+          {preview}
+        </span>
+        <span
+          className={cn(
+            chatSegmentStatusBase,
+            segment.isError ? chatSegmentStatusErr : chatSegmentStatusOk,
+          )}
+        >
+          {statusLabel}
+        </span>
+        <span className={chatSegmentChevron} aria-hidden="true" />
+      </summary>
+      {form}
+    </details>
   )
 }
