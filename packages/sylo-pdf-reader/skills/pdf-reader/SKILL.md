@@ -26,7 +26,7 @@ Industry pattern (engineering-drawing pipelines): **detect/crop regions first**,
 
 ## Specific questions (wire, cable, port, tag)
 
-1. **Narrow search** — 1–3 queries from the question (e.g. `["DGT-300+", "S-"]`). Do not re-scan the whole drawing set.
+1. **Narrow search** — 1–3 queries from the question (e.g. `["P-4400+", "S-"]`). Do not re-scan the whole drawing set.
 2. **Snippets locate pages only.** PDF text is often garbled — never treat snippet order as terminal wiring.
 3. **One full-page look** — at most **one** `render_schematic_page` (or `render_on_best_hit`) per question to find the area. If small text is unreadable, **stop re-examining that PNG**.
 4. **Region next** — `render_schematic_region` + `ocr_schematic_region` on the same `bbox` (normalized 0–1 fractions of page). Example bbox around lower-right detail: `{"x0":0.55,"y0":0.35,"x1":0.98,"y1":0.85}`.
@@ -74,12 +74,12 @@ Tag every wire/tag answer:
 
 ## Examples
 
-**Wire to terminal:** “What wire goes to S- on DGT-300+?”
+**Wire to terminal:** “What wire goes to S- on P-4400+?”
 
 ```json
 {
   "pdf_path": ".../drawing.pdf",
-  "query": ["DGT-300+", "S-"],
+  "query": ["P-4400+", "S-"],
   "render_on_best_hit": true
 }
 ```
