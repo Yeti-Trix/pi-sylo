@@ -11,11 +11,18 @@
  *  - Restoring first snapshots the CURRENT state (undo-of-undo is always
  *    possible), then copies pre-images back and removes files the turn added.
  *
+ * v2 (issue #8): content-hash diffing (sha256 per captured file — same-size
+ * same-mtime edits are detected), deferred-turn safety captures (a turn queued
+ * behind another conversation snapshots the workspace at defer time and the
+ * snapshot is promoted if the flush-time capture fails), and a total store
+ * budget with oldest-first pruning.
+ *
  * Best-effort by design: any capture failure just means that turn isn't
  * undoable — chat behavior is never affected.
  */
 
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { join, relative, sep } from 'node:path'
 import { app } from 'electron'
 
@@ -30,18 +37,26 @@ const MAX_TOTAL_BYTES = 64 * 1024 * 1024
 const MAX_FILES = 4000
 const KEEP_TURNS_PER_CONV = 5
 const KEEP_SAFETY_MS = 7 * 24 * 60 * 60 * 1000
+const KEEP_DEFERRED_MS = 24 * 60 * 60 * 1000
+/** Total budget across every conversation's checkpoints; oldest-first prune. */
+const MAX_STORE_BYTES = 512 * 1024 * 1024
 
 export type CheckpointManifest = {
-  v: 1
+  v: 1 | 2
   turnId: string
   convId: string
   cwd: string
   started_at: number
   assistantMessageId?: string
   safety?: boolean
+  /** Deferred-turn safety snapshot: captured at queue time, promoted or
+   *  discarded when the turn actually starts. */
+  deferred?: boolean
   fileCount: number
   totalBytes: number
   files: string[]
+  /** v2: rel path → sha256 hex of the captured content. */
+  hashes?: Record<string, string>
 }
 
 export type CheckpointPreview = {
@@ -69,7 +84,15 @@ function manifestPath(dir: string): string {
 function readManifest(dir: string): CheckpointManifest | null {
   try {
     const m = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CheckpointManifest
-    return m && m.v === 1 && typeof m.cwd === 'string' ? m : null
+    return m && (m.v === 1 || m.v === 2) && typeof m.cwd === 'string' ? m : null
+  } catch {
+    return null
+  }
+}
+
+function hashFile(abs: string): string | null {
+  try {
+    return createHash('sha256').update(readFileSync(abs)).digest('hex')
   } catch {
     return null
   }
@@ -113,27 +136,111 @@ function walkWorkspace(cwd: string): { rel: string; abs: string; size: number }[
   return out
 }
 
+/** Copy a capture set into <dir>/files and return the manifest payload pieces
+ *  (shared by turn-start, safety, and deferred captures). Hashes every copied
+ *  file (sha256) so previews can diff by content, not size+mtime. */
+function copyCaptureFiles(
+  dir: string,
+  tracked: { rel: string; abs: string; size: number }[],
+): { rels: string[]; totalBytes: number; hashes: Record<string, string> } {
+  const filesDir = join(dir, 'files')
+  mkdirSync(filesDir, { recursive: true })
+  const rels: string[] = []
+  const hashes: Record<string, string> = {}
+  let totalBytes = 0
+  for (const f of tracked) {
+    const dest = join(filesDir, f.rel)
+    mkdirSync(dest.slice(0, dest.lastIndexOf(sep)), { recursive: true })
+    let buf: Buffer | null = null
+    try {
+      buf = readFileSync(f.abs)
+    } catch {
+      /* unreadable mid-walk — skip */
+      continue
+    }
+    writeFileSync(dest, buf)
+    rels.push(f.rel)
+    hashes[f.rel] = createHash('sha256').update(buf).digest('hex')
+    totalBytes += buf.length
+  }
+  return { rels, totalBytes, hashes }
+}
+
+/** Total bytes across every manifest in the store. */
+function storeBytes(): { total: number; items: { dir: string; startedAt: number; bytes: number; safety: boolean; deferred: boolean; convId: string }[] } {
+  const root = checkpointRoot()
+  const items: { dir: string; startedAt: number; bytes: number; safety: boolean; deferred: boolean; convId: string }[] = []
+  let total = 0
+  if (!existsSync(root)) return { total, items }
+  try {
+    for (const convId of readdirSync(root)) {
+      const cDir = join(root, convId)
+      let entries: string[]
+      try {
+        entries = readdirSync(cDir)
+      } catch {
+        continue
+      }
+      for (const entry of entries) {
+        const m = readManifest(join(cDir, entry))
+        if (!m) continue
+        items.push({ dir: join(cDir, entry), startedAt: m.started_at, bytes: m.totalBytes, safety: !!m.safety, deferred: !!m.deferred, convId })
+        total += m.totalBytes
+      }
+    }
+  } catch {
+    /* best-effort */
+  }
+  return { total, items }
+}
+
+/** Keep the checkpoint store under MAX_STORE_BYTES: oldest-first, never
+ *  deleting the newest real checkpoint of a conversation. Best-effort. */
+function enforceStoreBudget(): void {
+  try {
+    const { total, items } = storeBytes()
+    if (total <= MAX_STORE_BYTES) return
+    // Protect the newest non-safety/non-deferred manifest per conversation.
+    const newestPerConv = new Map<string, number>()
+    for (const it of items) {
+      if (it.safety || it.deferred) continue
+      const cur = newestPerConv.get(it.convId)
+      if (cur === undefined || it.startedAt > cur) newestPerConv.set(it.convId, it.startedAt)
+    }
+    const deletable = items
+      .filter((it) => !(newestPerConv.get(it.convId) === it.startedAt && !it.safety && !it.deferred))
+      .sort((a, b) => a.startedAt - b.startedAt)
+    let running = total
+    for (const it of deletable) {
+      if (running <= MAX_STORE_BYTES) break
+      try {
+        rmSync(it.dir, { recursive: true, force: true })
+        running -= it.bytes
+      } catch {
+        /* ignore */
+      }
+    }
+  } catch {
+    /* budget enforcement is best-effort */
+  }
+}
+
 /** Capture pre-images of the tracked workspace tree. Returns the turn id
  *  (also written into the manifest) or null when nothing was captured. */
 export function captureTurnStart(convId: string, cwd: string, assistantMessageId: string): string | null {
   if (!cwd || !existsSync(cwd)) return null
+  enforceStoreBudget()
   const turnId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   const dir = join(convDir(convId), turnId)
-  const filesDir = join(dir, 'files')
   const tracked = walkWorkspace(cwd)
   const rels: string[] = []
   let totalBytes = 0
   try {
-    mkdirSync(filesDir, { recursive: true })
-    for (const f of tracked) {
-      const dest = join(filesDir, f.rel)
-      mkdirSync(dest.slice(0, dest.lastIndexOf(sep)), { recursive: true })
-      copyFileSync(f.abs, dest)
-      rels.push(f.rel)
-      totalBytes += f.size
-    }
+    const { rels: copied, totalBytes: bytes, hashes } = copyCaptureFiles(dir, tracked)
+    rels.push(...copied)
+    totalBytes = bytes
     const manifest: CheckpointManifest = {
-      v: 1,
+      v: 2,
       turnId,
       convId,
       cwd,
@@ -142,6 +249,7 @@ export function captureTurnStart(convId: string, cwd: string, assistantMessageId
       fileCount: rels.length,
       totalBytes,
       files: rels,
+      hashes,
     }
     writeFileSync(manifestPath(dir), JSON.stringify(manifest), 'utf8')
     return turnId
@@ -155,6 +263,86 @@ export function captureTurnStart(convId: string, cwd: string, assistantMessageId
   }
 }
 
+/** Deferred-turn safety snapshot: taken when a cross-conversation turn is
+ *  QUEUED (user message already inserted), because the other conversation's
+ *  agent may edit the same workspace before this turn flushes. Invisible in
+ *  the undo list; promoted if the flush-time capture fails. */
+export function captureDeferredStart(convId: string, cwd: string): string | null {
+  if (!cwd || !existsSync(cwd)) return null
+  const dir = join(convDir(convId), `deferred-${Date.now().toString(36)}`)
+  try {
+    const tracked = walkWorkspace(cwd)
+    const { rels, totalBytes, hashes } = copyCaptureFiles(dir, tracked)
+    const manifest: CheckpointManifest = {
+      v: 2,
+      turnId: dir.slice(dir.lastIndexOf(sep) + 1),
+      convId,
+      cwd,
+      started_at: Date.now(),
+      safety: false,
+      deferred: true,
+      fileCount: rels.length,
+      totalBytes,
+      files: rels,
+      hashes,
+    }
+    writeFileSync(manifestPath(dir), JSON.stringify(manifest), 'utf8')
+    return dir
+  } catch {
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      /* ignore */
+    }
+    return null
+  }
+}
+
+/** After the flush-time capture: on success, discard the deferred safety
+ *  snapshots; on failure, promote the newest one to be the turn's undoable
+ *  checkpoint (registered against the assistant message id). */
+export function reconcileDeferredCapture(convId: string, assistantMessageId: string, capturedOk: boolean): void {
+  const root = convDir(convId)
+  if (!existsSync(root)) return
+  const deferredDirs: { dir: string; startedAt: number }[] = []
+  try {
+    for (const entry of readdirSync(root)) {
+      const dir = join(root, entry)
+      const m = readManifest(dir)
+      if (m && m.deferred && !m.assistantMessageId) deferredDirs.push({ dir, startedAt: m.started_at })
+    }
+  } catch {
+    return
+  }
+  if (deferredDirs.length === 0) return
+  deferredDirs.sort((a, b) => b.startedAt - a.startedAt)
+  const [newest, ...rest] = deferredDirs
+  for (const d of rest) {
+    try {
+      rmSync(d.dir, { recursive: true, force: true })
+    } catch {
+      /* ignore */
+    }
+  }
+  if (capturedOk) {
+    try {
+      rmSync(newest.dir, { recursive: true, force: true })
+    } catch {
+      /* ignore */
+    }
+    return
+  }
+  try {
+    const m = readManifest(newest.dir)
+    if (!m) return
+    m.assistantMessageId = assistantMessageId
+    delete m.deferred
+    writeFileSync(manifestPath(newest.dir), JSON.stringify(m), 'utf8')
+  } catch {
+    /* ignore */
+  }
+}
+
 /** Undoable turns for a conversation (newest first): the assistant message
  *  ids that have a registered pre-turn snapshot. */
 export function listForConversation(convId: string): { assistantMessageId: string; startedAt: number }[] {
@@ -164,7 +352,7 @@ export function listForConversation(convId: string): { assistantMessageId: strin
   try {
     for (const entry of readdirSync(root)) {
       const m = readManifest(join(root, entry))
-      if (m && !m.safety && m.assistantMessageId) {
+      if (m && !m.safety && !m.deferred && m.assistantMessageId) {
         out.push({ assistantMessageId: m.assistantMessageId, startedAt: m.started_at })
       }
     }
@@ -180,12 +368,14 @@ function findDirForAssistant(convId: string, assistantMessageId: string): string
   for (const entry of readdirSync(root)) {
     const dir = join(root, entry)
     const m = readManifest(dir)
-    if (m && !m.safety && m.assistantMessageId === assistantMessageId) return dir
+    if (m && !m.safety && !m.deferred && m.assistantMessageId === assistantMessageId) return dir
   }
   return null
 }
 
-/** Diff the workspace NOW against a checkpoint's manifest. */
+/** Diff the workspace NOW against a checkpoint's manifest. v2 manifests carry
+ *  sha256 hashes, so same-size same-mtime edits are detected; v1 manifests
+ *  fall back to size comparison. */
 export function previewRestore(convId: string, assistantMessageId: string): CheckpointPreview | null {
   const dir = findDirForAssistant(convId, assistantMessageId)
   const m = dir ? readManifest(dir) : null
@@ -193,7 +383,6 @@ export function previewRestore(convId: string, assistantMessageId: string): Chec
   const manifestSet = new Set(m.files)
   const current = walkWorkspace(m.cwd)
   const currentSet = new Set(current.map((f) => f.rel))
-  const sizes = new Map(current.map((f) => [f.rel, f.size]))
   const modified: string[] = []
   const added: string[] = []
   const deleted: string[] = []
@@ -203,20 +392,22 @@ export function previewRestore(convId: string, assistantMessageId: string): Chec
   for (const rel of m.files) {
     if (!currentSet.has(rel)) deleted.push(rel)
   }
-  // Modified: same rel present on both sides — compare stored size snapshot.
-  const checkpointSizes = new Map<string, number>()
-  for (const rel of m.files) {
-    try {
-      checkpointSizes.set(rel, statSync(join(dir, 'files', rel)).size)
-    } catch {
-      /* missing checkpoint copy — treat as deleted at restore time */
-    }
-  }
+  const hashes = m.v >= 2 ? (m.hashes ?? {}) : {}
   for (const rel of m.files) {
     if (!currentSet.has(rel)) continue
-    const cSize = checkpointSizes.get(rel)
-    const nowSize = sizes.get(rel)
-    if (cSize !== undefined && nowSize !== undefined && cSize !== nowSize) modified.push(rel)
+    if (hashes[rel]) {
+      const now = hashFile(join(m.cwd, rel))
+      if (now !== null && now !== hashes[rel]) modified.push(rel)
+      continue
+    }
+    // v1 fallback: size snapshot from the stored copy.
+    try {
+      const cSize = statSync(join(dir, 'files', rel)).size
+      const nowSize = statSync(join(m.cwd, rel)).size
+      if (cSize !== nowSize) modified.push(rel)
+    } catch {
+      /* missing on either side — treat as added/deleted at restore time */
+    }
   }
   return { modified: modified.sort(), added: added.sort(), deleted: deleted.sort() }
 }
@@ -224,21 +415,11 @@ export function previewRestore(convId: string, assistantMessageId: string): Chec
 /** Safety-capture the CURRENT tree before overwriting (undo-of-undo). */
 function captureSafety(convId: string, cwd: string): string | null {
   const dir = join(convDir(convId), `safety-${Date.now().toString(36)}`)
-  const filesDir = join(dir, 'files')
   try {
     const tracked = walkWorkspace(cwd)
-    const rels: string[] = []
-    let totalBytes = 0
-    mkdirSync(filesDir, { recursive: true })
-    for (const f of tracked) {
-      const dest = join(filesDir, f.rel)
-      mkdirSync(dest.slice(0, dest.lastIndexOf(sep)), { recursive: true })
-      copyFileSync(f.abs, dest)
-      rels.push(f.rel)
-      totalBytes += f.size
-    }
+    const { rels, totalBytes, hashes } = copyCaptureFiles(dir, tracked)
     const manifest: CheckpointManifest = {
-      v: 1,
+      v: 2,
       turnId: dir.slice(dir.lastIndexOf(sep) + 1),
       convId,
       cwd,
@@ -247,6 +428,7 @@ function captureSafety(convId: string, cwd: string): string | null {
       fileCount: rels.length,
       totalBytes,
       files: rels,
+      hashes,
     }
     writeFileSync(manifestPath(dir), JSON.stringify(manifest), 'utf8')
     return dir
@@ -298,8 +480,9 @@ export function restoreTurn(convId: string, assistantMessageId: string): { ok: t
   }
 }
 
-/** Boot-time prune: keep the newest N real checkpoints per conversation and
- *  safety checkpoints younger than the retention window. */
+/** Boot-time prune: keep the newest N real checkpoints per conversation,
+ *  safety checkpoints younger than the retention window, deferred snapshots
+ *  younger than 24h, and the whole store under the size budget. */
 export function pruneAll(): void {
   const root = checkpointRoot()
   if (!existsSync(root)) return
@@ -326,6 +509,16 @@ export function pruneAll(): void {
           }
           continue
         }
+        if (m.deferred) {
+          if (now - m.started_at > KEEP_DEFERRED_MS) {
+            try {
+              rmSync(dir, { recursive: true, force: true })
+            } catch {
+              /* ignore */
+            }
+          }
+          continue
+        }
         if (m.safety) {
           if (now - m.started_at > KEEP_SAFETY_MS) {
             try {
@@ -347,6 +540,7 @@ export function pruneAll(): void {
         }
       }
     }
+    enforceStoreBudget()
   } catch {
     /* prune is best-effort */
   }

@@ -23,11 +23,13 @@ import {
   writeTerminal,
 } from './terminal-manager.js'
 import {
+  captureDeferredStart,
   captureTurnStart,
   listForConversation as listCheckpointsForConversation,
   previewRestore,
   pruneAll as pruneCheckpoints,
-  purgeConversation as purgeConversationCheckpoints,
+    purgeConversation as purgeConversationCheckpoints,
+  reconcileDeferredCapture,
   restoreTurn,
 } from './checkpoint-store.js'
 import { formatCompactionNoticeContent, type CompactionReason } from '../shared/compaction-notice.js'
@@ -1749,10 +1751,20 @@ function deferChatTurn(
     db.insertMessage(conversationId, 'user', prepared.text, 'complete')
     maybeAutoTitleFromFirstUserMessage(conversationId, text)
     emitChatRefresh(conversationId, 'messages')
-    deferredChatTurns.push({
+        deferredChatTurns.push({
       conversationId,
       prepared,
     })
+    // Deferred-turn safety snapshot (issue #8b): the user message exists but
+    // the turn won't start until the other conversation's turn finishes —
+    // capture pre-images NOW, before that agent can edit the same workspace.
+    try {
+      const conv = db.getConversation(conversationId)
+      const wsCwd = conv?.workspace_id ? effectivePiCwdForWorkspace(conv.workspace_id) : ''
+      if (wsCwd) captureDeferredStart(conversationId, wsCwd)
+    } catch {
+      /* checkpoints are best-effort */
+    }
     return { ok: true as const, assistantMessageId: '', deferred: true as const }
   })()
 }
@@ -2573,10 +2585,11 @@ async function startChatTurn(
   // Agent checkpoint (per-turn undo): snapshot the workspace pre-images
   // BEFORE the broker can touch files. Best-effort — failure just means this
   // turn isn't undoable; chat behavior is unaffected.
-  try {
+    try {
     const conv = db.getConversation(conversationId)
     const wsCwd = conv?.workspace_id ? effectivePiCwdForWorkspace(conv.workspace_id) : ''
-    if (wsCwd) captureTurnStart(conversationId, wsCwd, assistant.id)
+    const captured = wsCwd ? captureTurnStart(conversationId, wsCwd, assistant.id) : null
+    reconcileDeferredCapture(conversationId, assistant.id, captured !== null)
   } catch {
     /* checkpoints are best-effort */
   }
