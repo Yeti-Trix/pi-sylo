@@ -204,7 +204,7 @@ npm run bootstrap-pi
 
 
 
-**Operator tool bundles:** some packages are **operator-installed Pi packages** rather than bundled optional packages — they install via `~/.pi/agent/settings.json` `packages` (local path or `pi install git:…`), the same way community Pi packages install. Their skills appear in **Capability manager → Skills** like any other package, and their routes appear in the sidebar. The public repo ships none of them by default; see the Pi packages docs for authoring your own.
+**Operator tool bundles:** some packages are **operator-installed Pi packages** rather than bundled optional packages — they install via `~/.pi/agent/settings.json` `packages` (`pi install npm:…`, `pi install git:…`, or a local path), or straight from the Capability manager → Pi.dev package catalog, which also lists npm-trusted first-party sylo-* packages. Their skills appear in **Capability manager → Skills** like any other package, and their routes appear in the sidebar. The public repo ships none of them by default; see the Pi packages docs for authoring your own.
 
 **Chat vs widgets:** Sylo-first packages put **buttons and mini-reports inline in the chat bubble** (host React), not `show_widget` iframe panels. Sidebar dashboards use **TypeScript + React** builds under each package's `ui/` folder. Discussion #317 widgets remain for third-party skills only.
 
