@@ -20,7 +20,6 @@ export type TerminalSession = {
   cwd: string
   /** Seed a restored session’s buffer from pool-tab persistence (must be
    *  called after ensure(), before pty output appends). */
-  seedBacklog: (tabId: string, text: string) => void
   /** Full output so far (backlog + live), replayed into xterm on mount. */
   buffer: string
   exited: boolean
@@ -37,6 +36,9 @@ export type TerminalRegistry = {
   dispose: (tabId: string) => void
   write: (tabId: string, data: string) => void
   resize: (tabId: string, cols: number, rows: number) => void
+  /** Seed a restored session’s buffer from pool-tab persistence (must be
+   *  called after ensure(), before pty output appends). */
+  seedBacklog: (tabId: string, text: string) => void
   /** Subscribe to new output chunks (called AFTER the chunk hit the buffer). */
   subscribe: (tabId: string, cb: (chunk: string) => void) => () => void
 }

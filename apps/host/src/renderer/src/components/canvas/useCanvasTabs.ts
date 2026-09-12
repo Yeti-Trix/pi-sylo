@@ -199,7 +199,6 @@ export function useCanvasTabs({
       if (!(activeRef.current[bucket] ?? '') && savedActive) {
         writeActive({ ...activeRef.current, [bucket]: savedActive })
       }
-      }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId])
