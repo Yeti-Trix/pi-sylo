@@ -1132,11 +1132,23 @@ declare global {
          *  app data) so they reopen after a restart. */
         savePoolTabs: (
           workspaceId: string,
-          tabs: { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string }[],
+          payload:
+            | { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string; scrollback?: string }[]
+            | {
+                version: 2
+                activeId?: string
+                tabs: { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string; scrollback?: string }[]
+              }
         ) => Promise<boolean>
-        /** Load the saved pool tabs for a workspace ([] when none). */
+        /** Load the saved pool tabs for a workspace. v1 stores return a
+         *  plain array; v2 stores return { version: 2, activeId?, tabs }. */
         loadPoolTabs: (workspaceId: string) => Promise<
-          { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string }[]
+          | {
+              version: 2
+              activeId?: string
+              tabs: { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string; scrollback?: string }[]
+            }
+          | { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string }[]
         >
         // ── Agent checkpoints (per-turn undo; storage in app data only) ──
         checkpoints: {

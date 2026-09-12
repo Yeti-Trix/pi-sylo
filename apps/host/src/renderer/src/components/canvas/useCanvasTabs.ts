@@ -73,6 +73,8 @@ type Options = {
   activeWorkspaceCwdRef: React.MutableRefObject<string>
   /** Restored pool terminals need a pty — App ensures the session here. */
   onTerminalRestored?: (tabId: string, cwd: string) => void
+  /** Seed a restored terminal tab’s scrollback into its session buffer. */
+  onTerminalSeedBacklog?: (tabId: string, text: string) => void
   /** Called when a show/live-show lands (App opens + persists the panel). */
   onOpenPanel: () => void
 }
@@ -119,6 +121,7 @@ export function useCanvasTabs({
   activeWorkspaceCwdRef,
   onOpenPanel,
   onTerminalRestored,
+  onTerminalSeedBacklog,
 }: Options): UseCanvasTabs {
   const [tabsByScope, setTabsByScope] = useState<Record<string, CanvasTab[]>>({})
   const [activeByScope, setActiveByScope] = useState<Record<string, string>>({})
@@ -155,12 +158,18 @@ export function useCanvasTabs({
     if (!workspaceId || restoredPoolWsRef.current === workspaceId) return
     restoredPoolWsRef.current = workspaceId
     void (async () => {
-      let saved: { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string }[] = []
-      try {
-        saved = (await window.sylo.canvas.loadPoolTabs?.(workspaceId)) ?? []
-      } catch {
-        return
+      const savedRaw = await window.sylo.canvas.loadPoolTabs?.(workspaceId)
+      // v1 stores: plain array. v2 stores: { version: 2, activeId?, tabs }.
+      const savedList = Array.isArray(savedRaw) ? savedRaw : savedRaw?.tabs ?? []
+      const savedActiveId = Array.isArray(savedRaw) ? undefined : savedRaw?.activeId
+      type SavedTab = {
+        kind: 'terminal' | 'browser'
+        title?: string
+        terminalCwd?: string
+        browserUrl?: string
+        scrollback?: string
       }
+      const saved = (savedList ?? []) as SavedTab[]
       if (!Array.isArray(saved) || saved.length === 0) return
       const bucket = `w:${workspaceId}`
       const existing = tabsRef.current[bucket] ?? []
@@ -178,12 +187,18 @@ export function useCanvasTabs({
         })
         if (s.kind === 'terminal') {
           onTerminalRestored?.(id, typeof s.terminalCwd === 'string' ? s.terminalCwd : '')
+          if (typeof s.scrollback === 'string' && s.scrollback) {
+            onTerminalSeedBacklog?.(id, s.scrollback)
+          }
         }
       }
       if (additions.length === 0) return
       writeTabs({ ...tabsRef.current, [bucket]: [...existing, ...additions] })
-      if (!(activeRef.current[bucket] ?? '') && additions[0]) {
-        writeActive({ ...activeRef.current, [bucket]: additions[0].id })
+      const savedActive =
+        savedActiveId && additions.some((t) => t.id === savedActiveId) ? savedActiveId : additions[0].id
+      if (!(activeRef.current[bucket] ?? '') && savedActive) {
+        writeActive({ ...activeRef.current, [bucket]: savedActive })
+      }
       }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -18,6 +18,9 @@ export type TerminalSession = {
   ptyId: string | null
   /** Start cwd captured at ensure() — used by pool-tab persistence. */
   cwd: string
+  /** Seed a restored session’s buffer from pool-tab persistence (must be
+   *  called after ensure(), before pty output appends). */
+  seedBacklog: (tabId: string, text: string) => void
   /** Full output so far (backlog + live), replayed into xterm on mount. */
   buffer: string
   exited: boolean
@@ -118,6 +121,13 @@ versionRef.current++
             append(tabId, `\x1b[90m[terminal unavailable: ${s.error}]\x1b[0m\r\n`)
           }
         })()
+      },
+      seedBacklog(tabId, text) {
+        const st = sessionsRef.current.get(tabId)
+        if (!st || !text) return
+        st.buffer = text + st.buffer
+        if (st.buffer.length > BUFFER_MAX_BYTES) st.buffer = st.buffer.slice(-BUFFER_MAX_BYTES)
+        versionRef.current++
       },
       get: (tabId) => sessionsRef.current.get(tabId),
       dispose(tabId) {

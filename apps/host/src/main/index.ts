@@ -5083,14 +5083,19 @@ function registerIpc(): void {
   function sanitizeWsKey(wsKey: string): string {
     return wsKey.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 120) || 'default'
   }
-  ipcMain.handle('canvas:save-pool-tabs', (_event, wsKey: unknown, tabs: unknown) => {
-    if (typeof wsKey !== 'string' || !Array.isArray(tabs)) return false
+  ipcMain.handle('canvas:save-pool-tabs', (_event, wsKey: unknown, payload: unknown) => {
+    if (typeof wsKey !== 'string') return false
+    // v2 payload: { version: 2, activeId?, tabs: [...] }. v1 (plain array)
+    // still accepted; loaded files are returned in their stored shape.
+    const rawTabs = Array.isArray(payload) ? payload : (payload as { tabs?: unknown })?.tabs
+    const activeId = Array.isArray(payload) ? undefined : (payload as { activeId?: unknown })?.activeId
+    if (!Array.isArray(rawTabs)) return false
     try {
       const dir = poolTabsDir()
       mkdirSync(dir, { recursive: true })
-      const clean = (tabs as unknown[])
+      const clean = (rawTabs as unknown[])
         .filter(
-          (t): t is { kind: 'terminal' | 'browser'; title?: unknown; terminalCwd?: unknown; browserUrl?: unknown } =>
+          (t): t is { kind: 'terminal' | 'browser'; title?: unknown; terminalCwd?: unknown; browserUrl?: unknown; scrollback?: unknown } =>
             Boolean(t) &&
             typeof t === 'object' &&
             ((t as { kind?: unknown }).kind === 'terminal' || (t as { kind?: unknown }).kind === 'browser'),
@@ -5101,8 +5106,15 @@ function registerIpc(): void {
           title: typeof t.title === 'string' ? t.title.slice(0, 80) : undefined,
           terminalCwd: typeof t.terminalCwd === 'string' ? t.terminalCwd : undefined,
           browserUrl: typeof t.browserUrl === 'string' ? t.browserUrl.slice(0, 2000) : undefined,
+          scrollback:
+            typeof t.scrollback === 'string' ? t.scrollback.slice(-200_000) : undefined,
         }))
-      writeFileSync(join(dir, `${sanitizeWsKey(wsKey)}.json`), JSON.stringify(clean), 'utf8')
+            const stored = JSON.stringify(
+        Array.isArray(payload)
+          ? clean
+          : { version: 2, activeId: typeof activeId === 'string' ? activeId.slice(0, 120) : undefined, tabs: clean },
+      )
+      writeFileSync(join(dir, `${sanitizeWsKey(wsKey)}.json`), stored, 'utf8')
       return true
     } catch {
       return false

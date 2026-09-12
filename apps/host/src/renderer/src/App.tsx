@@ -1816,8 +1816,18 @@ export function App(): React.ReactElement {
         terminalCwd:
           k === 'terminal' ? terminals.get(t.id)?.cwd ?? workspaceCwdRef.current : undefined,
         browserUrl: k === 'browser' ? storedSrcForTab(t.id) ?? t.browserUrl : undefined,
+        scrollback:
+          k === 'terminal' ? terminals.get(t.id)?.buffer.slice(-200_000) : undefined,
       }))
-    const save = () => void window.sylo.canvas.savePoolTabs?.(sidebarWorkspaceId, pool)
+    // v2 payload: active ws-pool tab id + terminal scrollback (last 200KB
+    // per tab) survive restarts; pty sessions themselves restart fresh in
+    // the saved cwd with the scrollback replayed as backlog.
+    const payload = {
+      version: 2 as const,
+      activeId: canvasActiveTabId ?? undefined,
+      tabs: pool,
+    }
+    const save = () => void window.sylo.canvas.savePoolTabs?.(sidebarWorkspaceId, payload)
     const timer = window.setTimeout(save, 800)
     return () => {
       window.clearTimeout(timer)
