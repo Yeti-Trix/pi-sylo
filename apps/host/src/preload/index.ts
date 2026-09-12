@@ -427,6 +427,12 @@ contextBridge.exposeInMainWorld('sylo', {
         | { ok: false; error: string }
       >,
   },
+  catalog: {
+    npmVersions: (names: string[]) =>
+      ipcRenderer.invoke('catalog:npm-versions', names) as Promise<
+        Record<string, { installed: string; latest: string; hasUpdate: boolean }>
+      >,
+  },
   broker: {
     restart: () => ipcRenderer.invoke('broker:restart'),
     prepareConversation: (conversationId: string) =>

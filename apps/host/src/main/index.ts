@@ -247,7 +247,7 @@ import { pruneStaleWebAccessRuns } from './web-access-db.js'
 import { pruneStalePdfCacheDir } from './pdf-cache-prune.js'
 import { absoluteSessionPathForConversation, relativeSessionPathFromAbsolute } from './sylo-session-paths.js'
 import { resolveLocalPathOnDisk } from './resolve-local-path.js'
-import { fetchPiDevCatalog, type PiDevCatalogQuery } from './pi-dev-catalog.js'
+import { checkNpmUpdates, fetchPiDevCatalog, type PiDevCatalogQuery } from './pi-dev-catalog.js'
 import { discoverSkillRoutes, filterSkillRoutesForSidebar } from './skill-routes.js'
 import { readSkillDataJson, writeSkillDataJson, SKILL_DATA_QUOTA_BYTES } from './skill-data-store.js'
 import { lintSkillSurfacesBatch } from './skill-surface-lint.js'
@@ -6223,6 +6223,10 @@ function registerIpc(): void {
     return saveExtensionConfig(configKey, hostAgentDir(), values as Record<string, unknown>)
   })
 
+  ipcMain.handle('catalog:npm-versions', (_e, names: unknown) => {
+    const list = Array.isArray(names) ? names.filter((n): n is string => typeof n === 'string') : []
+    return checkNpmUpdates(list)
+  })
   ipcMain.handle('broker:restart', () => {
     clearSafeModePrefs()
     registerBroker()

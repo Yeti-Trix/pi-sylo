@@ -147,6 +147,7 @@ function CatalogRowLi({
   installBusy,
   cardBusy,
   onInstall,
+  updateInfo,
   syloBadge,
 }: {
   row: CatalogRow
@@ -155,6 +156,7 @@ function CatalogRowLi({
   installBusy: string | null
   cardBusy: string | null
   onInstall: (spec: string) => void
+  updateInfo?: { installed: string; latest: string; hasUpdate: boolean }
   syloBadge?: boolean
 }): React.ReactElement {
   return (
@@ -195,15 +197,27 @@ function CatalogRowLi({
           )}
           <div className={cn(mutedText, capCatalogDesc)}>{row.description}</div>
         </div>
-        <button
-          type="button"
-          className={cn(btnPrimarySm, capCatalogInstallBtn)}
-          disabled={!!installBusy || !!cardBusy}
-          title={row.installSpec}
-          onClick={() => onInstall(row.installSpec)}
-        >
-          {installBusy === row.installSpec ? 'Installing…' : 'Install'}
-        </button>
+        {(() => {
+          const busy = !!installBusy || !!cardBusy
+          const hasUpdate = !!updateInfo?.hasUpdate
+          return (
+            <button
+              type="button"
+              className={cn(btnPrimarySm, capCatalogInstallBtn)}
+              disabled={installedOnDisk ? !hasUpdate || busy : busy}
+              title={
+                !installedOnDisk
+                  ? row.installSpec
+                  : hasUpdate
+                    ? `Installed ${updateInfo?.installed} — update to ${updateInfo?.latest}`
+                    : `Installed${loadedForAgent ? ' and loaded for agent' : ''} — up to date`
+              }
+              onClick={() => onInstall(row.installSpec)}
+            >
+              {installBusy === row.installSpec ? 'Installing…' : !installedOnDisk ? 'Install' : hasUpdate ? `Update ${updateInfo?.latest}` : 'Installed'}
+            </button>
+          )
+        })()}
       </div>
     </li>
   )
@@ -538,6 +552,34 @@ export function CapabilityManagerPanel({
     () => new Set((piDevResult?.syloPinned ?? []).map((x) => x.name)),
     [piDevResult],
   )
+
+  // Catalog Update buttons: for rows already installed, compare the installed
+  // version against the registry’s latest.
+  const [npmUpdateMap, setNpmUpdateMap] = useState<
+    Record<string, { installed: string; latest: string; hasUpdate: boolean }>
+  >({})
+  useEffect(() => {
+    const rows = [...(piDevResult?.syloPinned ?? []), ...(piDevResult?.packages ?? [])]
+    const installed = [
+      ...new Set(
+        rows
+          .filter((r) => r.installSpec.startsWith(String.fromCharCode(110,112,109,58)))
+          .map((r) => folderIdFromSpec(knownPackagePrimarySpec(normalizeNpmInstallSpec(r.installSpec))))
+          .filter((folder) => piDevRowLoadedByCanonFolder.has(folder)),
+      ),
+    ]
+    if (installed.length === 0) {
+      setNpmUpdateMap({})
+      return
+    }
+    let cancelled = false
+    void window.sylo.catalog.npmVersions(installed).then((m) => {
+      if (!cancelled) setNpmUpdateMap(m ?? {})
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [piDevResult, piDevRowLoadedByCanonFolder])
 
   // Host-plugin rows keyed by install-folder basename, so a package that has
   // its own Personal-packages card is not also listed in the host-plugins group.
@@ -1581,6 +1623,7 @@ export function CapabilityManagerPanel({
                       <CatalogRowLi
                         key={`sylo-pinned-${row.name}`}
                         row={row}
+                        updateInfo={npmUpdateMap[row.name]}
                         installedOnDisk={piDevRowLoadedByCanonFolder.has(canonFolder)}
                         loadedForAgent={piDevRowLoadedByCanonFolder.get(canonFolder) === true}
                         installBusy={installBusy}
@@ -1611,6 +1654,7 @@ export function CapabilityManagerPanel({
                   <CatalogRowLi
                     key={row.name}
                     row={row}
+                    updateInfo={npmUpdateMap[row.name]}
                     installedOnDisk={installedOnDisk}
                     loadedForAgent={loadedForAgent}
                     installBusy={installBusy}

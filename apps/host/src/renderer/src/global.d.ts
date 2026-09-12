@@ -643,6 +643,11 @@ declare global {
           | { ok: false; error: string }
         >
       }
+      catalog: {
+        npmVersions: (names: string[]) => Promise<
+          Record<string, { installed: string; latest: string; hasUpdate: boolean }>
+        >
+      },
       broker: {
         restart: () => Promise<boolean>
         prepareConversation: (

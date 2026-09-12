@@ -3,6 +3,56 @@
  * No official JSON API — structure matches pi.dev markup as of 2026-05; may need updates if the site changes.
  */
 
+
+export type NpmUpdateInfo = { installed: string; latest: string; hasUpdate: boolean }
+
+function compareSemver(a: string, b: string): number {
+  const pa = a.replace(/^v/, '').split(/[-+]/)[0].split('.').map((x) => Number.parseInt(x, 10) || 0)
+  const pb = b.replace(/^v/, '').split(/[-+]/)[0].split('.').map((x) => Number.parseInt(x, 10) || 0)
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0)
+  }
+  return 0
+}
+
+/**
+ * Catalog Update button: installed npm package versions (pi’s node_modules)
+ * vs the registry’s dist-tags.latest. Packages that are not installed or
+ * unreachable are simply absent from the result.
+ */
+export async function checkNpmUpdates(names: string[]): Promise<Record<string, NpmUpdateInfo>> {
+  const out: Record<string, NpmUpdateInfo> = {}
+  const unique = [...new Set(names.filter((n) => typeof n === 'string' && n.trim()))].slice(0, 50)
+  await Promise.all(
+    unique.map(async (name) => {
+      try {
+        let installed = ''
+        const pkgJson = join(homedir(), '.pi', 'agent', 'npm', 'node_modules', name, 'package.json')
+        if (existsSync(pkgJson)) {
+          const j = JSON.parse(await readFile(pkgJson, 'utf8')) as { version?: string }
+          installed = typeof j.version === 'string' ? j.version : ''
+        }
+        if (!installed) return
+        const r = await fetch(`https://registry.npmjs.org/${encodeURIComponent(name)}`, {
+          signal: AbortSignal.timeout(5000),
+        })
+        if (!r.ok) return
+        const j = (await r.json()) as { 'dist-tags'?: { latest?: string } }
+        const latest = j['dist-tags']?.latest ?? ''
+        if (!latest) return
+        out[name] = { installed, latest, hasUpdate: compareSemver(latest, installed) > 0 }
+      } catch {
+        /* unreachable registry / unreadable manifest — skip */
+      }
+    }),
+  )
+  return out
+}
+import { existsSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+
 export type PiDevCatalogSort = 'downloads' | 'recent' | 'name'
 
 export type PiDevCatalogType = '' | 'extension' | 'skill' | 'theme' | 'prompt'
