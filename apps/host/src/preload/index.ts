@@ -1007,6 +1007,9 @@ contextBridge.exposeInMainWorld('sylo', {
       >,
   },
   terminal: {
+    /** Persist a terminal-bridge snapshot (all live panes: id/title/cwd/exited + scrollback tail) for sylo-terminal-bridge. */
+    saveBridge: (sessions: { id: string; title?: string; cwd?: string; exited?: boolean; output?: string }[]) =>
+      ipcRenderer.invoke('terminal-bridge:save', sessions) as Promise<boolean>,
     /** Renderer → main: spawn a pty session. Backlog starts buffering
      *  immediately; attach flushes it through the same data channel. */
     create: (opts: { cwd?: string; cols?: number; rows?: number }) =>

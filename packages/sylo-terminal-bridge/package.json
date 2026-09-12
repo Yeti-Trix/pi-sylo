@@ -1,0 +1,26 @@
+{
+  "name": "sylo-terminal-bridge",
+  "version": "0.1.0",
+  "description": "Agent-side terminal_read tool — reads Sylo desktop terminal pane scrollback via a file bridge (SYLO_TERMINAL_BRIDGE_FILE). Inert outside the Sylo desktop app.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "extensions",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2"
+  },
+  "dependencies": {
+    "typebox": "^1.1.24"
+  }
+}

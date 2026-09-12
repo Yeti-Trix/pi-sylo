@@ -32,6 +32,7 @@ import {
   reconcileDeferredCapture,
   restoreTurn,
 } from './checkpoint-store.js'
+import { writeTerminalBridge, terminalBridgeFile } from './terminal-bridge.js'
 import { formatCompactionNoticeContent, type CompactionReason } from '../shared/compaction-notice.js'
 import { execFile } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -3648,9 +3649,10 @@ function buildBrokerSupervisorOptions(
     syloDbPath: db.dbPath(app.getPath('userData')),
     personalDataDir: db.personalDataDirOverride() ?? undefined,
     personalDataRoot: db.personalDataRoot(),
-    nodePath: WORKSPACE_NODE_MODULES,
+        nodePath: WORKSPACE_NODE_MODULES,
     cwd,
     agentDir,
+    terminalBridgeFile: terminalBridgeFile(),
     initialSessionPath: initialBind.sessionAbs,
     initialSessionCwd: initialBind.sessionCwd,
         modelProvider,
@@ -6241,6 +6243,9 @@ function registerIpc(): void {
   ipcMain.handle('catalog:npm-versions', (_e, names: unknown) => {
     const list = Array.isArray(names) ? names.filter((n): n is string => typeof n === 'string') : []
     return checkNpmUpdates(list)
+  })
+  ipcMain.handle('terminal-bridge:save', (_event, sessions: unknown) => {
+    return writeTerminalBridge(Array.isArray(sessions) ? (sessions as Parameters<typeof writeTerminalBridge>[0]) : [])
   })
   ipcMain.handle('broker:restart', () => {
     clearSafeModePrefs()

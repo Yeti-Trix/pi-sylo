@@ -220,6 +220,8 @@ export interface BrokerConfig {
   imageFallbackExtension?: string
   /** Repo path to sylo-canvas-sketch (canvas_sketch tool: pull the draw-area sketch into chat). */
   canvasSketchExtension?: string
+    /** Terminal bridge state file (SYLO_TERMINAL_BRIDGE_FILE for sylo-terminal-bridge). Null = not bridged. */
+  terminalBridgeFile: string | null
   /** Absolute path to the mirrored canvas sketch PNG (SYLO_CANVAS_SKETCH_PATH for the tool). */
   canvasSketchPath?: string
   /** Repo path to @sylo/skill-surface-extension (show_widget → host) */
@@ -305,8 +307,9 @@ export class BrokerSupervisor {
       personalDataDir: cfg.personalDataDir,
       personalDataRoot: cfg.personalDataRoot,
       nodePath: cfg.nodePath,
-      cwd: cfg.cwd,
+            cwd: cfg.cwd,
       agentDir: cfg.agentDir,
+      terminalBridgeFile: cfg.terminalBridgeFile ?? null,
       initialSessionPath: cfg.initialSessionPath,
       initialSessionCwd: cfg.initialSessionCwd,
       modelProvider: cfg.modelProvider,
@@ -359,8 +362,9 @@ export class BrokerSupervisor {
       env: {
         ...process.env,
         ELECTRON_RUN_AS_NODE: '1',
-        SYLO_DB_PATH: this.cfg.syloDbPath,
+                SYLO_DB_PATH: this.cfg.syloDbPath,
         SYLO_PERSONAL_DATA_ROOT: this.cfg.personalDataRoot,
+        ...(this.cfg.terminalBridgeFile ? { SYLO_TERMINAL_BRIDGE_FILE: this.cfg.terminalBridgeFile } : {}),
         ...(this.cfg.personalDataDir ? { SYLO_PERSONAL_DATA_DIR: this.cfg.personalDataDir } : {}),
         NODE_PATH: this.cfg.nodePath,
         SYLO_PI_CWD: this.cfg.cwd,

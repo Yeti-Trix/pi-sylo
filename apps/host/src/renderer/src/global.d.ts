@@ -1209,6 +1209,9 @@ declare global {
         >
       }
       terminal: {
+        /** Persist a terminal-bridge snapshot (all live panes) for sylo-terminal-bridge. */
+        saveBridge: (sessions: { id: string; title?: string; cwd?: string; exited?: boolean; output?: string }[]) =>
+          Promise<boolean>
         create: (opts: { cwd?: string; cols?: number; rows?: number }) => Promise<{ id: string }>
         attach: (id: string) => Promise<boolean>
         write: (id: string, data: string) => void

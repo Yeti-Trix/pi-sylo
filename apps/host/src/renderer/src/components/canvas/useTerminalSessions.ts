@@ -41,6 +41,8 @@ export type TerminalRegistry = {
   seedBacklog: (tabId: string, text: string) => void
   /** Subscribe to new output chunks (called AFTER the chunk hit the buffer). */
   subscribe: (tabId: string, cb: (chunk: string) => void) => () => void
+  /** Snapshot every live session (terminal-bridge persistence). */
+  list: () => { tabId: string; cwd: string; exited: boolean; buffer: string }[]
 }
 
 const BUFFER_MAX_BYTES = 2 * 1024 * 1024
@@ -158,6 +160,14 @@ versionRef.current++
         return () => {
           set.delete(cb)
         }
+      },
+      list() {
+        return [...sessionsRef.current.values()].map((s) => ({
+          tabId: s.tabId,
+          cwd: s.cwd,
+          exited: s.exited,
+          buffer: s.buffer,
+        }))
       },
     }
   }, [])

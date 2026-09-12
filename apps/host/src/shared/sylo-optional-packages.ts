@@ -23,6 +23,15 @@ export type SyloOptionalPackage = {
 
 export const SYLO_OPTIONAL_PACKAGES: readonly SyloOptionalPackage[] = [
   {
+    id: 'sylo-terminal-bridge',
+    title: 'Terminal bridge',
+    description:
+      'Agent-side **terminal_read** tool — read Sylo terminal pane scrollback from chat (list panes or tail one). Inert on vanilla Pi; needs a Sylo terminal pane to be open. See pi-sylo issue #7.',
+    extensionRelPath: 'packages/sylo-terminal-bridge/extensions/index.ts',
+    skillNames: [],
+    requiresSyloUi: false,
+  },
+  {
     id: 'sylo-pdf-reader',
     title: 'PDF reader',
     description:

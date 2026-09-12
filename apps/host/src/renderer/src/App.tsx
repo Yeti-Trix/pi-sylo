@@ -1835,6 +1835,27 @@ export function App(): React.ReactElement {
     }
   }, [canvasTabs, sidebarWorkspaceId, terminals])
 
+  // ── Terminal bridge snapshot (issue #7): all live panes → main → JSON ─────
+  // sylo-terminal-bridge's terminal_read reads this; debounce 10s + immediate
+  // on tab changes. Titles resolve from the canvas tab strip.
+  useEffect(() => {
+    if (!sidebarWorkspaceId) return
+    const titleById = new Map(canvasTabs.map((t) => [t.id, t.title]))
+    const save = () => {
+      const sessions = terminals.list().map((s) => ({
+        id: s.tabId,
+        title: titleById.get(s.tabId),
+        cwd: s.cwd,
+        exited: s.exited,
+        output: s.buffer.slice(-80_000),
+      }))
+      void window.sylo.terminal.saveBridge?.(sessions)
+    }
+    save()
+    const timer = window.setInterval(save, 10_000)
+    return () => window.clearInterval(timer)
+  }, [canvasTabs, sidebarWorkspaceId, terminals])
+
   // Session lifecycle for Terminal app-panes: create the pty when a Terminal
   // tab opens, kill it when that tab closes. Sessions persist across tab,
   // conversation and panel switches by design (cwd is captured at create).
