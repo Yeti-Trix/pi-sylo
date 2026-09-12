@@ -1,4 +1,4 @@
-# Pinned for supply-chain hygiene (see tracker: Crawl4AI litellm incident).
-crawl4ai==0.8.6
+# Pinned (see tracker: Crawl4AI litellm incident). 0.9.0 patches the 2026 crawl4ai CVE set (SSRF/RCE/file-write) — mostly Docker-server surface, which Sylo does not use (lib-only crawling).
+crawl4ai==0.9.0
 ddgs>=9.4.0,<10
 youtube-transcript-api>=1.2.4,<2
