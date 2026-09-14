@@ -6,6 +6,7 @@ export const ASK_QUESTION_OTHER_ID = 'other'
 export type AskQuestionOption = {
   id: string
   label: string
+  recommended?: boolean
 }
 
 export type AskQuestionSpec = {
@@ -41,6 +42,27 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>
 }
 
+const RECOMMENDED_SUFFIX_RE = /\s*\(\s*recommended\s*\)\s*$/i
+
+function stripRecommendedSuffix(label: string): { label: string; recommended: boolean } {
+  const match = RECOMMENDED_SUFFIX_RE.exec(label)
+  if (!match) return { label, recommended: false }
+  return { label: label.slice(0, match.index).trim(), recommended: true }
+}
+
+export function orderAskQuestionOptions(options: AskQuestionOption[]): AskQuestionOption[] {
+  const recommended = options.filter((o) => o.recommended)
+  if (recommended.length === 0) return options
+  const rest = options.filter((o) => !o.recommended)
+  return [...recommended, ...rest]
+}
+
+export function displayAskQuestionOptionLabel(option: AskQuestionOption): string {
+  if (!option.recommended) return option.label
+  if (RECOMMENDED_SUFFIX_RE.test(option.label)) return option.label
+  return `${option.label} (recommended)`
+}
+
 function parseOptions(raw: unknown): AskQuestionOption[] {
   if (!Array.isArray(raw)) return []
   const out: AskQuestionOption[] = []
@@ -48,11 +70,17 @@ function parseOptions(raw: unknown): AskQuestionOption[] {
     const o = asRecord(item)
     if (!o) continue
     const id = typeof o.id === 'string' ? o.id.trim() : ''
-    const label = typeof o.label === 'string' ? o.label.trim() : ''
-    if (!id || !label) continue
-    out.push({ id, label })
+    const rawLabel = typeof o.label === 'string' ? o.label.trim() : ''
+    if (!id || !rawLabel) continue
+    const stripped = stripRecommendedSuffix(rawLabel)
+    const recommended = o.recommended === true || stripped.recommended
+    out.push({
+      id,
+      label: stripped.label,
+      ...(recommended ? { recommended: true } : {}),
+    })
   }
-  return out
+  return orderAskQuestionOptions(out)
 }
 
 export function parseAskQuestionSpecs(raw: unknown): AskQuestionSpec[] {

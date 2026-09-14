@@ -14,6 +14,8 @@ The questions appear **inline in chat**. The turn waits until the operator picks
 - **Batch.** If you have 2–N questions, put them all in one `sylo_ask_question` call. Do not ask them one at a time.
 - **Do not list options in prose.** Do not write "A / B / C?" in your message — call the tool.
 - **At least two options** per question. Labels should be complete answers, not "yes"/"option 1".
+- **Recommend when you have a preference.** Put that option first and set `recommended: true`. The UI appends "(recommended)". When you are genuinely neutral, omit `recommended`.
+- Do not write "(recommended)" in the label yourself.
 - The UI always adds **Other** so the operator can type a custom answer. You do not need to include Other yourself.
 - Set `allow_multiple: true` only when more than one option can be right at once.
 
@@ -27,7 +29,7 @@ sylo_ask_question({
       id: "approach",
       prompt: "Which approach should I take?",
       options: [
-        { id: "minimal", label: "Smallest change that fixes it" },
+        { id: "minimal", label: "Smallest change that fixes it", recommended: true },
         { id: "refactor", label: "Refactor the surrounding code too" }
       ]
     }

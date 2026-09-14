@@ -6,6 +6,7 @@ export const ASK_QUESTION_RESULT_MESSAGE = 'sylo_ask_question_result'
 export type AskQuestionOption = {
   id: string
   label: string
+  recommended?: boolean
 }
 
 export type AskQuestionSpec = {

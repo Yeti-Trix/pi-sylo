@@ -3,9 +3,11 @@ import React, { useEffect, useMemo, useState } from 'react'
 import {
   ASK_QUESTION_OTHER_ID,
   answersComplete,
+  displayAskQuestionOptionLabel,
   parseAskQuestionAnswersFromResult,
   parseAskQuestionArgs,
   type AskQuestionAnswer,
+  type AskQuestionOption,
   type AskQuestionSpec,
 } from '../../../shared/ask-question'
 import { cn } from '../lib/cn'
@@ -62,7 +64,16 @@ function optionLabel(question: AskQuestionSpec, optionId: string, otherText?: st
     const extra = otherText?.trim()
     return extra ? `${OTHER_LABEL}: ${extra}` : OTHER_LABEL
   }
-  return question.options.find((o) => o.id === optionId)?.label ?? optionId
+  const option = question.options.find((o) => o.id === optionId)
+  return option ? displayAskQuestionOptionLabel(option) : optionId
+}
+
+function visibleOptions(question: AskQuestionSpec): AskQuestionOption[] {
+  const options = [...question.options]
+  if (!options.some((o) => o.id === ASK_QUESTION_OTHER_ID)) {
+    options.push({ id: ASK_QUESTION_OTHER_ID, label: OTHER_LABEL })
+  }
+  return options
 }
 
 function collapsedAnswerPreview(
@@ -159,10 +170,7 @@ export function AskQuestionBlock({
           const selected = answer?.selectedOptionIds ?? []
           const otherOn = selected.includes(ASK_QUESTION_OTHER_ID)
           const inputType = q.allow_multiple ? 'checkbox' : 'radio'
-          const options = [...q.options]
-          if (!options.some((o) => o.id === ASK_QUESTION_OTHER_ID)) {
-            options.push({ id: ASK_QUESTION_OTHER_ID, label: OTHER_LABEL })
-          }
+          const options = visibleOptions(q)
           return (
             <fieldset key={q.id} className="m-0 min-w-0 border-0 p-0">
               <legend className={askQuestionPrompt}>{q.prompt}</legend>
@@ -191,7 +199,7 @@ export function AskQuestionBlock({
                           })
                         }}
                       />
-                      <span>{opt.label}</span>
+                      <span>{displayAskQuestionOptionLabel(opt)}</span>
                     </label>
                   )
                 })}
