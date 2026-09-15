@@ -22,22 +22,28 @@ function normalizeQuestions(raw: unknown): AskQuestionSpec[] {
     const id = typeof q.id === 'string' && q.id.trim() ? q.id.trim() : ''
     const prompt = typeof q.prompt === 'string' && q.prompt.trim() ? q.prompt.trim() : ''
     if (!id || !prompt) continue
-    const options: { id: string; label: string }[] = []
+    const options: { id: string; label: string; recommended?: boolean }[] = []
     if (Array.isArray(q.options)) {
       for (const opt of q.options) {
         if (!opt || typeof opt !== 'object') continue
         const o = opt as Record<string, unknown>
         const oid = typeof o.id === 'string' && o.id.trim() ? o.id.trim() : ''
-        const label = typeof o.label === 'string' && o.label.trim() ? o.label.trim() : ''
-        if (!oid || !label) continue
-        options.push({ id: oid, label })
+        const rawLabel = typeof o.label === 'string' && o.label.trim() ? o.label.trim() : ''
+        if (!oid || !rawLabel) continue
+        const recommendedMark = /\s*\(\s*recommended\s*\)\s*$/i.exec(rawLabel)
+        const label = recommendedMark ? rawLabel.slice(0, recommendedMark.index).trim() : rawLabel
+        const recommended = o.recommended === true || !!recommendedMark
+        options.push({ id: oid, label, ...(recommended ? { recommended: true } : {}) })
       }
     }
     if (options.length < 2) continue
+    const recommended = options.filter((o) => o.recommended)
+    const rest = options.filter((o) => !o.recommended)
+    const ordered = recommended.length > 0 ? [...recommended, ...rest] : options
     out.push({
       id,
       prompt,
-      options,
+      options: ordered,
       allow_multiple: q.allow_multiple === true,
     })
   }
@@ -73,14 +79,16 @@ export default function syloAskQuestionExtension(pi: ExtensionAPI): void {
       'Ask the operator one or more multiple-choice questions in chat and wait for Submit. ' +
       'Prefer one call with every question you need now — do not ask them one at a time. ' +
       'Use this instead of listing options in prose. Each question needs at least two options. ' +
-      'The operator can always pick Other and type a custom answer.',
+      'When you have a recommendation, put that option first and set recommended: true (the UI adds "(recommended)"). ' +
+      'Omit recommended when you are genuinely neutral. The operator can always pick Other.',
     promptSnippet:
-      'sylo_ask_question({ title?, questions: [{ id, prompt, options: [{id,label}], allow_multiple? }] }) — ' +
+      'sylo_ask_question({ title?, questions: [{ id, prompt, options: [{id,label,recommended?}], allow_multiple? }] }) — ' +
       'ask multiple-choice questions in chat and block until the operator submits. ' +
-      'Put every question you need in one call.',
+      'Put every question you need in one call. If you have a preference, first option + recommended: true.',
     promptGuidelines: [
       'When you need a decision, preference, or clarification with a finite set of options, call sylo_ask_question instead of listing choices in your reply.',
       'If you have more than one question, ask them all in a single sylo_ask_question call. Do not serialize questions across turns.',
+      'When you have a recommendation, put that option first and set recommended: true on it. Do not write "(recommended)" in the label — the UI adds that. When you are genuinely unsure or neutral, omit recommended.',
       'Write option labels as complete, human-readable answers. Give each question and option a stable id.',
       'Do not repeat the same questions as markdown after calling the tool — the chat UI already shows them.',
     ],
@@ -95,7 +103,15 @@ export default function syloAskQuestionExtension(pi: ExtensionAPI): void {
           options: Type.Array(
             Type.Object({
               id: Type.String({ description: 'Stable option id.' }),
-              label: Type.String({ description: 'Human-readable choice.' }),
+              label: Type.String({
+                description: 'Human-readable choice. Do not include "(recommended)" here.',
+              }),
+              recommended: Type.Optional(
+                Type.Boolean({
+                  description:
+                    'True on the option you recommend. Put that option first. Omit when you have no preference.',
+                }),
+              ),
             }),
             { minItems: 2, description: 'At least two choices. The UI also adds Other.' },
           ),

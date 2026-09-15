@@ -114,6 +114,8 @@ import {
   sidebarWsSectionName,
   sidebarWsSectionActive,
   sidebarWsSectionDragging,
+  sidebarPinnedLabel,
+  sidebarPinnedSection,
   sidebarWsDropLine,
   chatPane,
   chatArea,
@@ -235,8 +237,13 @@ import {
 import {
   DEFAULT_SKILL_NAV_LAYOUT,
   ROUTE_NAV_SECTION_SEQUENCE,
+  isPinnedKey,
+  resolvePinnedNavEntries,
   skillRouteRowKey,
   sortedRoutesForNavSection,
+  tabNavKey,
+  togglePinnedKey,
+  type PinnedNavEntry,
   type SkillNavLayoutState,
   type SkillRouteNavSection,
 } from './skill-nav-layout'
@@ -315,6 +322,24 @@ function convActivityStatus(
   if (sending.has(convId)) return 'running'
   if (unread.has(convId)) return 'unread'
   return 'read'
+}
+
+function PinGlyph({ className }: { className?: string }): React.ReactElement {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className ?? 'h-3.5 w-3.5'}
+      aria-hidden="true"
+    >
+      <path d="M12 17v5" />
+      <path d="M9 10.8V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v6.8l1.6 2.4A1 1 0 0 1 15.8 15H8.2a1 1 0 0 1-.8-1.8Z" />
+    </svg>
+  )
 }
 
 function ConvStatusIndicator({ status }: { status: ConvActivityStatus }): React.ReactElement {
@@ -1006,6 +1031,12 @@ export function App(): React.ReactElement {
     clientX: number
     clientY: number
   } | null>(null)
+  const [pinContextMenu, setPinContextMenu] = useState<{
+    key: string
+    title: string
+    clientX: number
+    clientY: number
+  } | null>(null)
 
   const [routeActionModal, setRouteActionModal] = useState<{
     prompt: string
@@ -1640,6 +1671,37 @@ export function App(): React.ReactElement {
     }
   }, [])
 
+  const toggleNavPin = useCallback(
+    (key: string) => {
+      setNavLayout((prev) => {
+        const next = togglePinnedKey(prev, key)
+        void window.sylo.prefs.set('sylo.nav.layout', next)
+        return next
+      })
+    },
+    [],
+  )
+
+  const pinnedNavEntries = useMemo(
+    () => resolvePinnedNavEntries(navLayout.pinned, skillRoutes),
+    [navLayout.pinned, skillRoutes],
+  )
+
+  const openPinnedNav = useCallback(
+    (entry: PinnedNavEntry) => {
+      if (entry.kind === 'route') {
+        const hit = skillRoutes.find((r) => skillRouteRowKey(r) === entry.key)
+        if (hit) {
+          setActiveSkillRoute(hit)
+          setTab('skill-route')
+        }
+        return
+      }
+      setTab(entry.tab as Tab)
+    },
+    [skillRoutes],
+  )
+
   const notifyPathPrefsSaved = useCallback(async () => {
     await refreshPrefsDiag()
     const savedCanvasOpen = (await window.sylo.prefs.get('sylo.canvas.open', false)) === true
@@ -1687,18 +1749,29 @@ export function App(): React.ReactElement {
     if (canvasPopoutKey !== null || routePopoutKey !== null) return
     const routes = SYLO_SKILL_SURFACE_CAPABILITY_DESCRIPTOR.supports_route ? skillRoutes : []
     const routeItems = (section: SkillRouteNavSection) =>
-      sortedRoutesForNavSection(section, routes, navLayout).map((r) => ({
-        kind: 'route' as const,
-        key: skillRouteRowKey(r),
-        title: r.title,
-      }))
+      sortedRoutesForNavSection(section, routes, navLayout).map((r) => {
+        const key = skillRouteRowKey(r)
+        return {
+          kind: 'route' as const,
+          key,
+          title: r.title,
+          pinned: isPinnedKey(navLayout, key),
+        }
+      })
+    const tabItem = (tab: string, title: string, sep?: boolean) => ({
+      kind: 'tab' as const,
+      tab,
+      title,
+      pinned: isPinnedKey(navLayout, tabNavKey(tab)),
+      ...(sep ? { sep: true } : {}),
+    })
     void window.sylo.menu.setSections([
       { id: 'domain', label: 'Dashboards', items: routeItems('domain') },
       {
         id: 'tools',
         label: 'Tools',
         items: [
-          { kind: 'tab' as const, tab: 'schedules', title: 'Schedules' },
+          tabItem('schedules', 'Schedules'),
           ...routeItems('tools'),
           ...routeItems('library').map((it, i) => ({ ...it, sep: i === 0 })),
         ],
@@ -1708,10 +1781,10 @@ export function App(): React.ReactElement {
         label: 'Developer',
         items: [
           ...routeItems('dev'),
-          { kind: 'tab' as const, tab: 'proposals', title: 'Proposals', sep: true },
-          { kind: 'tab' as const, tab: 'evals', title: 'Testing' },
-          { kind: 'tab' as const, tab: 'skills', title: 'Capability manager' },
-          { kind: 'tab' as const, tab: 'settings', title: 'Settings' },
+          tabItem('proposals', 'Proposals', true),
+          tabItem('evals', 'Testing'),
+          tabItem('skills', 'Capability manager'),
+          tabItem('settings', 'Settings'),
           { kind: 'action' as const, action: 'restart-broker', title: 'Restart broker', sep: true },
           ...(safeMode ?
             [{ kind: 'action' as const, action: 'clear-safe-mode', title: 'Clear safe mode' }]
@@ -1725,6 +1798,11 @@ export function App(): React.ReactElement {
   useEffect(() => {
     if (canvasPopoutKey !== null || routePopoutKey !== null) return
     return window.sylo.menu.onAction((item) => {
+      if (item.kind === 'pin') {
+        const key = item.key?.trim() || (item.tab ? tabNavKey(item.tab) : '')
+        if (key) toggleNavPin(key)
+        return
+      }
       if (item.kind === 'route' && item.key) {
         const hit = skillRoutes.find((r) => skillRouteRowKey(r) === item.key)
         if (hit) {
@@ -1755,7 +1833,7 @@ export function App(): React.ReactElement {
         }
       }
     })
-  }, [skillRoutes, refreshCapabilities, refreshBrokerFromMain, canvasPopoutKey, routePopoutKey])
+  }, [skillRoutes, refreshCapabilities, refreshBrokerFromMain, canvasPopoutKey, routePopoutKey, toggleNavPin])
 
   // Minute ticker so sidebar relative timestamps stay fresh.
   useEffect(() => {
@@ -3838,6 +3916,62 @@ export function App(): React.ReactElement {
         <button type="button" className={navBtn} onClick={() => void newChat()}>
           + New chat
         </button>
+
+        {pinnedNavEntries.length > 0 ?
+          <div className={sidebarPinnedSection}>
+            <div className={sidebarPinnedLabel}>Pinned</div>
+            {pinnedNavEntries.map((entry) => {
+              const selected =
+                entry.kind === 'route'
+                  ? tab === 'skill-route' &&
+                    activeSkillRoute !== null &&
+                    skillRouteRowKey(activeSkillRoute) === entry.key
+                  : tab === entry.tab
+              return (
+                <div
+                  key={entry.key}
+                  className={cn(convRow, selected ? convRowSelected : 'hover:bg-bg-tertiary')}
+                  role="presentation"
+                >
+                  <div className={convRowMain}>
+                    <button
+                      type="button"
+                      className={cn(convRowSelect, selected && convRowSelectActive)}
+                      title={entry.title}
+                      onClick={() => openPinnedNav(entry)}
+                      onContextMenu={(e) => {
+                        e.preventDefault()
+                        setPinContextMenu({
+                          key: entry.key,
+                          title: entry.title,
+                          clientX: e.clientX,
+                          clientY: e.clientY,
+                        })
+                      }}
+                    >
+                      <PinGlyph className="h-3.5 w-3.5 shrink-0 text-text-muted" />
+                      <span className={convRowSelectLabel}>{entry.title}</span>
+                    </button>
+                    <div className={convRowActions}>
+                      <button
+                        type="button"
+                        className={convActionBtn}
+                        aria-label={`Unpin ${entry.title}`}
+                        title="Unpin"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          toggleNavPin(entry.key)
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        : null}
 
         <div
           className={sidebarConvList}
@@ -6145,6 +6279,43 @@ export function App(): React.ReactElement {
           </div>
         </div>
       )}
+
+      {pinContextMenu ?
+        createPortal(
+          <>
+            <div
+              role="presentation"
+              aria-hidden="true"
+              className={ctxMenuBackdrop}
+              onMouseDown={() => setPinContextMenu(null)}
+              onWheel={() => setPinContextMenu(null)}
+            />
+            <div
+              className={ctxMenuShell}
+              style={{
+                left: pinContextMenu.clientX,
+                top: pinContextMenu.clientY,
+              }}
+              role="menu"
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <button
+                type="button"
+                className={routeCtxItem}
+                role="menuitem"
+                onClick={() => {
+                  const { key } = pinContextMenu
+                  setPinContextMenu(null)
+                  toggleNavPin(key)
+                }}
+              >
+                Unpin
+              </button>
+            </div>
+          </>,
+          document.body,
+        )
+      : null}
 
       {convContextMenu ?
         createPortal(
