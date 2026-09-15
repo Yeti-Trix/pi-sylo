@@ -1060,13 +1060,14 @@ declare global {
             tab?: string
             action?: string
             sep?: boolean
+            pinned?: boolean
           }>
         }>) => Promise<{ ok: true; sections: number }>
         /** Main → renderer: the operator clicked an item in one of the synced
          *  skill-route menus. */
         onAction: (
           cb: (item: {
-            kind: 'route' | 'tab' | 'action'
+            kind: 'route' | 'tab' | 'action' | 'pin'
             title: string
             key?: string
             tab?: string

@@ -638,6 +638,11 @@ export const showAppsStripLabel =
 
 
 
+export const sidebarPinnedSection = 'mb-0.5 shrink-0'
+
+export const sidebarPinnedLabel =
+  'px-2 pb-0.5 pt-1 text-[0.72rem] font-semibold uppercase tracking-[0.04em] text-text-secondary'
+
 export const sidebarConvList = 'mt-1 min-h-0 flex-1 overflow-auto'
 
 /** Sidebar chat search (Cursor-style row above the chat list) */

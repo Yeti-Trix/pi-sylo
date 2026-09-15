@@ -1118,14 +1118,22 @@ contextBridge.exposeInMainWorld('sylo', {
     setSections: (sections: Array<{
       id: string
       label: string
-      items: Array<{ kind: 'route' | 'tab' | 'action'; title: string; key?: string; tab?: string; action?: string; sep?: boolean }>
+      items: Array<{
+        kind: 'route' | 'tab' | 'action'
+        title: string
+        key?: string
+        tab?: string
+        action?: string
+        sep?: boolean
+        pinned?: boolean
+      }>
     }>) => ipcRenderer.invoke('menu:set-sections', sections) as Promise<{ ok: true; sections: number }>,
     /** Main → renderer: the operator clicked an item in one of the synced
      *  skill-route menus. The renderer resolves it to a route tab / builtin
      *  tab / broker action. */
     onAction: (
       cb: (item: {
-        kind: 'route' | 'tab' | 'action'
+        kind: 'route' | 'tab' | 'action' | 'pin'
         title: string
         key?: string
         tab?: string

@@ -1254,11 +1254,13 @@ let canvasOpenState = false
  *  `skill-nav-layout.ts`), computes the final per-section rows for the active
  *  workspace, and pushes them here via `menu:set-sections`. The main process
  *  only renders this list into native top-level menus (Dashboards / Tools /
- *  Developer) and forwards clicks back to the main window. */
+ *  Developer) and forwards clicks back to the main window. Pinned route/tab
+ *  rows also get a Pin/Unpin submenu so they can be parked in the sidebar. */
 type MenuActionItem =
-  | { kind: 'route'; key: string; title: string; sep?: boolean }
-  | { kind: 'tab'; tab: string; title: string; sep?: boolean }
+  | { kind: 'route'; key: string; title: string; sep?: boolean; pinned?: boolean }
+  | { kind: 'tab'; tab: string; title: string; sep?: boolean; pinned?: boolean }
   | { kind: 'action'; action: string; title: string; sep?: boolean }
+  | { kind: 'pin'; title: string; key?: string; tab?: string; sep?: boolean }
 
 type MenuSectionSync = { id: string; label: string; items: MenuActionItem[] }
 
@@ -1281,9 +1283,9 @@ function normalizeMenuSectionsSync(raw: unknown): MenuSectionSync[] {
       const sep = r.sep === true
       if (!title) continue
       if (r.kind === 'route' && typeof r.key === 'string' && r.key.trim()) {
-        items.push({ kind: 'route', key: r.key.trim(), title, sep })
+        items.push({ kind: 'route', key: r.key.trim(), title, sep, pinned: r.pinned === true })
       } else if (r.kind === 'tab' && typeof r.tab === 'string' && r.tab.trim()) {
-        items.push({ kind: 'tab', tab: r.tab.trim(), title, sep })
+        items.push({ kind: 'tab', tab: r.tab.trim(), title, sep, pinned: r.pinned === true })
       } else if (r.kind === 'action' && typeof r.action === 'string' && r.action.trim()) {
         items.push({ kind: 'action', action: r.action.trim(), title, sep })
       }
@@ -1291,6 +1293,40 @@ function normalizeMenuSectionsSync(raw: unknown): MenuSectionSync[] {
     out.push({ id, label, items })
   }
   return out
+}
+
+function sendMenuAction(item: MenuActionItem): void {
+  const mw = mainWindow
+  if (mw && !mw.isDestroyed()) mw.webContents.send('menu:action', item)
+}
+
+/** Route/tab rows keep a Pin submenu (native menus have no item-level
+ *  right-click). Clicking the parent still opens; the submenu is the pin
+ *  button the operator asked for. */
+function buildSyncedMenuItem(item: MenuActionItem): MenuItemConstructorOptions {
+  if (item.kind === 'action' || item.kind === 'pin') {
+    return {
+      label: item.title,
+      click: () => sendMenuAction(item),
+    }
+  }
+  const pinAction: MenuActionItem = {
+    kind: 'pin',
+    title: item.title,
+    key: item.kind === 'route' ? item.key : undefined,
+    tab: item.kind === 'tab' ? item.tab : undefined,
+  }
+  return {
+    label: item.title,
+    click: () => sendMenuAction(item),
+    submenu: [
+      { label: 'Open', click: () => sendMenuAction(item) },
+      {
+        label: item.pinned ? 'Unpin from sidebar' : 'Pin to sidebar',
+        click: () => sendMenuAction(pinAction),
+      },
+    ],
+  }
 }
 
 /** Build the application menu. Preserves Electron's default File/Edit/View
@@ -1353,13 +1389,7 @@ function buildAppMenu(): Menu {
       // label/click ignored — so the separator must be its own row, never
       // merged into the item it precedes.
       if (item.sep && submenu.length > 0) submenu.push({ type: 'separator' })
-      submenu.push({
-        label: item.title,
-        click: () => {
-          const mw = mainWindow
-          if (mw && !mw.isDestroyed()) mw.webContents.send('menu:action', item)
-        },
-      })
+      submenu.push(buildSyncedMenuItem(item))
     }
     template.push({ label: sec.label, submenu })
   }
