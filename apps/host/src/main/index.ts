@@ -438,6 +438,10 @@ const SYLO_IMAGE_FALLBACK_EXTENSION = join(
   'apps/host/src/broker/sylo-image-fallback.ts',
 )
 const SYLO_CANVAS_SKETCH_EXTENSION = join(SYLO_REPO_ROOT, 'apps/host/src/broker/sylo-canvas-sketch.ts')
+const SYLO_COMPACTION_ANCHOR_EXTENSION = join(
+  SYLO_REPO_ROOT,
+  'apps/host/src/broker/sylo-compaction-anchor.ts',
+)
 
 /** Mirrored freehand-canvas sketch PNG (userData). The renderer keeps it fresh
  *  via `canvas:set-sketch-image`; the broker's `canvas_sketch` tool reads it. */
@@ -982,6 +986,14 @@ function discoverFilesystemCapabilities(
     extBuckets.push(
       ...tagExtensions(
         [{ name: 'sylo-canvas-sketch', path: SYLO_CANVAS_SKETCH_EXTENSION }],
+        'sylo-builtin',
+      ),
+    )
+  }
+  if (existsSync(SYLO_COMPACTION_ANCHOR_EXTENSION)) {
+    extBuckets.push(
+      ...tagExtensions(
+        [{ name: 'sylo-compaction-anchor', path: SYLO_COMPACTION_ANCHOR_EXTENSION }],
         'sylo-builtin',
       ),
     )
@@ -3687,6 +3699,8 @@ function buildBrokerSupervisorOptions(
       existsSync(SYLO_IMAGE_FALLBACK_EXTENSION) ? SYLO_IMAGE_FALLBACK_EXTENSION : undefined,
     canvasSketchExtension:
       existsSync(SYLO_CANVAS_SKETCH_EXTENSION) ? SYLO_CANVAS_SKETCH_EXTENSION : undefined,
+    compactionAnchorExtension:
+      existsSync(SYLO_COMPACTION_ANCHOR_EXTENSION) ? SYLO_COMPACTION_ANCHOR_EXTENSION : undefined,
     canvasSketchPath: canvasSketchImagePath(),
     skillSurfaceExtension: existsSync(SYLO_SKILL_SURFACE_EXTENSION) ? SYLO_SKILL_SURFACE_EXTENSION : undefined,
     subagentsExtension: existsSync(SYLO_SUBAGENTS_EXTENSION) ? SYLO_SUBAGENTS_EXTENSION : undefined,

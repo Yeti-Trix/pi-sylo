@@ -220,6 +220,8 @@ export interface BrokerConfig {
   imageFallbackExtension?: string
   /** Repo path to sylo-canvas-sketch (canvas_sketch tool: pull the draw-area sketch into chat). */
   canvasSketchExtension?: string
+  /** Repo path to sylo-compaction-anchor (restate live request after context compaction). */
+  compactionAnchorExtension?: string
   /** Absolute path to the mirrored canvas sketch PNG (SYLO_CANVAS_SKETCH_PATH for the tool). */
   canvasSketchPath?: string
   /** Repo path to @sylo/skill-surface-extension (show_widget → host) */
@@ -320,6 +322,7 @@ export class BrokerSupervisor {
       piBuiltinTools: cfg.piBuiltinTools,
       builtinToolsGuardExtension: cfg.builtinToolsGuardExtension,
       imageFallbackExtension: cfg.imageFallbackExtension,
+      compactionAnchorExtension: cfg.compactionAnchorExtension,
       skillSurfaceExtension: cfg.skillSurfaceExtension,
       subagentsExtension: cfg.subagentsExtension,
       schedulerExtension: cfg.schedulerExtension,
@@ -427,6 +430,9 @@ export class BrokerSupervisor {
         : {}),
         ...(this.cfg.imageFallbackExtension ?
           { SYLO_IMAGE_FALLBACK_EXTENSION: this.cfg.imageFallbackExtension }
+        : {}),
+        ...(this.cfg.compactionAnchorExtension ?
+          { SYLO_COMPACTION_ANCHOR_EXTENSION: this.cfg.compactionAnchorExtension }
         : {}),
         ...(this.cfg.canvasSketchExtension ?
           { SYLO_CANVAS_SKETCH_EXTENSION: this.cfg.canvasSketchExtension }

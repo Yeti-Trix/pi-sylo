@@ -35,6 +35,7 @@
     "test:skill-scope": "esbuild src/shared/sylo-skill-scope.test.mjs --bundle --platform=node --format=esm --outfile=out/test/sylo-skill-scope.test.mjs --packages=external && node --test out/test/sylo-skill-scope.test.mjs",
     "test:workflow-timing": "esbuild src/renderer/src/workflowTimeline.ts --bundle --platform=node --format=esm --outfile=out/test/workflowTimeline.mjs && node --test src/renderer/workflowTimeline.test.mjs",
     "test:compaction-notice": "esbuild src/shared/compaction-notice.ts --bundle --platform=node --format=esm --outfile=out/test/compaction-notice.mjs --packages=external && node --test src/shared/compaction-notice.test.mjs",
+    "test:compaction-anchor": "esbuild src/broker/sylo-compaction-anchor.ts --bundle --platform=node --format=esm --outfile=out/test/compaction-anchor.mjs --packages=external && node --test src/broker/sylo-compaction-anchor.test.mjs",
     "test:schedule-recurrence": "esbuild src/shared/schedule-recurrence.ts --bundle --platform=node --format=esm --outfile=out/shared/schedule-recurrence.mjs --packages=external && node src/shared/schedule-recurrence.test.mjs",
     "diagnose:shell": "npm run build:broker && node scripts/diagnose-pi-shell.mjs",
     "test:global-agents": "esbuild src/main/global-agents.test.mjs --bundle --platform=node --format=esm --outfile=out/test/global-agents.test.mjs --packages=external && node --test out/test/global-agents.test.mjs",

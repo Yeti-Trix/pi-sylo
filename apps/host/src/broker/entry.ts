@@ -883,6 +883,13 @@ async function handleInit(msg: BrokerInit): Promise<void> {
         extraExtensionPaths.push(imageFallbackPath)
       }
     }
+    const compactionAnchorPath = process.env.SYLO_COMPACTION_ANCHOR_EXTENSION
+    if (compactionAnchorPath && existsSync(compactionAnchorPath)) {
+      const norm = normalizeSyloCapabilityPath(compactionAnchorPath)
+      if (!norm || !disabledExtensionPathsSet.has(norm)) {
+        extraExtensionPaths.push(compactionAnchorPath)
+      }
+    }
     const canvasSketchExtensionPath = process.env.SYLO_CANVAS_SKETCH_EXTENSION
     if (canvasSketchExtensionPath && existsSync(canvasSketchExtensionPath)) {
       const norm = normalizeSyloCapabilityPath(canvasSketchExtensionPath)
