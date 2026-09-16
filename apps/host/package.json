@@ -44,6 +44,12 @@
     "test:chatgpt-codex": "esbuild src/shared/chatgpt-codex.ts --bundle --platform=node --format=esm --outfile=out/test/chatgpt-codex.mjs --packages=external && node --test src/shared/chatgpt-codex.test.mjs",
     "test:ask-question": "esbuild src/shared/ask-question.ts --bundle --platform=node --format=esm --outfile=out/test/ask-question.mjs --packages=external && node --test src/shared/ask-question.test.mjs",
     "test:subagent-mentions": "esbuild src/shared/subagent-mentions.ts --bundle --platform=node --format=esm --outfile=out/test/subagent-mentions.mjs --packages=external && node --test src/shared/subagent-mentions.test.mjs",
+    "test:empty-reply": "esbuild src/broker/empty-reply.ts --bundle --platform=node --format=esm --outfile=out/test/empty-reply.mjs --packages=external && node --test src/broker/empty-reply.test.mjs",
+    "test:orchestrator-resume": "esbuild src/shared/orchestrator-resume.ts --bundle --platform=node --format=esm --outfile=out/test/orchestrator-resume.mjs --packages=external && node --test src/shared/orchestrator-resume.test.mjs",
+    "test:subagent-timeout": "esbuild ../../packages/sylo-subagents/extensions/subagent-timeout.test.mjs --bundle --platform=node --format=esm --outfile=out/test/subagent-timeout.test.mjs --packages=external && node --test out/test/subagent-timeout.test.mjs",
+    "test:subagent-plan-file": "esbuild ../../packages/sylo-subagents/extensions/plan-file.test.mjs --bundle --platform=node --format=esm --outfile=out/test/subagent-plan-file.test.mjs --packages=external && node --test out/test/subagent-plan-file.test.mjs",
+    "test:subagent-plan-checklist": "esbuild ../../packages/sylo-subagents/extensions/plan-checklist.test.mjs --bundle --platform=node --format=esm --outfile=out/test/subagent-plan-checklist.test.mjs --packages=external && node --test out/test/subagent-plan-checklist.test.mjs",
+    "test:model-max-tokens": "esbuild src/main/model-input.ts --bundle --platform=node --format=esm --outfile=out/test/model-input.mjs --packages=external && node --test src/main/model-max-tokens.test.mjs",
     "test:skill-nav-layout": "esbuild src/renderer/src/skill-nav-layout.ts --bundle --platform=node --format=esm --outfile=out/test/skill-nav-layout.mjs --packages=external && node --test src/renderer/src/skill-nav-layout.test.mjs"
   },
   "dependencies": {

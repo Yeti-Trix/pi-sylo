@@ -1,4 +1,14 @@
+import { existsSync } from 'node:fs'
+
+import {
+  isPlannerAgentName,
+  isReviewerAgentName,
+  markPlanReviewed,
+  writeCurrentPlan,
+} from '../../../../packages/sylo-subagents/extensions/plan-file.ts'
 import type { SyloSubagentHostEvent } from '../shared/subagent-tasks-types.js'
+import { getConversation, getWorkspace } from './database.js'
+import { notifyPlanTodosChanged } from './plan-todos-host.js'
 import * as store from './subagent-tasks-db.js'
 
 let currentHostSessionId: string | undefined
@@ -21,6 +31,36 @@ export function onBrokerExitOrphanTasks(): void {
 
 export function getCurrentHostSessionId(): string | undefined {
   return currentHostSessionId
+}
+
+function conversationWorkspaceCwd(conversationId: string): string | null {
+  const conv = getConversation(conversationId)
+  if (!conv?.workspace_id) return null
+  const cwd = getWorkspace(conv.workspace_id)?.pi_cwd?.trim() ?? ''
+  return cwd && existsSync(cwd) ? cwd : null
+}
+
+function planBodyFromResult(resultText: string | undefined): string {
+  if (!resultText) return ''
+  return resultText.replace(/\n\nPlan saved to `[^`]+`\. Later turns should read that file instead of re-planning\.\s*$/u, '').trim()
+}
+
+function syncWorkspacePlanFile(
+  conversationId: string,
+  event: Extract<SyloSubagentHostEvent, { type: 'subagent_run_end' }>,
+): void {
+  const row = store.getAgentTask(event.runId)
+  const agent = row?.agent_name ?? ''
+  const cwd = conversationWorkspaceCwd(conversationId)
+  if (!cwd) return
+  if (event.status === 'succeeded' && isPlannerAgentName(agent)) {
+    writeCurrentPlan(cwd, planBodyFromResult(event.resultText), { conversationId })
+    return
+  }
+  if (event.status === 'succeeded' && isReviewerAgentName(agent)) {
+    // Sign off, do not delete: the goals bar stays until the operator sends again.
+    markPlanReviewed(cwd, conversationId)
+  }
 }
 
 export function handleSubagentHostEvent(conversationId: string, event: SyloSubagentHostEvent): void {
@@ -65,6 +105,8 @@ export function handleSubagentHostEvent(conversationId: string, event: SyloSubag
         },
         tokensUsed: event.usage ? event.usage.input + event.usage.output : undefined,
       })
+      syncWorkspacePlanFile(conversationId, event)
+      notifyPlanTodosChanged()
       break
   }
 }

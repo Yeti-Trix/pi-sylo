@@ -43,6 +43,13 @@ import {
 } from '../shared/pi-builtin-tools-broker.js'
 import type { PiBuiltinToolsPref } from '../shared/pi-builtin-tools.js'
 import { parsePiSlashInput } from '../shared/pi-slash-command.js'
+import { readModelContextWindow, readModelMaxTokens } from '../main/model-input.js'
+import {
+  decideEmptyReply,
+  lastAssistantCutoff,
+  lastAssistantText as lastAssistantTextFromMessages,
+  type SessionMessage,
+} from './empty-reply.js'
 import {
   makeSyloDisabledToolKey,
   normalizeDisabledToolsJson,
@@ -742,48 +749,24 @@ function extensionBrokerPolicy() {
   }
 }
 
-function assistantTurnErrorFromSession(sess: AgentSession): string | null {
-  for (let i = sess.messages.length - 1; i >= 0; i--) {
-    const msg = sess.messages[i]!
-    if (msg.role !== 'assistant') continue
-    const a = msg as {
-      stopReason?: string
-      errorMessage?: string
-      content?: unknown
-    }
-    if (a.stopReason === 'error' && typeof a.errorMessage === 'string' && a.errorMessage.trim()) {
-      return a.errorMessage.trim()
-    }
-    const text = assistantMessageText(a.content)
-    if (!text.trim() && a.stopReason === 'error') {
-      return 'Model returned an error with no details.'
-    }
-    return null
-  }
-  return null
+function sessionMessages(sess: AgentSession): SessionMessage[] {
+  return sess.messages as unknown as SessionMessage[]
 }
 
-function assistantMessageText(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return ''
-  let out = ''
-  for (const block of content) {
-    if (!block || typeof block !== 'object') continue
-    const b = block as { type?: string; text?: string }
-    if (b.type === 'text' && typeof b.text === 'string') out += b.text
-  }
-  return out
+function decideSessionEmptyReply(sess: AgentSession) {
+  const agentDir = brokerAgentDir || undefined
+  return decideEmptyReply({
+    messages: sessionMessages(sess),
+    chatOnly: brokerChatOnly,
+    contextWindow: agentDir
+      ? readModelContextWindow(agentDir, brokerModelProvider, brokerModelId)
+      : null,
+    maxTokens: agentDir ? readModelMaxTokens(agentDir, brokerModelProvider, brokerModelId) : null,
+  })
 }
 
-/** Extract the text content of the last assistant message in the session. */
 function lastAssistantText(sess: AgentSession): string {
-  for (let i = sess.messages.length - 1; i >= 0; i--) {
-    const msg = sess.messages[i]!
-    if (msg.role !== 'assistant') continue
-    const a = msg as { content?: unknown }
-    return assistantMessageText(a.content)
-  }
-  return ''
+  return lastAssistantTextFromMessages(sessionMessages(sess))
 }
 
 /**
@@ -797,33 +780,42 @@ function lastAssistantText(sess: AgentSession): string {
 function assistantTurnCutoffFromSession(
   sess: AgentSession,
 ): { output: number; total: number } | null {
-  for (let i = sess.messages.length - 1; i >= 0; i--) {
-    const msg = sess.messages[i]!
-    if (msg.role !== 'assistant') continue
-    const a = msg as unknown as {
-      stopReason?: string
-      usage?: { output?: number; totalTokens?: number }
-    }
-    if (a.stopReason !== 'length') return null
-    return { output: a.usage?.output ?? 0, total: a.usage?.totalTokens ?? 0 }
-  }
-  return null
+  return lastAssistantCutoff(sessionMessages(sess))
 }
 
-function assistantEmptyReplyHint(sess: AgentSession): string | null {
-  for (let i = sess.messages.length - 1; i >= 0; i--) {
-    const msg = sess.messages[i]!
-    if (msg.role !== 'assistant') continue
-    const a = msg as { stopReason?: string; content?: unknown }
-    const text = assistantMessageText(a.content)
-    if (text.trim()) return null
-    // An aborted/interrupted turn (user steer, push, or Stop) is expected to
-    // have little or no text — don't report it as a "Model returned no text"
-    // error. Only flag genuinely empty model responses (stopReason !== aborted).
-    if (a.stopReason === 'aborted') return null
-    return 'Model returned no text. If you enabled chat-only for a local model, start a new chat and restart the broker after saving Settings.'
+/** One recovery prompt: no tools, thinking minimized, so a local model writes text. */
+async function promptEmptyReplyContinue(
+  sess: AgentSession,
+  continuePrompt: string,
+): Promise<void> {
+  const prevLevel = currentThinkingLevel(sess)
+  applySyloActiveToolsFromBrokerPolicy(sess, { ...extensionBrokerPolicy(), chatOnly: true })
+  let lowered = false
+  try {
+    if (prevLevel && prevLevel !== 'off') {
+      try {
+        sess.setThinkingLevel('off' as Parameters<typeof sess.setThinkingLevel>[0])
+        lowered = true
+      } catch {
+        try {
+          sess.setThinkingLevel('minimal' as Parameters<typeof sess.setThinkingLevel>[0])
+          lowered = true
+        } catch {
+          /* model may not expose a lower level */
+        }
+      }
+    }
+    await sess.prompt(continuePrompt)
+  } finally {
+    applySyloActiveToolsFromBrokerPolicy(sess, extensionBrokerPolicy())
+    if (lowered && prevLevel) {
+      try {
+        sess.setThinkingLevel(prevLevel as Parameters<typeof sess.setThinkingLevel>[0])
+      } catch {
+        /* restore is best-effort */
+      }
+    }
   }
-  return null
 }
 
 function emitExtensionBroker(payload: Record<string, unknown>): void {
@@ -1491,10 +1483,27 @@ async function handlePrompt(msg: BrokerPrompt): Promise<void> {
     const promptOptions =
       msg.images && msg.images.length > 0 ? { images: msg.images } : undefined
     await session.prompt(msg.text, promptOptions)
-    const turnErr = assistantTurnErrorFromSession(session)
-    const emptyHint = turnErr ? null : assistantEmptyReplyHint(session)
-    if (turnErr || emptyHint) {
-      process.send?.({ type: 'error', turnId: msg.turnId, error: turnErr ?? emptyHint! })
+    let empty = decideSessionEmptyReply(session)
+    // Local primary (and any empty thinking/tool turn): one recovery prompt is
+    // cheap and is the difference between "Ran N tools" and a written status.
+    // Tools are stripped and thinking is minimized so it cannot start a new plan.
+    if (empty.autoContinue && empty.continuePrompt) {
+      emitExtensionBroker({
+        type: 'extension_notify',
+        turnId: msg.turnId,
+        message:
+          'No reply text after the last step — asking the model once to write a status (tools off, thinking minimized).',
+        notifyType: 'warning',
+      })
+      try {
+        await promptEmptyReplyContinue(session, empty.continuePrompt)
+      } catch (e) {
+        console.error('[sylo-broker] empty-reply continue failed:', e)
+      }
+      empty = decideSessionEmptyReply(session)
+    }
+    if (empty.kind === 'provider_error' && empty.userMessage) {
+      process.send?.({ type: 'error', turnId: msg.turnId, error: empty.userMessage })
       return
     }
     // Fallback: if the session has assistant text but no text_delta events were
@@ -1508,10 +1517,13 @@ async function handlePrompt(msg: BrokerPrompt): Promise<void> {
       const text = lastAssistantText(currentSession)
       if (text) {
         process.send?.({ type: 'event', turnId: msg.turnId, event: { type: 'text_delta', delta: text } })
+        textForwarded = true
       }
     }
     // Sent before `done` so the host can append the explanation to the partial
     // reply the turn did produce, rather than discarding it as an error.
+    // Must run even when the last message has no text — empty + length is the
+    // usual local-model failure, and used to be swallowed by the chat-only hint.
     const cutoff = assistantTurnCutoffFromSession(currentSession)
     if (cutoff) {
       process.send?.({
@@ -1521,6 +1533,12 @@ async function handlePrompt(msg: BrokerPrompt): Promise<void> {
         total: cutoff.total,
         provider: brokerModelProvider,
         modelId: brokerModelId,
+      })
+    } else if (!textForwarded && empty.userMessage && empty.kind !== 'aborted') {
+      process.send?.({
+        type: 'event',
+        turnId: msg.turnId,
+        event: { type: 'text_delta', delta: empty.userMessage },
       })
     }
     process.send?.({ type: 'done', turnId: msg.turnId })

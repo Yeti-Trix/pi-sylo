@@ -1664,6 +1664,16 @@ declare global {
           | { ok: false; error: string; detail?: string }
         >
       }
+      plan: {
+        todos: (conversationId: string) => Promise<{
+          conversationId: string
+          goal?: string
+          todos: { id: string; text: string; done: boolean }[]
+          status: 'active' | 'reviewed'
+        }>
+        onChanged: (cb: () => void) => () => void
+        clearForNewChat: (workspaceId: string) => Promise<{ ok: true }>
+      }
       tasks: {
         list: (conversationId: string) => Promise<
           {

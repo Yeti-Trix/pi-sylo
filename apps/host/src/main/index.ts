@@ -63,6 +63,11 @@ import {
   type SubagentRunOutcome,
 } from '../shared/subagent-mentions.js'
 import {
+  composeOrchestratorResumePrompt,
+  composePlanScopeNote,
+  shouldInjectOrchestratorResume,
+} from '../shared/orchestrator-resume.js'
+import {
   SYLO_SURFACE_SCHEME,
   syloSurfaceRelativePath,
 } from '../shared/sylo-surface-protocol.js'
@@ -181,10 +186,10 @@ import {
   type ImageDeliverySummary,
 } from '../shared/chat-image-delivery.js'
 import {
-  DEFAULT_MODEL_MAX_TOKENS,
   readModelContextWindow,
   readModelInputConfig,
   readModelMaxTokens,
+  resolveLocalModelMaxTokens,
   resolveModelInputTypes,
   writeModelContextWindow,
   writeModelInputTypes,
@@ -273,6 +278,12 @@ import {
   shutdownSubagentTaskHostSession,
   subagentTaskStore,
 } from './subagent-tasks-service.js'
+import {
+  clearPlanForNewChat,
+  isolatePlanForConversation,
+  readPlanTodos,
+  setPlanTodosListener,
+} from './plan-todos-host.js'
 import type { SyloSubagentHostEvent } from '../shared/subagent-tasks-types.js'
 import type { SyloWebAccessEvent } from '../shared/web-access-events.js'
 import {
@@ -2544,6 +2555,7 @@ async function ensureBrokerSessionForConversation(
   // decides whether a switchSession can be skipped.
   const dfp = `${disabledFingerprint(mergedDisabled)}\0${alwaysApplySkillPaths.join('\0')}`
   const eff = effectiveModelForConversation(convId)
+  ensureOllamaMaxTokensOnce(eff.provider, eff.modelId)
   const mfp = modelFingerprint(eff)
   if (
     supervisor === broker &&
@@ -2712,6 +2724,29 @@ function listSubagentAgentsForActiveScope(): ReturnType<typeof listSubagentAgent
  * id. Forced runs precede the Pi turn, so `pendingTurns` cannot resolve them.
  */
 const forcedSubagentTurnConvIds = new Map<string, string>()
+
+/** Prior assistant row, skipping the empty streaming row we just inserted. */
+function lastAssistantForResume(
+  conversationId: string,
+  exceptId?: string,
+): { content: string; status: string } | null {
+  const rows = db.listMessages(conversationId)
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i]!
+    if (row.role !== 'assistant') continue
+    if (exceptId && row.id === exceptId) continue
+    return { content: row.content, status: row.status }
+  }
+  return null
+}
+
+function conversationUsedSubagents(conversationId: string): boolean {
+  try {
+    return subagentTaskStore.listAgentTasksForConversation(conversationId).length > 0
+  } catch {
+    return false
+  }
+}
 
 /**
  * Resolve leading `@agent` mentions in a send, or null for an ordinary send.
@@ -2932,6 +2967,24 @@ async function startChatTurn(
     return { ok: false, assistantMessageId: assistant.id, error: 'broker_not_ready' }
   }
   let promptText = prepared.promptText
+  if (subagentExtensionEnabled() && !brokerChatOnlyPref()) {
+    const planScope = isolatePlanForConversation(conversationId)
+    promptText = `${composePlanScopeNote(conversationId, planScope)}\n\n${promptText}`
+    if (!options?.forced) {
+      const prior = lastAssistantForResume(conversationId, assistant.id)
+      if (
+        shouldInjectOrchestratorResume({
+          userText: prepared.text,
+          lastAssistantStatus: prior?.status,
+          lastAssistantContent: prior?.content,
+          conversationUsedSubagents: conversationUsedSubagents(conversationId),
+          alreadyForcedMention: false,
+        })
+      ) {
+        promptText = composeOrchestratorResumePrompt(promptText, planScope)
+      }
+    }
+  }
   if (options?.forced) {
     // Announce the turn before a chain that can run for minutes, so the Stop
     // button and elapsed timer are live while it works.
@@ -3277,18 +3330,46 @@ async function syncOllamaContextWindow(baseOrigin: string, modelId: string): Pro
 }
 
 /**
- * Give an Ollama model an output cap if it has none.
+ * Give an Ollama model a per-reply output ceiling.
  *
  * Ollama's default `num_predict` is unlimited, so a model that never emits a stop token
  * generates until the context window fills. Only an explicit `max_tokens` stops it, and Pi
- * sends one only for models it composed from `models.json`. An existing value is left alone
- * — this establishes a ceiling, it does not retune a deliberate one.
+ * sends one only for models it composed from `models.json`.
+ *
+ * Local tokens are free, so this is a runaway guard, not a budget: it is set to three
+ * quarters of the context window. A small inherited value (Pi's catalog ships 8,192 for
+ * some models) truncates a reasoning model mid-reply, so a too-low cap is raised as well.
+ * Only ever raises — a deliberately higher value is left alone, and no write happens when
+ * the stored value is already generous.
  */
 function ensureOllamaMaxTokens(modelId: string): void {
   const id = modelId.trim()
   if (!id) return
-  if (readModelMaxTokens(hostAgentDir(), 'ollama', id) != null) return
-  writeModelMaxTokens(hostAgentDir(), 'ollama', id, DEFAULT_MODEL_MAX_TOKENS)
+  const dir = hostAgentDir()
+  const target = resolveLocalModelMaxTokens(readModelContextWindow(dir, 'ollama', id))
+  const current = readModelMaxTokens(dir, 'ollama', id)
+  if (current != null && current >= target) return
+  writeModelMaxTokens(dir, 'ollama', id, target)
+}
+
+/** Ids already reconciled this run — keeps the check off the per-turn write path. */
+const ollamaMaxTokensChecked = new Set<string>()
+
+/**
+ * Raise the cap for the model a turn is about to use. Saving Settings is not enough: a
+ * chat can select an Ollama model that was never re-saved, and the operator should not
+ * have to know that re-saving Settings is what unlocks a full-length reply.
+ */
+function ensureOllamaMaxTokensOnce(provider: string, modelId: string): void {
+  if (provider.trim() !== 'ollama') return
+  const id = modelId.trim()
+  if (!id || ollamaMaxTokensChecked.has(id)) return
+  ollamaMaxTokensChecked.add(id)
+  try {
+    ensureOllamaMaxTokens(id)
+  } catch {
+    /* a models.json write failure must not block the turn */
+  }
 }
 
 /** Read a provider's saved API key status from `~/.pi/agent/auth.json` (mask only — never return the raw key). */
@@ -4496,9 +4577,12 @@ function registerIpc(): void {
     (_e, workspaceId?: string) =>
       workspaceId === undefined ? db.listConversations() : db.listConversations(workspaceId),
   )
-  ipcMain.handle('conversations:create', (_e, title?: string, workspaceId?: string) =>
-    db.createConversation(title ?? '', workspaceId),
-  )
+  ipcMain.handle('conversations:create', (_e, title?: string, workspaceId?: string) => {
+    const created = db.createConversation(title ?? '', workspaceId)
+    const wid = created.workspace_id ?? (typeof workspaceId === 'string' ? workspaceId : '')
+    if (wid) clearPlanForNewChat(wid)
+    return created
+  })
   ipcMain.handle('conversations:findLatestEmpty', (_e, workspaceId: unknown) => {
     const wid = typeof workspaceId === 'string' ? workspaceId : ''
     const id = db.findLatestEmptyConversationId(wid)
@@ -5572,6 +5656,20 @@ function registerIpc(): void {
   ipcMain.handle('skill-data:write', (_e, skillKey: string, key: string, value: unknown) =>
     writeSkillDataJson(app.getPath('userData'), skillKey, key, value, SKILL_DATA_QUOTA_BYTES),
   )
+
+  setPlanTodosListener(() => {
+    mainWindow?.webContents.send('plan:changed')
+  })
+  ipcMain.handle('plan:todos', (_e, conversationId: unknown) => {
+    const id = typeof conversationId === 'string' ? conversationId.trim() : ''
+    if (!id) return { conversationId: '', todos: [], status: 'active' as const }
+    return readPlanTodos(id)
+  })
+  ipcMain.handle('plan:clearForNewChat', (_e, workspaceId: unknown) => {
+    const wid = typeof workspaceId === 'string' ? workspaceId.trim() : ''
+    if (wid) clearPlanForNewChat(wid)
+    return { ok: true as const }
+  })
 
   ipcMain.handle('tasks:list', (_e, conversationId: unknown) => {
     const id = typeof conversationId === 'string' ? conversationId.trim() : ''

@@ -18,7 +18,7 @@ import { resolvePiSpawn } from './pi-cli.ts'
 import { resolveSubagentToolPolicy, toolCliArgs } from './pi-tool-policy.ts'
 import { subagentModelCliArgs } from './subagent-model.ts'
 import { cancelSubagentRun, consumeRunCancelled, registerSubagentRun, unregisterSubagentRun } from './subagent-run-registry.ts'
-import { resolveSubagentTimeoutMs } from './subagent-timeout.ts'
+import { resolveSubagentStallMs, resolveSubagentTimeoutMs } from './subagent-timeout.ts'
 import { newSubagentRunId, notifySyloSubagent, type SyloSubagentRunMode } from './sylo-host.ts'
 
 export { cancelAllSubagentRuns, cancelSubagentRun } from './subagent-run-registry.ts'
@@ -180,6 +180,26 @@ function getFinalOutput(messages: Message[]): string {
 function isFailedResult(result: SingleResult): boolean {
   return result.exitCode !== 0 || result.stopReason === 'error' || result.stopReason === 'aborted'
 }
+
+/**
+ * A child the provider cut off at its per-reply token cap. The process exited 0, so
+ * without this check its partial text is handed to the parent as a finished result and
+ * the step is silently half-done. The parent has to be told to re-run it.
+ */
+function isTruncatedResult(result: SingleResult): boolean {
+  return result.stopReason === 'length'
+}
+
+const TRUNCATED_RESULT_NOTE =
+  '[INCOMPLETE: this subagent hit its per-reply token cap, so the text above stops mid-answer and the step is NOT finished. Re-run the same agent to finish it (narrower task, or tell it to continue), or raise Max tokens in Sylo Settings → Model. Do not treat this as done and do not finish the work yourself in the parent.]'
+
+function withTruncationNote(result: SingleResult, text: string): string {
+  return isTruncatedResult(result) ? `${text}\n\n${TRUNCATED_RESULT_NOTE}` : text
+}
+
+/** Retry guidance for a child that failed outright, so the parent acts instead of stalling. */
+const FAILED_RESULT_NOTE =
+  '[This step did NOT run to completion. Retry it once with the same agent (tighten the task or shorten the context if it looks like a limit), and if it fails again report the failure plainly. Do not silently do the work in the parent and do not skip to a later step.]'
 
 function getResultOutput(result: SingleResult): string {
   if (isFailedResult(result)) {
@@ -427,9 +447,13 @@ async function runSingleAgent(
       const dropRegistry = () => unregisterSubagentRun(runId)
       let buffer = ''
       let timeout: ReturnType<typeof setTimeout> | undefined
+      let stallTimer: ReturnType<typeof setInterval> | undefined
+      let lastActivityAt = Date.now()
+      let guardKilled = false
 
       const finish = (code: number) => {
         if (timeout) clearTimeout(timeout)
+        if (stallTimer) clearInterval(stallTimer)
         stopUpdates()
         resolve(code)
       }
@@ -438,13 +462,27 @@ async function runSingleAgent(
         timeoutSeconds: agent.timeoutSeconds,
         provider: subagentModel.provider,
       })
-      timeout = setTimeout(() => {
-        currentResult.stderr += `\n[timeout] Subagent exceeded time limit (${Math.round(timeoutMs / 1000)}s).`
+      const stallMs = resolveSubagentStallMs({ provider: subagentModel.provider })
+      const killForGuard = (line: string) => {
+        if (guardKilled) return
+        guardKilled = true
+        currentResult.stderr += `\n${line}`
         proc.kill('SIGTERM')
         setTimeout(() => {
           if (!proc.killed) proc.kill('SIGKILL')
         }, 5000)
+      }
+      const bumpActivity = () => {
+        lastActivityAt = Date.now()
+      }
+      timeout = setTimeout(() => {
+        killForGuard(`[timeout] Subagent exceeded time limit (${Math.round(timeoutMs / 1000)}s).`)
       }, timeoutMs)
+      stallTimer = setInterval(() => {
+        const idleMs = Date.now() - lastActivityAt
+        if (idleMs < stallMs) return
+        killForGuard(`[stall] Subagent produced no output for ${Math.round(idleMs / 1000)}s.`)
+      }, 5_000)
 
       type ChildEvent = {
         type?: string
@@ -471,6 +509,7 @@ async function runSingleAgent(
           if (am.type === 'text_delta') liveText = appendPreviewTail(liveText, am.delta)
           else if (am.type === 'thinking_delta') liveThinking = appendPreviewTail(liveThinking, am.delta)
           else return
+          bumpActivity()
           scheduleUpdate()
           return
         }
@@ -478,6 +517,7 @@ async function runSingleAgent(
         if (event.type === 'tool_execution_start') {
           liveToolName = typeof event.toolName === 'string' ? event.toolName : undefined
           liveToolPreview = summarizeToolArgs(event.args)
+          bumpActivity()
           scheduleUpdate()
           return
         }
@@ -494,6 +534,7 @@ async function runSingleAgent(
           liveText = ''
           liveThinking = ''
 
+          bumpActivity()
           if (msg.role === 'assistant') {
             currentResult.usage.turns++
             const usage = msg.usage
@@ -514,6 +555,7 @@ async function runSingleAgent(
 
         if (event.type === 'tool_result_end' && event.message) {
           currentResult.messages.push(event.message)
+          bumpActivity()
           emitUpdate()
         }
       }
@@ -565,11 +607,12 @@ async function runSingleAgent(
     }
 
     const failed = isFailedResult(currentResult)
+    const resultText = failed ? undefined : getResultOutput(currentResult)
     notifySyloSubagent({
       type: 'subagent_run_end',
       runId,
       status: failed ? 'failed' : 'succeeded',
-      resultText: failed ? undefined : getResultOutput(currentResult),
+      resultText,
       thinking: previewThinking() || undefined,
       model: currentResult.model,
       error: failed ? getResultOutput(currentResult) : undefined,
@@ -860,25 +903,30 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
               content: [
                 {
                   type: 'text',
-                  text: `Chain stopped at step ${i + 1} (${step.agent}): ${getResultOutput(result)}`,
+                  text: `Chain stopped at step ${i + 1} (${step.agent}): ${getResultOutput(result)}\n\n${FAILED_RESULT_NOTE}`,
                 },
               ],
               details: makeDetails('chain')(results),
               isError: true,
             }
           }
-          previousOutput = getFinalOutput(result.messages)
+          previousOutput = withTruncationNote(result, getFinalOutput(result.messages))
           parentRunId = runId
         }
 
+        const lastStep = results[results.length - 1]!
         return {
           content: [
             {
               type: 'text',
-              text: getFinalOutput(results[results.length - 1]!.messages) || '(no output)',
+              text: withTruncationNote(
+                lastStep,
+                getFinalOutput(lastStep.messages) || '(no output)',
+              ),
             },
           ],
           details: makeDetails('chain')(results),
+          ...(results.some(isTruncatedResult) ? { isError: true as const } : {}),
         }
       }
 
@@ -953,22 +1001,29 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
           return result
         })
 
-        const successCount = results.filter((r) => !isFailedResult(r)).length
+        const successCount = results.filter(
+          (r) => !isFailedResult(r) && !isTruncatedResult(r),
+        ).length
         const summaries = results.map((r) => {
-          const output = truncateParallelOutput(getResultOutput(r))
-          const status = isFailedResult(r)
-            ? `failed${r.stopReason && r.stopReason !== 'end' ? ` (${r.stopReason})` : ''}`
+          const output = withTruncationNote(r, truncateParallelOutput(getResultOutput(r)))
+          const status =
+            isFailedResult(r) ?
+              `failed${r.stopReason && r.stopReason !== 'end' ? ` (${r.stopReason})` : ''}`
+            : isTruncatedResult(r) ? 'incomplete (token cap)'
             : 'completed'
           return `### [${r.agent}] ${status}\n\n${output}`
         })
+        const parallelTail =
+          successCount < results.length ? `\n\n---\n\n${FAILED_RESULT_NOTE}` : ''
         return {
           content: [
             {
               type: 'text',
-              text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join('\n\n---\n\n')}`,
+              text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join('\n\n---\n\n')}${parallelTail}`,
             },
           ],
           details: makeDetails('parallel')(results),
+          ...(successCount < results.length ? { isError: true as const } : {}),
         }
       }
 
@@ -992,14 +1047,20 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
         const isError = isFailedResult(result)
         if (isError) {
           return {
-            content: [{ type: 'text', text: `Agent ${result.stopReason || 'failed'}: ${getResultOutput(result)}` }],
+            content: [
+              {
+                type: 'text',
+                text: `Agent ${result.stopReason || 'failed'}: ${getResultOutput(result)}\n\n${FAILED_RESULT_NOTE}`,
+              },
+            ],
             details: makeDetails('single')([result]),
             isError: true,
           }
         }
         return {
-          content: [{ type: 'text', text: getResultOutput(result) }],
+          content: [{ type: 'text', text: withTruncationNote(result, getResultOutput(result)) }],
           details: makeDetails('single')([result]),
+          ...(isTruncatedResult(result) ? { isError: true as const } : {}),
         }
       }
 

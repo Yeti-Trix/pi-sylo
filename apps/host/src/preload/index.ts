@@ -1364,6 +1364,22 @@ contextBridge.exposeInMainWorld('sylo', {
         | { ok: false; error: string; detail?: string }
       >,
   },
+  plan: {
+    todos: (conversationId: string) =>
+      ipcRenderer.invoke('plan:todos', conversationId) as Promise<{
+        conversationId: string
+        goal?: string
+        todos: { id: string; text: string; done: boolean }[]
+        status: 'active' | 'reviewed'
+      }>,
+    onChanged: (cb: () => void) => {
+      const ch = () => cb()
+      ipcRenderer.on('plan:changed', ch)
+      return () => ipcRenderer.removeListener('plan:changed', ch)
+    },
+    clearForNewChat: (workspaceId: string) =>
+      ipcRenderer.invoke('plan:clearForNewChat', workspaceId) as Promise<{ ok: true }>,
+  },
   tasks: {
     list: (conversationId: string) => ipcRenderer.invoke('tasks:list', conversationId),
     get: (taskId: string) => ipcRenderer.invoke('tasks:get', taskId),

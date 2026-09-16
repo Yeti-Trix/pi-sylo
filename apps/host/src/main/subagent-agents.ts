@@ -124,7 +124,7 @@ export type CustomSubagentInput = {
    * unrestricted — the extension only sends `--tools` when the list is a subset.
    */
   tools?: readonly string[]
-  /** Frontmatter `timeout_seconds` wall-clock kill. Omitted keeps Sylo's default. */
+  /** Frontmatter `timeout_seconds` runaway ceiling. Omitted keeps the 2h default. */
   timeoutSeconds?: number
 }
 

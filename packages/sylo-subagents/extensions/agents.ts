@@ -12,7 +12,7 @@ export interface AgentConfig {
   description: string
   tools?: string[]
   model?: string
-  /** Wall-clock limit from frontmatter `timeout_seconds`. */
+  /** Runaway ceiling from frontmatter `timeout_seconds`. */
   timeoutSeconds?: number
   systemPrompt: string
   source: AgentSource

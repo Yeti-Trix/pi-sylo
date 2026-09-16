@@ -196,6 +196,28 @@ export function writeModelInputTypes(
  */
 export const DEFAULT_MODEL_MAX_TOKENS = 16384
 
+/**
+ * Floor for a local model's per-reply cap when its context window is unknown.
+ *
+ * For a local model the cap is NOT a spend control — local tokens are free. It
+ * exists only so a degenerate no-stop-token loop cannot generate until the
+ * context fills. So it has to sit far above any legitimate reply (a reasoning
+ * model can spend five figures of thinking tokens before writing an answer) and
+ * still be finite.
+ */
+export const LOCAL_MODEL_MIN_MAX_TOKENS = 32768
+
+/**
+ * Per-reply cap for a local model: three quarters of the context window, so a
+ * long thinking pass plus its answer fits while the prompt still has room. Never
+ * above the context window, since a reply cannot exceed it anyway.
+ */
+export function resolveLocalModelMaxTokens(contextWindow: number | null): number {
+  if (contextWindow == null || contextWindow <= 0) return LOCAL_MODEL_MIN_MAX_TOKENS
+  const generous = Math.max(LOCAL_MODEL_MIN_MAX_TOKENS, Math.floor(contextWindow * 0.75))
+  return Math.min(generous, contextWindow)
+}
+
 /** Read Pi `models.json` `maxTokens` for a provider/model id (null = unset). */
 export function readModelMaxTokens(
   agentDir: string,

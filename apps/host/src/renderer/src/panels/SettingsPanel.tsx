@@ -1807,7 +1807,7 @@ export function SettingsPanel({
                   {agent.tools || agent.timeoutSeconds ?
                     <span className={caption}>
                       {agent.tools ? `Tools: ${agent.tools.join(', ')}` : 'Tools: all'}
-                      {agent.timeoutSeconds ? ` · times out after ${agent.timeoutSeconds}s` : ''}
+                      {agent.timeoutSeconds ? ` · ceiling ${agent.timeoutSeconds}s` : ''}
                     </span>
                   : null}
                   <SubagentModelFields
@@ -1981,9 +1981,9 @@ export function SettingsPanel({
               onChange={(e) => setNewAgentTimeout(e.target.value)}
             />
             <span className={caption}>
-              Wall-clock limit for one run of this agent, 60–7200 seconds. Blank uses the default:
-              30 minutes on a local model, 10 minutes on a cloud one. Worth raising for a slow local
-              model, or lowering for an agent you never want to wait on.
+              Optional hard ceiling for one run, 60–7200 seconds. Blank uses 2 hours. A working
+              child is not killed for taking time — only if it goes silent (10 min local / 5 min
+              cloud) or hits this ceiling. Lower it for a scout you never want to wait on.
             </span>
           </label>
           <label className="flex flex-col gap-1">

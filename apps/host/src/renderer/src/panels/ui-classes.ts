@@ -1114,6 +1114,18 @@ export const chatMentionChipForced = 'border-accent/45 bg-accent/[0.18] text-acc
 export const chatMentionChipRef =
   'border-border bg-[rgb(255_255_255/0.05)] text-text-secondary'
 
+/** Section goals from this chat's `.sylo/plans/<conversationId>.md`. */
+export const chatPlanGoals =
+  'mx-5 mb-1 mt-1 rounded-xl border border-border bg-[#1e1e1e] px-3 py-2'
+
+export const chatPlanGoalsHead =
+  'mb-1.5 flex items-center gap-2 text-[0.78rem] font-medium text-text-primary'
+
+export const chatPlanGoalsList = 'm-0 flex list-none flex-col gap-1 p-0'
+
+export const chatPlanGoalsItem =
+  'flex items-start gap-2 text-[0.8rem] leading-[1.4] text-text-primary'
+
 /** Cursor-style composer: one rounded field holding the textarea + send.
  *  Queue/attachment strips float above it (no border-t). */
 export const chatInputRow =

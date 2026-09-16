@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { ChatConversationMessageRow, type ChatMessageRowModel } from './chat/ConversationMessage'
 import { ingestAskQuestionPayload } from './chat/askQuestionClient'
 import { ChatComposer, type ChatComposerHandle } from './chat/ChatComposer'
+import { ChatPlanGoalsBar } from './chat/ChatPlanGoalsBar'
 import { ChatModelBar } from './chat/ChatModelBar'
 import { LiveElapsedLabel } from './chat/LiveElapsedLabel'
 import {
@@ -3004,6 +3005,7 @@ export function App(): React.ReactElement {
       pendingComposerPrefillRef.current = text
       const reuseId = await window.sylo.conversations.findLatestEmpty(wid)
       if (reuseId) {
+        await window.sylo.plan.clearForNewChat(wid)
         await refreshConversations()
         setActiveId(reuseId)
       } else {
@@ -3034,6 +3036,7 @@ export function App(): React.ReactElement {
     if (!id) return
     const reuseId = await window.sylo.conversations.findLatestEmpty(id)
     if (reuseId) {
+      await window.sylo.plan.clearForNewChat(id)
       await refreshConversations()
       setActiveId(reuseId)
       setTab('chat')
@@ -4768,6 +4771,7 @@ export function App(): React.ReactElement {
               </div>
             )
             }
+            <ChatPlanGoalsBar conversationId={activeId} />
             <ChatComposer
               ref={composerRef}
               activeId={activeId}
