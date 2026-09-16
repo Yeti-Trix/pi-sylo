@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto'
 import { defaultPiBuiltinToolsPref, type PiBuiltinToolsPref } from '../shared/pi-builtin-tools.js'
 import type { SystemPromptStats } from '../shared/system-prompt-stats.js'
 import { withDateTimeStamp } from '../shared/message-datetime-stamp.js'
+import type { SubagentRunOutcome } from '../shared/subagent-mentions.js'
 import { readSyloPrefString } from '../shared/sylo-sqlite-prefs.js'
 
 /** Repo workspace installs `@earendil-works/*` under root `node_modules`; cwd must stay inside host package for predictable resolution when Electron forks broker.mjs. */
@@ -172,6 +173,22 @@ export type BrokerOutMessage =
   | { type: 'switch_session_result'; requestId: string; ok: false; error: string }
   | { type: 'fork_result'; requestId: string; ok: true; sessionFileAbs: string }
   | { type: 'fork_result'; requestId: string; ok: false; error: string }
+  | {
+      type: 'run_subagent_result'
+      requestId: string
+      ok: true
+      outcomes: SubagentRunOutcome[]
+    }
+  | { type: 'run_subagent_result'; requestId: string; ok: false; error: string }
+  | {
+      /** Final assistant message was truncated by a token limit (`stopReason: 'length'`). */
+      type: 'turn_cutoff'
+      turnId: string
+      output: number
+      total: number
+      provider?: string
+      modelId?: string
+    }
   | { type: 'system_prompt_stats'; stats: SystemPromptStats }
   | { type: 'context_window_stats'; actualMessageTokens: number; includesSystemPrompt?: boolean }
 
@@ -286,6 +303,12 @@ type PendingThinkingLevels = {
   timer: ReturnType<typeof setTimeout>
 }
 
+type PendingForcedSubagent = {
+  resolve: (value: SubagentRunOutcome[]) => void
+  reject: (err: Error) => void
+  timer: ReturnType<typeof setTimeout>
+}
+
 export class BrokerSupervisor {
   private child: ChildProcess | undefined
   private cfg: BrokerConfig
@@ -296,6 +319,7 @@ export class BrokerSupervisor {
   private pendingSwitchSession = new Map<string, PendingSwitch>()
   private pendingFork = new Map<string, PendingFork>()
   private pendingThinkingLevels = new Map<string, PendingThinkingLevels>()
+  private pendingForcedSubagent = new Map<string, PendingForcedSubagent>()
 
   constructor(cfg: Omit<BrokerConfig, 'brokerScriptPath'> & { brokerScriptPath?: string }) {
     const scriptPath = cfg.brokerScriptPath ?? resolveBrokerScript()
@@ -469,6 +493,10 @@ export class BrokerSupervisor {
         this.resolveThinkingLevels(m)
         return
       }
+      if (m && typeof m === 'object' && m.type === 'run_subagent_result') {
+        this.resolveForcedSubagent(m)
+        return
+      }
       this.cfg.onMessage(m)
     })
     child.on('exit', (code, signal) => {
@@ -601,7 +629,67 @@ export class BrokerSupervisor {
     })
   }
 
-    sendPrompt(turnId: string, text: string, images?: BrokerImageContent[]): void {
+  /** Stop a forced chain the host has stopped waiting for. Best effort. */
+  cancelForcedSubagents(turnId: string): void {
+    if (!this.child || this.child.killed) return
+    try {
+      this.child.send({ type: 'cancel_forced_subagent', turnId })
+    } catch {
+      /* broker already gone — nothing to cancel */
+    }
+  }
+
+    /**
+   * Run agents the operator forced with an `@mention`, before any Pi turn starts.
+   *
+   * `turnId` only tags the `sylo_subagent` lifecycle events so main can attribute
+   * them to a conversation — no assistant row is streaming yet. The default
+   * timeout is generous because a forced chain is several full child sessions;
+   * per-agent `timeout_seconds` is the real limit.
+   */
+  runForcedSubagents(
+    args: { turnId: string; agents: string[]; task: string },
+    timeoutMs = 30 * 60_000,
+  ): Promise<SubagentRunOutcome[]> {
+    if (!this.child || this.child.killed) {
+      return Promise.reject(new Error('Broker not running'))
+    }
+    const requestId = randomUUID()
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.pendingForcedSubagent.delete(requestId)) {
+          // Giving up on the reply does not stop the chain: without this it
+          // keeps spawning `pi` children whose events can no longer be
+          // attributed to any turn.
+          this.cancelForcedSubagents(args.turnId)
+          reject(new Error(`run_subagent timed out after ${timeoutMs}ms`))
+        }
+      }, timeoutMs)
+      this.pendingForcedSubagent.set(requestId, {
+        resolve: (v: SubagentRunOutcome[]) => {
+          clearTimeout(timer)
+          resolve(v)
+        },
+        reject,
+        timer,
+      })
+      try {
+        this.child!.send({
+          type: 'run_subagent',
+          requestId,
+          turnId: args.turnId,
+          agents: args.agents,
+          task: args.task,
+        })
+      } catch (e) {
+        clearTimeout(timer)
+        this.pendingForcedSubagent.delete(requestId)
+        reject(e instanceof Error ? e : new Error(String(e)))
+      }
+    })
+  }
+
+  sendPrompt(turnId: string, text: string, images?: BrokerImageContent[]): void {
     this.child?.send({
       type: 'prompt',
       turnId,
@@ -756,6 +844,19 @@ export class BrokerSupervisor {
     else pending.reject(new Error(msg.error))
   }
 
+  private resolveForcedSubagent(
+    msg:
+      | { type: 'run_subagent_result'; requestId: string; ok: true; outcomes: SubagentRunOutcome[] }
+      | { type: 'run_subagent_result'; requestId: string; ok: false; error: string },
+  ): void {
+    const pending = this.pendingForcedSubagent.get(msg.requestId)
+    if (!pending) return
+    this.pendingForcedSubagent.delete(msg.requestId)
+    clearTimeout(pending.timer)
+    if (msg.ok) pending.resolve(msg.outcomes)
+    else pending.reject(new Error(msg.error))
+  }
+
   private failAllPending(reason: string): void {
     for (const [, p] of this.pendingCapabilities) {
       clearTimeout(p.timer)
@@ -772,6 +873,11 @@ export class BrokerSupervisor {
       p.reject(new Error(reason))
     }
     this.pendingFork.clear()
+    for (const [, p] of this.pendingForcedSubagent) {
+      clearTimeout(p.timer)
+      p.reject(new Error(reason))
+    }
+    this.pendingForcedSubagent.clear()
   }
 
   private disposeChild(): void {

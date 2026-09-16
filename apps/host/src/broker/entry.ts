@@ -2,6 +2,7 @@
  * Agent broker: runs as a forked child (ELECTRON_RUN_AS_NODE) with IPC to Electron main.
  * Owns a single Pi AgentSession; streams slimmed events back to the host.
  */
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -53,6 +54,7 @@ import {
 } from '../shared/sylo-capability-paths.js'
 import { isSkillPathInOperatorScope } from '../shared/sylo-skill-scope.js'
 import { readSyloPrefBool } from '../shared/sylo-sqlite-prefs.js'
+import { runForcedSubagentChain } from '../../../../packages/sylo-subagents/extensions/index.ts'
 import {
   cancelAllSubagentRuns,
   cancelSubagentRun,
@@ -151,6 +153,27 @@ type BrokerForkBeforeLastUser = { type: 'fork_before_last_user'; requestId: stri
 
 type BrokerCancelSubagent = { type: 'cancel_subagent'; runId: string }
 
+/**
+ * Operator-forced subagent run (`@mention` in the composer), driven by the host
+ * instead of by the orchestrator's `subagent` tool call. `turnId` is the id main
+ * uses to attribute lifecycle events to a conversation; there is no Pi turn
+ * streaming yet when this runs.
+ */
+type BrokerRunSubagent = {
+  type: 'run_subagent'
+  requestId: string
+  turnId: string
+  agents: string[]
+  task: string
+}
+
+/**
+ * Stop a forced chain the host has given up on (RPC timeout, turn aborted).
+ * Without it the chain keeps spawning `pi` children whose events can no longer
+ * be attributed to anything.
+ */
+type BrokerCancelForcedSubagent = { type: 'cancel_forced_subagent'; turnId: string }
+
 type BrokerMessageIn =
   | BrokerInit
   | BrokerPrompt
@@ -164,6 +187,8 @@ type BrokerMessageIn =
   | BrokerSwitchSession
   | BrokerForkBeforeLastUser
   | BrokerCancelSubagent
+  | BrokerRunSubagent
+  | BrokerCancelForcedSubagent
   // Pass-through IPC messages: the broker does not consume these. Main → broker
   // IPC fans them out to every `process.on('message')` listener (e.g. the
   // sylo-tasks extension's edit listener, or think-tank/schedule RPC waiters).
@@ -558,6 +583,20 @@ let brokerChatOnly = false
 /** Routes extension notify/error IPC to the active chat turn. */
 let activePromptTurnId: string | undefined
 /**
+ * Turn id for the operator-forced subagent run executing on this async stack.
+ *
+ * Forced runs happen *before* the Pi turn starts, so `activePromptTurnId` is
+ * still unset and `sylo_subagent` events would otherwise arrive at main
+ * untagged (no runs strip, no Tasks row, no cancel). Async-scoped rather than a
+ * module variable because a single variable misattributed events as soon as
+ * anything overlapped: a second forced run clobbered it, and the first run's
+ * `finally` cleared it while another was still working.
+ */
+const forcedRunTurnIdStore = new AsyncLocalStorage<string>()
+
+/** In-flight forced chains by turn id, so a timeout or abort can stop them. */
+const forcedRunAborts = new Map<string, AbortController>()
+/**
  * Set on successful compaction_end. A provider usage reading taken before a
  * compaction describes the PRE-compaction context — until a fresh post-compaction
  * reading lands (next turn), such readings must be ignored so the token counter
@@ -589,10 +628,14 @@ function installSubagentTurnIdBridge(): void {
         msgType === 'sylo_think_tank_rpc' ||
         msgType === 'sylo_schedule_rpc' ||
         msgType === 'sylo_ask_question') &&
-      activePromptTurnId &&
       !(msg as { turnId?: string }).turnId
     ) {
-      return nativeSend({ ...(msg as Record<string, unknown>), turnId: activePromptTurnId })
+      // A forced chain's own turn wins: its events belong to it even when
+      // another conversation's prompt is streaming on this same broker.
+      const turnId = forcedRunTurnIdStore.getStore() ?? activePromptTurnId
+      if (turnId) {
+        return nativeSend({ ...(msg as Record<string, unknown>), turnId })
+      }
     }
     // Inject workspaceKey for show_canvas / show_widget so the renderer can
     // gate by workspace — same pattern as sylo-tasks:open-on-canvas. Without
@@ -741,6 +784,30 @@ function lastAssistantText(sess: AgentSession): string {
     return assistantMessageText(a.content)
   }
   return ''
+}
+
+/**
+ * Usage for a final assistant message the provider truncated (`stopReason: 'length'`).
+ *
+ * Pi reports this like any other completed turn, so without an explicit check a
+ * cut-off reply is written to the transcript as a normal, finished answer and the
+ * agent simply appears to stop mid-task. Only the *last* assistant message counts —
+ * an intermediate truncation the agent loop recovered from is not a stalled turn.
+ */
+function assistantTurnCutoffFromSession(
+  sess: AgentSession,
+): { output: number; total: number } | null {
+  for (let i = sess.messages.length - 1; i >= 0; i--) {
+    const msg = sess.messages[i]!
+    if (msg.role !== 'assistant') continue
+    const a = msg as unknown as {
+      stopReason?: string
+      usage?: { output?: number; totalTokens?: number }
+    }
+    if (a.stopReason !== 'length') return null
+    return { output: a.usage?.output ?? 0, total: a.usage?.totalTokens ?? 0 }
+  }
+  return null
 }
 
 function assistantEmptyReplyHint(sess: AgentSession): string | null {
@@ -1443,6 +1510,19 @@ async function handlePrompt(msg: BrokerPrompt): Promise<void> {
         process.send?.({ type: 'event', turnId: msg.turnId, event: { type: 'text_delta', delta: text } })
       }
     }
+    // Sent before `done` so the host can append the explanation to the partial
+    // reply the turn did produce, rather than discarding it as an error.
+    const cutoff = assistantTurnCutoffFromSession(currentSession)
+    if (cutoff) {
+      process.send?.({
+        type: 'turn_cutoff',
+        turnId: msg.turnId,
+        output: cutoff.output,
+        total: cutoff.total,
+        provider: brokerModelProvider,
+        modelId: brokerModelId,
+      })
+    }
     process.send?.({ type: 'done', turnId: msg.turnId })
     sendContextWindowStats()
   } catch (e) {
@@ -1496,6 +1576,36 @@ async function handleFollowUp(msg: BrokerFollowUp): Promise<void> {
   }
 }
 
+async function handleRunSubagent(msg: BrokerRunSubagent): Promise<void> {
+  const abort = new AbortController()
+  forcedRunAborts.set(msg.turnId, abort)
+  await forcedRunTurnIdStore.run(msg.turnId, async () => {
+    try {
+      const outcomes = await runForcedSubagentChain({
+        cwd: brokerSessionCwd || process.cwd(),
+        agentNames: msg.agents,
+        task: msg.task,
+        signal: abort.signal,
+      })
+      process.send?.({
+        type: 'run_subagent_result',
+        requestId: msg.requestId,
+        ok: true,
+        outcomes,
+      })
+    } catch (e) {
+      process.send?.({
+        type: 'run_subagent_result',
+        requestId: msg.requestId,
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+      })
+    } finally {
+      forcedRunAborts.delete(msg.turnId)
+    }
+  })
+}
+
 async function handleSteer(msg: BrokerSteer): Promise<void> {
   if (!session) return
   try {
@@ -1546,12 +1656,24 @@ function handleMessage(msg: unknown): void {
   }
   if (m.type === 'abort' && session) {
     cancelAllSubagentRuns()
+    // Killing the current children is not enough: without this the chain just
+    // moves on and spawns the next agent in the sequence.
+    for (const ac of forcedRunAborts.values()) ac.abort()
     void session.abort()
     return
   }
   if (m.type === 'cancel_subagent') {
     const runId = typeof m.runId === 'string' ? m.runId.trim() : ''
     if (runId) cancelSubagentRun(runId)
+    return
+  }
+  if (m.type === 'run_subagent') {
+    void handleRunSubagent(m)
+    return
+  }
+  if (m.type === 'cancel_forced_subagent') {
+    const turnId = typeof m.turnId === 'string' ? m.turnId.trim() : ''
+    if (turnId) forcedRunAborts.get(turnId)?.abort()
     return
   }
   if (m.type === 'sylo_think_tank_rpc_result') {

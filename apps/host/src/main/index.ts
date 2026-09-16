@@ -56,6 +56,13 @@ import {
   serializeSubagentPins,
 } from '../shared/subagent-model-pin.js'
 import {
+  composeForcedSubagentPrompt,
+  formatForcedSubagentNotice,
+  mightCarryMention,
+  parseSubagentMentionsInBody,
+  type SubagentRunOutcome,
+} from '../shared/subagent-mentions.js'
+import {
   SYLO_SURFACE_SCHEME,
   syloSurfaceRelativePath,
 } from '../shared/sylo-surface-protocol.js'
@@ -252,7 +259,13 @@ import { discoverSkillRoutes, filterSkillRoutesForSidebar } from './skill-routes
 import { readSkillDataJson, writeSkillDataJson, SKILL_DATA_QUOTA_BYTES } from './skill-data-store.js'
 import { lintSkillSurfacesBatch } from './skill-surface-lint.js'
 import { removeStandaloneSkillFolder } from './standalone-skill-removal.js'
-import { listSubagentAgents } from './subagent-agents.js'
+import {
+  deleteCustomSubagent,
+  listSubagentAgents,
+  readCustomSubagent,
+  updateCustomSubagent,
+  writeCustomSubagent,
+} from './subagent-agents.js'
 import {
   handleSubagentHostEvent,
   initSubagentTaskHostSession,
@@ -1455,6 +1468,39 @@ function extensionNotifyVisibleInChat(
   return true
 }
 
+/**
+ * Explain a turn the provider truncated, so a stalled agent is never silent.
+ *
+ * Two different limits report the same `stopReason: 'length'` and the remedy differs.
+ * Hitting `maxTokens` truncates one oversized reply; filling the context window leaves
+ * the model no room to answer at all, which shows up as a handful of output tokens and
+ * looks exactly like the agent quitting mid-task. Local Ollama models reach the second
+ * case fastest, because a high thinking level adds thousands of tokens per turn to the
+ * history that Pi's own estimate does not fully account for.
+ */
+function describeTurnCutoff(
+  output: number,
+  total: number,
+  provider?: string,
+  modelId?: string,
+): string {
+  const fmt = (n: number) => n.toLocaleString('en-US')
+  const label = modelId?.trim() ? modelId.trim() : 'this model'
+  const canLookUp = Boolean(provider?.trim() && modelId?.trim())
+  const maxTokens = canLookUp ? readModelMaxTokens(hostAgentDir(), provider!, modelId!) : null
+  const contextWindow = canLookUp
+    ? readModelContextWindow(hostAgentDir(), provider!, modelId!)
+    : null
+
+  if (maxTokens != null && output >= maxTokens * 0.98) {
+    return `Response cut off — it hit the ${fmt(maxTokens)}-token per-reply cap for ${label}. Ask the agent to continue, or raise Max tokens in Settings. A high thinking level can spend this whole budget before any answer is written.`
+  }
+  if (contextWindow != null && total >= contextWindow * 0.97) {
+    return `Response cut off — this chat filled ${label}'s ${fmt(contextWindow)}-token context window (${fmt(total)} used), leaving no room to reply. Compact the chat or start a new one. If it happens again right away, lower the thinking level so each turn adds less history.`
+  }
+  return `Response cut off — ${label} stopped at a token limit after ${fmt(output)} output tokens (${fmt(total)} in context) instead of finishing. Ask it to continue, or start a new chat if it repeats.`
+}
+
 function appendExtensionCommandOutput(
   pending: PendingTurn,
   line: string,
@@ -1725,9 +1771,40 @@ type PreparedUserMessage = {
   images: BrokerImageContent[]
 }
 
+/** Agents an `@mention` forces, and the request left after stripping it. */
+type ForcedSubagentRequest = { agents: string[]; task: string }
+
+type ForcedChainResult =
+  | { ok: true; promptText: string }
+  | { ok: false; status: 'failed' | 'cancelled'; message: string }
+
+/** Options shared by the new-turn and follow-up paths of a send. */
+type ChatTurnOptions = {
+  skipUserInsert?: boolean
+  prepared?: PreparedUserMessage
+  /** Transcript row between the user message and the reply (forced-run notice). */
+  noticeAfterUser?: string
+  /** Auto-title source when the raw body is a poor label (e.g. an `@agent` prefix). */
+  titleText?: string
+  /**
+   * Run these agents after the turn owns a broker slot and its session is
+   * bound, then fold their output into the prompt.
+   *
+   * Declarative rather than a closure so a turn deferred for a busy broker can
+   * round-trip it. Running the chain *inside* turn accounting is what makes
+   * Stop, deferral, and event attribution work — outside it there was no
+   * `pendingTurns` row, so the UI showed nothing running and lifecycle events
+   * could be credited to whichever turn started next.
+   */
+  forced?: ForcedSubagentRequest
+}
+
 type DeferredChatTurn = {
   conversationId: string
   prepared: PreparedUserMessage
+  /** Rebuilt on flush so a deferred `@mention` still forces its run. */
+  forced?: { agents: string[]; task: string }
+  noticeAfterUser?: string
 }
 
 /** Turns waiting for a free broker slot while at max concurrency. */
@@ -1785,15 +1862,25 @@ function deferChatTurn(
   conversationId: string,
   text: string,
   attachments: readonly RawAttachment[] | undefined,
+  options?: Pick<ChatTurnOptions, 'prepared' | 'noticeAfterUser' | 'titleText'> & {
+    forced?: { agents: string[]; task: string }
+  },
 ): Promise<{ ok: true; assistantMessageId: string; deferred: true }> {
   return (async () => {
-    const prepared = await prepareUserMessageWithImages(text, attachments)
+    const prepared =
+      options?.prepared ?? (await prepareUserMessageWithImages(text, attachments))
     db.insertMessage(conversationId, 'user', prepared.text, 'complete')
-    maybeAutoTitleFromFirstUserMessage(conversationId, text)
+    maybeAutoTitleFromFirstUserMessage(conversationId, options?.titleText ?? text)
+    if (options?.noticeAfterUser) {
+      db.insertMessage(conversationId, 'system', options.noticeAfterUser, 'complete')
+    }
     emitChatRefresh(conversationId, 'messages')
     deferredChatTurns.push({
       conversationId,
       prepared,
+      forced: options?.forced,
+      // Already written above — kept only so a re-defer on flush does not
+      // insert a second notice.
     })
     return { ok: true as const, assistantMessageId: '', deferred: true as const }
   })()
@@ -1807,6 +1894,9 @@ async function flushDeferredTurns(): Promise<void> {
   const result = await startChatTurn(next.conversationId, '', undefined, {
     skipUserInsert: true,
     prepared: next.prepared,
+    // A deferred mention must still force its run, or identical text behaves
+    // differently purely because the broker happened to be busy.
+    forced: next.forced,
   })
   if (result.ok && result.deferred) {
     deferredChatTurns.unshift(next)
@@ -1867,7 +1957,7 @@ async function followUpActiveTurn(
   conversationId: string,
   text: string,
   attachments: readonly RawAttachment[] | undefined,
-  options?: { steer?: boolean; skipUserInsert?: boolean },
+  options?: ChatTurnOptions & { steer?: boolean },
 ): Promise<
   | { ok: true; assistantMessageId: string }
   | { ok: false; error: string }
@@ -1879,10 +1969,17 @@ async function followUpActiveTurn(
   const assigned = turnBrokerPool.supervisorForTurn(turnId) ?? broker
   if (!assigned) return { ok: false, error: 'broker_not_ready' }
 
-  const prepared = await prepareUserMessageWithImages(text, attachments)
+  // Honor a caller-supplied prepared message: re-deriving it here silently
+  // dropped the composed subagent output on any conversation that already had
+  // a turn in flight.
+  const prepared =
+    options?.prepared ?? (await prepareUserMessageWithImages(text, attachments))
   if (!options?.skipUserInsert) {
     db.insertMessage(conversationId, 'user', prepared.text, 'complete')
-    maybeAutoTitleFromFirstUserMessage(conversationId, text)
+    maybeAutoTitleFromFirstUserMessage(conversationId, options?.titleText ?? text)
+  }
+  if (options?.noticeAfterUser) {
+    db.insertMessage(conversationId, 'system', options.noticeAfterUser, 'complete')
   }
   splitPendingTurnAfterUserInterrupt(conversationId, pending)
   emitChatRefresh(conversationId, 'messages')
@@ -1891,11 +1988,26 @@ async function followUpActiveTurn(
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
   }
+  let promptText = prepared.promptText
+  if (options?.forced) {
+    const hooked = await runForcedSubagentChainForTurn(
+      conversationId,
+      turnId,
+      options.forced,
+      promptText,
+    )
+    if (!hooked.ok) {
+      db.updateMessageContent(pending.assistantId, hooked.message, hooked.status)
+      emitChatRefresh(conversationId, 'turnFinished')
+      return { ok: false, error: `forced_${hooked.status}` }
+    }
+    promptText = hooked.promptText
+  }
   const images = prepared.images
   if (options?.steer) {
-    assigned.sendSteer(prepared.promptText, images.length > 0 ? images : undefined)
+    assigned.sendSteer(promptText, images.length > 0 ? images : undefined)
   } else {
-    assigned.sendFollowUp(prepared.promptText, images.length > 0 ? images : undefined)
+    assigned.sendFollowUp(promptText, images.length > 0 ? images : undefined)
   }
   return { ok: true, assistantMessageId: pending.assistantId }
 }
@@ -2564,11 +2676,166 @@ async function prepareUserMessageWithImages(
   }
 }
 
+/**
+ * Whether the `sylo-subagents` extension is actually live.
+ *
+ * Forcing must honor the same switches the `subagent` tool does, so this is the
+ * single condition both `tasks:diagnostics` and the `@mention` path consult.
+ */
+function subagentExtensionEnabled(): boolean {
+  const key = normalizeSyloCapabilityPath(SYLO_SUBAGENTS_EXTENSION)
+  return (
+    Boolean(key) &&
+    existsSync(SYLO_SUBAGENTS_EXTENSION) &&
+    !readSyloDisabledCapabilities().extensionPaths.includes(key)
+  )
+}
+
+/** Chat-only takes every tool away from the agent — forced runs included. */
+function brokerChatOnlyPref(): boolean {
+  return db.getPref('sylo.chat_only', false) as boolean
+}
+
+/** Personas the extension would discover for the active workspace + agent scope. */
+function listSubagentAgentsForActiveScope(): ReturnType<typeof listSubagentAgents> {
+  const scope = String(db.getPref('sylo.subagents.agent_scope', 'user') || 'user').trim()
+  return listSubagentAgents({
+    bundledDir: join(SYLO_REPO_ROOT, 'packages/sylo-subagents/agents'),
+    userAgentsDir: join(hostAgentDir(), 'agents'),
+    projectCwd: effectivePiCwdForWorkspace(activeWorkspaceId()),
+    scope: scope === 'both' || scope === 'project' ? scope : 'user',
+  })
+}
+
+/**
+ * Conversation for an in-flight operator-forced run, keyed by its synthetic turn
+ * id. Forced runs precede the Pi turn, so `pendingTurns` cannot resolve them.
+ */
+const forcedSubagentTurnConvIds = new Map<string, string>()
+
+/**
+ * Resolve leading `@agent` mentions in a send, or null for an ordinary send.
+ *
+ * This is the forcing half of subagent invocation. The `subagent` tool still
+ * lets the model delegate on its own judgment; a mention takes that judgment
+ * away, because a chat model asked to "use the planner" will often just plan
+ * itself and never call the tool.
+ */
+function forcedMentionRequest(body: string): ForcedSubagentRequest | null {
+  // Listing personas touches the filesystem, so only pay for it when the
+  // message could actually carry a mention.
+  if (!mightCarryMention(body)) return null
+  // Forcing must respect the same switches the `subagent` tool does, or
+  // Settings can report the extension disabled while `@planner` still spawns
+  // children.
+  if (!subagentExtensionEnabled() || brokerChatOnlyPref()) return null
+  const mentioned = parseSubagentMentionsInBody(
+    body,
+    listSubagentAgentsForActiveScope().map((a) => a.name),
+  )
+  // A mention with no request after it is the operator talking *about* an
+  // agent, not invoking one.
+  if (mentioned.agents.length === 0 || !mentioned.task) return null
+  return { agents: mentioned.agents, task: mentioned.task }
+}
+
+/**
+ * Send a chat message, honoring leading `@agent` mentions as a forced run.
+ *
+ * Used by every real "send" surface (composer, queue, phone companion) so a
+ * mention means the same thing everywhere. Steer paths deliberately skip this:
+ * they interrupt a turn that is already running.
+ */
+async function startChatTurnHonoringMentions(
+  conversationId: string,
+  body: string,
+  attachments: readonly RawAttachment[] | undefined,
+): Promise<
+  | { ok: true; assistantMessageId: string; deferred?: false }
+  | { ok: true; assistantMessageId: string; deferred: true }
+  | { ok: false; assistantMessageId: string; error: string }
+> {
+  const forced = forcedMentionRequest(body)
+  if (!forced) return await startChatTurn(conversationId, body, attachments)
+  return await startChatTurn(conversationId, body, attachments, {
+    noticeAfterUser: formatForcedSubagentNotice(forced.agents),
+    // Title from the request, not the `@agent` prefix, or every forced chat is
+    // labelled with the persona instead of the work.
+    titleText: forced.task,
+    forced,
+  })
+}
+
+/**
+ * Run the operator's `@mentioned` agents and fold their output into the prompt.
+ *
+ * Runs on the turn's own id, so `sylo_subagent` lifecycle events land in this
+ * conversation even if another conversation starts a turn while the chain works.
+ */
+async function runForcedSubagentChainForTurn(
+  conversationId: string,
+  turnId: string,
+  forced: ForcedSubagentRequest,
+  promptText: string,
+): Promise<ForcedChainResult> {
+  const supervisor = turnBrokerPool.supervisorForTurn(turnId) ?? broker
+  if (!supervisor) {
+    return {
+      ok: false,
+      status: 'failed',
+      message: '(error) Agent is not connected, so the forced subagent run did not start.',
+    }
+  }
+
+  forcedSubagentTurnConvIds.set(turnId, conversationId)
+  let outcomes: SubagentRunOutcome[]
+  try {
+    outcomes = await supervisor.runForcedSubagents({
+      turnId,
+      agents: forced.agents,
+      task: forced.task,
+    })
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e)
+    return {
+      ok: false,
+      status: 'failed',
+      message: `Forced subagent run failed before any agent produced output: ${detail}`,
+    }
+  } finally {
+    forcedSubagentTurnConvIds.delete(turnId)
+  }
+
+  if (outcomes.length === 0) {
+    return {
+      ok: false,
+      status: 'failed',
+      message: 'Forced subagent run produced no result. Check Settings → Subagents diagnostics.',
+    }
+  }
+
+  // Stopping the run is the operator saying "not this" — spending a chat turn on
+  // the partial output would be the opposite of what they asked for.
+  const cancelled = outcomes.find((o) => o.status === 'cancelled')
+  if (cancelled) {
+    return {
+      ok: false,
+      status: 'cancelled',
+      message: `Stopped the forced \`@${cancelled.agent}\` run. Nothing was sent to the chat model.`,
+    }
+  }
+
+  return {
+    ok: true,
+    promptText: composeForcedSubagentPrompt({ userText: promptText, outcomes }),
+  }
+}
+
 async function startChatTurn(
   conversationId: string,
   text: string,
   attachments?: readonly RawAttachment[],
-  options?: { skipUserInsert?: boolean; prepared?: PreparedUserMessage },
+  options?: ChatTurnOptions,
 ): Promise<
   | { ok: true; assistantMessageId: string; deferred?: false }
   | { ok: true; assistantMessageId: string; deferred: true }
@@ -2577,7 +2844,7 @@ async function startChatTurn(
   if (!brokerAgentReady || !broker || db.getPref('sylo.safe_mode', false)) {
     if (!options?.skipUserInsert) {
       db.insertMessage(conversationId, 'user', text, 'complete')
-      maybeAutoTitleFromFirstUserMessage(conversationId, text)
+      maybeAutoTitleFromFirstUserMessage(conversationId, options?.titleText ?? text)
     }
     const msg =
       db.getPref('sylo.safe_mode', false) ?
@@ -2589,14 +2856,17 @@ async function startChatTurn(
   }
 
   if (!options?.skipUserInsert && shouldDeferCrossConversationTurn(conversationId)) {
-    return await deferChatTurn(conversationId, text, attachments)
+    return await deferChatTurn(conversationId, text, attachments, {
+      prepared: options?.prepared,
+      noticeAfterUser: options?.noticeAfterUser,
+      titleText: options?.titleText,
+      forced: options?.forced,
+    })
   }
 
   const existingActive = findPendingTurnForConversation(conversationId)
   if (existingActive) {
-    const followUp = await followUpActiveTurn(conversationId, text, attachments, {
-      skipUserInsert: options?.skipUserInsert,
-    })
+    const followUp = await followUpActiveTurn(conversationId, text, attachments, options)
     if (!followUp.ok) {
       return { ok: false, assistantMessageId: '', error: followUp.error }
     }
@@ -2608,7 +2878,10 @@ async function startChatTurn(
   const prepared = options?.prepared ?? (await prepareUserMessageWithImages(text, attachments))
   if (!options?.skipUserInsert) {
     db.insertMessage(conversationId, 'user', prepared.text, 'complete')
-    maybeAutoTitleFromFirstUserMessage(conversationId, text)
+    maybeAutoTitleFromFirstUserMessage(conversationId, options?.titleText ?? text)
+  }
+  if (options?.noticeAfterUser) {
+    db.insertMessage(conversationId, 'system', options.noticeAfterUser, 'complete')
   }
   const assistant = db.insertMessage(conversationId, 'assistant', '', 'streaming')
   const turnId = randomUUID()
@@ -2658,9 +2931,35 @@ async function startChatTurn(
     emitChatRefresh(conversationId, 'turnFinished')
     return { ok: false, assistantMessageId: assistant.id, error: 'broker_not_ready' }
   }
+  let promptText = prepared.promptText
+  if (options?.forced) {
+    // Announce the turn before a chain that can run for minutes, so the Stop
+    // button and elapsed timer are live while it works.
+    emitChatRefresh(conversationId, 'turnStarted')
+    const hooked = await runForcedSubagentChainForTurn(
+      conversationId,
+      turnId,
+      options.forced,
+      promptText,
+    )
+    if (!pendingTurns.has(turnId)) {
+      // Stopped mid-chain; abort already finalized the row and released the slot.
+      return { ok: false, assistantMessageId: assistant.id, error: 'forced_cancelled' }
+    }
+    if (!hooked.ok) {
+      flushPendingTurnBuffers(pendingTurns.get(turnId)!)
+      dropPendingTurn(turnId)
+      turnBrokerPool.releaseTurn(turnId, assignedBroker)
+      db.updateMessageContent(assistant.id, hooked.message, hooked.status)
+      emitChatRefresh(conversationId, 'turnFinished')
+      void flushDeferredTurns()
+      return { ok: false, assistantMessageId: assistant.id, error: `forced_${hooked.status}` }
+    }
+    promptText = hooked.promptText
+  }
   const images = prepared.images
   emitChatRefresh(conversationId, 'turnStarted')
-  assignedBroker.sendPrompt(turnId, prepared.promptText, images.length > 0 ? images : undefined)
+  assignedBroker.sendPrompt(turnId, promptText, images.length > 0 ? images : undefined)
   return { ok: true, assistantMessageId: assistant.id }
 }
 
@@ -2674,14 +2973,9 @@ async function deliverQueuedMessage(
     return { ok: false, error: 'broker_not_ready' }
   }
 
-  const active = findPendingTurnForConversation(conversationId)
-  if (active) {
-    const followUp = await followUpActiveTurn(conversationId, text, attachments)
-    return followUp.ok ? { ok: true } : { ok: false, error: followUp.error }
-  }
-
-  finalizeOrphanStreamingAssistants(conversationId)
-  const started = await startChatTurn(conversationId, text, attachments)
+  // Routed through the mention path so identical text behaves the same whether
+  // the operator hit Enter on an idle agent or queued it behind a running turn.
+  const started = await startChatTurnHonoringMentions(conversationId, text, attachments)
   if (!started.ok) return { ok: false, error: started.error }
   return { ok: true }
 }
@@ -3249,7 +3543,13 @@ function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext
     return
   }
   if (msg.type === 'sylo_subagent') {
-    const convId = msg.turnId ? pendingTurns.get(msg.turnId)?.convId : undefined
+    // Operator-forced runs happen before the Pi turn exists, so their turn id is
+    // not in `pendingTurns` yet — fall back to the forced-run map or the run
+    // loses its conversation (no Tasks row, no per-run cancel).
+    const convId =
+      msg.turnId ?
+        (pendingTurns.get(msg.turnId)?.convId ?? forcedSubagentTurnConvIds.get(msg.turnId))
+      : undefined
     if (convId) {
       handleSubagentHostEvent(convId, msg.event as SyloSubagentHostEvent)
     }
@@ -3528,6 +3828,19 @@ function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext
       appendExtensionCommandOutput(pending, formatExtensionCommandLine(detail, 'error'))
     } else {
       console.error('[sylo broker] extension_error:', msg.extensionPath, msg.error)
+    }
+    return
+  }
+  if (msg.type === 'turn_cutoff') {
+    const pending = pendingTurns.get(msg.turnId)
+    if (pending && !pending.aborted) {
+      appendExtensionCommandOutput(
+        pending,
+        formatExtensionCommandLine(
+          describeTurnCutoff(msg.output, msg.total, msg.provider, msg.modelId),
+          'warning',
+        ),
+      )
     }
     return
   }
@@ -3943,7 +4256,9 @@ async function fireScheduledPromptFromHost(
     if (started.ok) markNotify()
     return { conversationId: conv.id, status: 'broker_unavailable' }
   }
-  const started = await startChatTurn(conv.id, schedule.prompt_text)
+  // An `@agent` the operator wrote into a schedule means the same thing it does
+  // in the composer.
+  const started = await startChatTurnHonoringMentions(conv.id, schedule.prompt_text, undefined)
   if (started.ok) markNotify()
   return {
     conversationId: conv.id,
@@ -4095,7 +4410,11 @@ function registerIpc(): void {
       if (!id) return { assistantMessageId: '', error: 'missing_conversation_id' }
       if (!body && norm.length === 0) return { assistantMessageId: '', error: 'empty_message' }
       return chainConversationChatOp(id, async () => {
-        const started = await startChatTurn(id, body, norm.length > 0 ? norm : undefined)
+        const started = await startChatTurnHonoringMentions(
+          id,
+          body,
+          norm.length > 0 ? norm : undefined,
+        )
         if (!started.ok) {
           return { assistantMessageId: started.assistantMessageId, error: started.error }
         }
@@ -4132,7 +4451,9 @@ function registerIpc(): void {
         const active = findPendingTurnForConversation(id)
         if (!active) {
           finalizeOrphanStreamingAssistants(id)
-          const started = await startChatTurn(id, body, normAttachments)
+          // With nothing to interrupt this is an ordinary send, so it honors
+          // mentions like one; only a real steer skips them.
+          const started = await startChatTurnHonoringMentions(id, body, normAttachments)
           return started.ok ? { ok: true } : { ok: false, error: started.error }
         }
         const followUp = await followUpActiveTurn(id, body, normAttachments, { steer: true })
@@ -5311,27 +5632,79 @@ function registerIpc(): void {
     ok: true as const,
     deleted: subagentTaskStore.deleteOrphanedAgentTasks(),
   }))
-  ipcMain.handle('tasks:diagnostics', () => {
-    const subagentsKey = normalizeSyloCapabilityPath(SYLO_SUBAGENTS_EXTENSION)
-    const disabled = readSyloDisabledCapabilities()
-    const extensionEnabled =
-      Boolean(subagentsKey) &&
-      existsSync(SYLO_SUBAGENTS_EXTENSION) &&
-      !disabled.extensionPaths.includes(subagentsKey)
-    return {
-      runningCount: subagentTaskStore.countRunningAgentTasks(),
-      orphanedCount: subagentTaskStore.countOrphanedAgentTasks(),
-      extensionEnabled,
+  ipcMain.handle('tasks:diagnostics', () => ({
+    runningCount: subagentTaskStore.countRunningAgentTasks(),
+    orphanedCount: subagentTaskStore.countOrphanedAgentTasks(),
+    extensionEnabled: subagentExtensionEnabled(),
+  }))
+  ipcMain.handle('tasks:agents', () => listSubagentAgentsForActiveScope())
+  ipcMain.handle('subagents:createAgent', (_e, input: unknown) => {
+    const raw = (input ?? {}) as {
+      name?: unknown
+      description?: unknown
+      prompt?: unknown
+      tools?: unknown
+      timeoutSeconds?: unknown
     }
-  })
-  ipcMain.handle('tasks:agents', () => {
-    const scope = String(db.getPref('sylo.subagents.agent_scope', 'user') || 'user').trim()
-    return listSubagentAgents({
-      bundledDir: join(SYLO_REPO_ROOT, 'packages/sylo-subagents/agents'),
+    const result = writeCustomSubagent({
       userAgentsDir: join(hostAgentDir(), 'agents'),
-      projectCwd: effectivePiCwdForWorkspace(activeWorkspaceId()),
-      scope: scope === 'both' || scope === 'project' ? scope : 'user',
+      existingNames: listSubagentAgentsForActiveScope().map((a) => a.name),
+      input: {
+        name: typeof raw.name === 'string' ? raw.name : '',
+        description: typeof raw.description === 'string' ? raw.description : '',
+        prompt: typeof raw.prompt === 'string' ? raw.prompt : '',
+        // Absent stays absent: the writer treats an omitted list as "unrestricted"
+        // and an explicitly empty one as an error, which an [] here would trigger.
+        ...(Array.isArray(raw.tools)
+          ? { tools: raw.tools.filter((t): t is string => typeof t === 'string') }
+          : {}),
+        ...(typeof raw.timeoutSeconds === 'number' ? { timeoutSeconds: raw.timeoutSeconds } : {}),
+      },
     })
+    return result
+  })
+  ipcMain.handle('subagents:readAgent', (_e, name: unknown) => {
+    const agentName = typeof name === 'string' ? name.trim() : ''
+    if (!agentName) return { ok: false as const, error: 'missing_name' }
+    return readCustomSubagent({ userAgentsDir: join(hostAgentDir(), 'agents'), name: agentName })
+  })
+  ipcMain.handle('subagents:updateAgent', (_e, input: unknown) => {
+    const raw = (input ?? {}) as {
+      name?: unknown
+      description?: unknown
+      prompt?: unknown
+      tools?: unknown
+      timeoutSeconds?: unknown
+    }
+    return updateCustomSubagent({
+      userAgentsDir: join(hostAgentDir(), 'agents'),
+      input: {
+        name: typeof raw.name === 'string' ? raw.name : '',
+        description: typeof raw.description === 'string' ? raw.description : '',
+        prompt: typeof raw.prompt === 'string' ? raw.prompt : '',
+        ...(Array.isArray(raw.tools)
+          ? { tools: raw.tools.filter((t): t is string => typeof t === 'string') }
+          : {}),
+        ...(typeof raw.timeoutSeconds === 'number' ? { timeoutSeconds: raw.timeoutSeconds } : {}),
+      },
+    })
+  })
+  ipcMain.handle('subagents:deleteAgent', (_e, name: unknown) => {
+    const agentName = typeof name === 'string' ? name.trim() : ''
+    if (!agentName) return { ok: false as const, error: 'missing_name' }
+    const result = deleteCustomSubagent({
+      userAgentsDir: join(hostAgentDir(), 'agents'),
+      name: agentName,
+    })
+    if (!result.ok) return result
+    // A pin for a persona that no longer exists would keep shipping a dead
+    // entry in SYLO_SUBAGENTS_MODEL_BY_AGENT on every broker fork.
+    const pins = parseSubagentPins(db.getPref('sylo.subagents.model_by_agent', ''))
+    if (pins[agentName]) {
+      delete pins[agentName]
+      db.setPref('sylo.subagents.model_by_agent', serializeSubagentPins(pins))
+    }
+    return result
   })
 
   ipcMain.handle('schedules:list', (_e, workspaceId: unknown) => {
@@ -6901,7 +7274,11 @@ function registerIpc(): void {
         if (db.getConversation(id)?.archived_at != null) {
           db.setConversationArchived(id, false)
         }
-        const started = await startChatTurn(id, body, normalizeAttachments(attachments))
+        const started = await startChatTurnHonoringMentions(
+          id,
+          body,
+          normalizeAttachments(attachments),
+        )
         if (!started.ok) {
           return { assistantMessageId: started.assistantMessageId, error: 'broker_not_ready' as const }
         }
@@ -6990,7 +7367,9 @@ function registerIpc(): void {
         const active = findPendingTurnForConversation(id)
         if (!active) {
           finalizeOrphanStreamingAssistants(id)
-          const started = await startChatTurn(id, body, normAttachments)
+          // With nothing to interrupt this is an ordinary send, so it honors
+          // mentions like one; only a real steer skips them.
+          const started = await startChatTurnHonoringMentions(id, body, normAttachments)
           return started.ok ? { ok: true as const } : { ok: false as const, error: started.error }
         }
         const followUp = await followUpActiveTurn(id, body, normAttachments, { steer: true })

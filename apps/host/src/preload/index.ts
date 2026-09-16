@@ -1383,7 +1383,55 @@ contextBridge.exposeInMainWorld('sylo', {
       }>,
     agents: () =>
       ipcRenderer.invoke('tasks:agents') as Promise<
-        Array<{ name: string; description: string; source: 'builtin' | 'user' | 'project' }>
+        Array<{
+          name: string
+          description: string
+          source: 'builtin' | 'user' | 'project'
+          tools?: string[]
+          timeoutSeconds?: number
+        }>
+      >,
+    /** Write a user-scope persona under `<pi agent dir>/agents`. */
+    createAgent: (input: {
+      name: string
+      description: string
+      prompt: string
+      tools?: string[]
+      timeoutSeconds?: number
+    }) =>
+      ipcRenderer.invoke('subagents:createAgent', input) as Promise<
+        { ok: true; name: string; filePath: string } | { ok: false; error: string }
+      >,
+    /** Read a user-scope persona back for editing. */
+    readAgent: (name: string) =>
+      ipcRenderer.invoke('subagents:readAgent', name) as Promise<
+        | {
+            ok: true
+            agent: {
+              name: string
+              description: string
+              prompt: string
+              tools?: string[]
+              timeoutSeconds?: number
+              filePath: string
+            }
+          }
+        | { ok: false; error: string }
+      >,
+    /** Overwrite an existing user-scope persona. The name is not editable. */
+    updateAgent: (input: {
+      name: string
+      description: string
+      prompt: string
+      tools?: string[]
+      timeoutSeconds?: number
+    }) =>
+      ipcRenderer.invoke('subagents:updateAgent', input) as Promise<
+        { ok: true; name: string; filePath: string } | { ok: false; error: string }
+      >,
+    deleteAgent: (name: string) =>
+      ipcRenderer.invoke('subagents:deleteAgent', name) as Promise<
+        { ok: true; filePath: string } | { ok: false; error: string }
       >,
     onLifecycle: (cb: (payload: unknown) => void) => {
       const ch = (_e: unknown, payload: unknown) => cb(payload)

@@ -1737,8 +1737,52 @@ declare global {
           extensionEnabled: boolean
         }>
         agents: () => Promise<
-          Array<{ name: string; description: string; source: 'builtin' | 'user' | 'project' }>
+          Array<{
+            name: string
+            description: string
+            source: 'builtin' | 'user' | 'project'
+            /** Frontmatter `tools:`; absent means unrestricted. */
+            tools?: string[]
+            /** Frontmatter `timeout_seconds`; absent means the default. */
+            timeoutSeconds?: number
+          }>
         >
+        /** Write a user-scope persona under `<pi agent dir>/agents`. */
+        createAgent: (input: {
+          name: string
+          description: string
+          prompt: string
+          /** Pi built-in tool ids. Omitted, or all of them, means unrestricted. */
+          tools?: string[]
+          /** Wall-clock kill for a run of this agent. Omitted keeps the default. */
+          timeoutSeconds?: number
+        }) => Promise<{ ok: true; name: string; filePath: string } | { ok: false; error: string }>
+        /** Read a user-scope persona back for editing. */
+        readAgent: (name: string) => Promise<
+          | {
+              ok: true
+              agent: {
+                name: string
+                description: string
+                prompt: string
+                tools?: string[]
+                timeoutSeconds?: number
+                filePath: string
+              }
+            }
+          | { ok: false; error: string }
+        >
+        /** Overwrite an existing user-scope persona. The name is not editable. */
+        updateAgent: (input: {
+          name: string
+          description: string
+          prompt: string
+          tools?: string[]
+          timeoutSeconds?: number
+        }) => Promise<{ ok: true; name: string; filePath: string } | { ok: false; error: string }>
+        deleteAgent: (
+          name: string,
+        ) => Promise<{ ok: true; filePath: string } | { ok: false; error: string }>
         onLifecycle: (cb: (payload: unknown) => void) => () => void
       }
       // ── Agent checkpoints (per-turn undo; storage in app data only) ──

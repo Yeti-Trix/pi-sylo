@@ -38,9 +38,12 @@
     "test:compaction-anchor": "esbuild src/broker/sylo-compaction-anchor.ts --bundle --platform=node --format=esm --outfile=out/test/compaction-anchor.mjs --packages=external && node --test src/broker/sylo-compaction-anchor.test.mjs",
     "test:schedule-recurrence": "esbuild src/shared/schedule-recurrence.ts --bundle --platform=node --format=esm --outfile=out/shared/schedule-recurrence.mjs --packages=external && node src/shared/schedule-recurrence.test.mjs",
     "diagnose:shell": "npm run build:broker && node scripts/diagnose-pi-shell.mjs",
+    "test:subagent-tool-policy": "esbuild src/main/subagent-tool-policy.test.mjs --bundle --platform=node --format=esm --outfile=out/test/subagent-tool-policy.test.mjs --packages=external && node --test out/test/subagent-tool-policy.test.mjs",
+    "test:subagent-agents": "esbuild src/main/subagent-agents.test.mjs --bundle --platform=node --format=esm --outfile=out/test/subagent-agents.test.mjs --packages=external && node --test out/test/subagent-agents.test.mjs",
     "test:global-agents": "esbuild src/main/global-agents.test.mjs --bundle --platform=node --format=esm --outfile=out/test/global-agents.test.mjs --packages=external && node --test out/test/global-agents.test.mjs",
     "test:chatgpt-codex": "esbuild src/shared/chatgpt-codex.ts --bundle --platform=node --format=esm --outfile=out/test/chatgpt-codex.mjs --packages=external && node --test src/shared/chatgpt-codex.test.mjs",
     "test:ask-question": "esbuild src/shared/ask-question.ts --bundle --platform=node --format=esm --outfile=out/test/ask-question.mjs --packages=external && node --test src/shared/ask-question.test.mjs",
+    "test:subagent-mentions": "esbuild src/shared/subagent-mentions.ts --bundle --platform=node --format=esm --outfile=out/test/subagent-mentions.mjs --packages=external && node --test src/shared/subagent-mentions.test.mjs",
     "test:skill-nav-layout": "esbuild src/renderer/src/skill-nav-layout.ts --bundle --platform=node --format=esm --outfile=out/test/skill-nav-layout.mjs --packages=external && node --test src/renderer/src/skill-nav-layout.test.mjs"
   },
   "dependencies": {

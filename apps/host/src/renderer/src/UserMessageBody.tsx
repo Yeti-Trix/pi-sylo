@@ -1,11 +1,53 @@
-import React from 'react'
+import React, { useMemo } from 'react'
+import { splitMentionSegments } from '../../shared/subagent-mentions'
 import { AttachmentImageThumb } from './AttachmentImageThumb'
+import { useSubagentNames } from './chat/useSubagentNames'
 import { isImageAttachmentPath, splitUserMessageAttachments } from './chatUserAttachments'
 import { cn } from './lib/cn'
+import { chatMentionChip, chatMentionChipForced, chatMentionChipRef } from './panels/ui-classes'
 
 type Props = {
   content: string
   localImageUrl?: (path: string) => string | null
+}
+
+/**
+ * Message prose with `@agent` mentions drawn as chips.
+ *
+ * Forced mentions (the leading run) and bare references are styled apart on
+ * purpose: only the leading run invokes anything, so showing them identically
+ * would suggest that naming an agent mid-sentence had run it.
+ */
+function MessageProse({ text }: { text: string }): React.ReactElement {
+  const agentNames = useSubagentNames()
+  const segments = useMemo(() => splitMentionSegments(text, agentNames), [text, agentNames])
+
+  if (!segments.some((s) => s.kind === 'mention')) {
+    return <div className="whitespace-pre-wrap">{text}</div>
+  }
+
+  return (
+    <div className="whitespace-pre-wrap">
+      {segments.map((segment, i) =>
+        segment.kind === 'text' ?
+          <React.Fragment key={i}>{segment.text}</React.Fragment>
+        : <span
+            key={i}
+            className={cn(
+              chatMentionChip,
+              segment.forced ? chatMentionChipForced : chatMentionChipRef,
+            )}
+            title={
+              segment.forced ?
+                `Forced this turn through the ${segment.agent} subagent.`
+              : `Refers to the ${segment.agent} subagent. A mention has to start the message to force a run.`
+            }
+          >
+            {segment.text}
+          </span>,
+      )}
+    </div>
+  )
 }
 
 /** User bubble: prose + visual attachment chips when paths were appended by Sylo. */
@@ -13,14 +55,12 @@ export function UserMessageBody({ content, localImageUrl }: Props): React.ReactE
   const { text, attachments } = splitUserMessageAttachments(content)
 
   if (attachments.length === 0) {
-    return <div className="whitespace-pre-wrap">{content}</div>
+    return <MessageProse text={content} />
   }
 
   return (
     <div className="flex flex-col gap-3">
-      {text ?
-        <div className="whitespace-pre-wrap">{text}</div>
-      : null}
+      {text ? <MessageProse text={text} /> : null}
       <div
         className="overflow-hidden rounded-lg border border-accent/[0.28] bg-accent/[0.07]"
         aria-label="Attached files"

@@ -3,6 +3,7 @@ import React, {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from 'react'
@@ -15,6 +16,10 @@ import {
 } from '../chatUserAttachments'
 import { cn } from '../lib/cn'
 import {
+  applyMentionCompletion,
+  mentionQueryAtCaret,
+} from '../../../shared/subagent-mentions'
+import {
   chatAttachmentChip,
   chatAttachmentChipGlyph,
   chatAttachmentChipImage,
@@ -26,6 +31,11 @@ import {
   chatInputRow,
   chatInputSendBtn,
   chatInputTextarea,
+  chatMentionDesc,
+  chatMentionItem,
+  chatMentionItemActive,
+  chatMentionName,
+  chatMentionPicker,
   chatQueueIndex,
   chatQueueItem,
   chatQueueItemDragging,
@@ -40,6 +50,17 @@ export type QueuedComposerMessage = {
   text: string
   attachments?: { path: string; name: string }[]
 }
+
+type SubagentPickerAgent = {
+  name: string
+  description: string
+  source: 'builtin' | 'user' | 'project'
+}
+
+type MentionSpan = { query: string; start: number; end: number }
+
+/** Keep the picker short enough that it never swallows the transcript. */
+const MENTION_PICKER_LIMIT = 8
 
 export type ChatComposerHandle = {
   prefill: (text: string) => void
@@ -99,6 +120,9 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
   const [messageQueue, setMessageQueue] = useState<QueuedComposerMessage[]>([])
   const [queueDragId, setQueueDragId] = useState<string | null>(null)
   const [composerDragOver, setComposerDragOver] = useState(false)
+  const [mentionAgents, setMentionAgents] = useState<SubagentPickerAgent[]>([])
+  const [mentionSpan, setMentionSpan] = useState<MentionSpan | null>(null)
+  const [mentionIndex, setMentionIndex] = useState(0)
   const composerBusyRef = useRef(false)
   const [composerBusy, setComposerBusy] = useState(false)
   const prevSendingRef = useRef(false)
@@ -108,12 +132,66 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
   useImperativeHandle(ref, () => ({
     prefill: (text: string) => {
       setInput(text)
+      setMentionSpan(null)
       requestAnimationFrame(() => textareaRef.current?.focus())
     },
     focus: () => {
       textareaRef.current?.focus()
     },
   }))
+
+  // Personas available for `@mention`. Re-read per conversation because agent
+  // scope (and therefore project `.pi/agents`) follows the chat's workspace.
+  useEffect(() => {
+    let cancelled = false
+    void window.sylo.tasks
+      .agents()
+      .then((list) => {
+        if (!cancelled) setMentionAgents(list)
+      })
+      .catch(() => {
+        /* picker is optional — typing the full name still works */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [activeId])
+
+  const mentionMatches = useMemo(() => {
+    if (!mentionSpan) return []
+    const q = mentionSpan.query.toLowerCase()
+    const pool = q ? mentionAgents.filter((a) => a.name.toLowerCase().includes(q)) : mentionAgents
+    return [...pool]
+      .sort((a, b) => {
+        const aPrefix = a.name.toLowerCase().startsWith(q) ? 0 : 1
+        const bPrefix = b.name.toLowerCase().startsWith(q) ? 0 : 1
+        return aPrefix - bPrefix || a.name.localeCompare(b.name)
+      })
+      .slice(0, MENTION_PICKER_LIMIT)
+  }, [mentionAgents, mentionSpan])
+
+  const mentionOpen = mentionSpan !== null && mentionMatches.length > 0 && !safeMode && !inputLocked
+
+  const syncMentionSpan = useCallback((text: string, caret: number | null) => {
+    setMentionSpan(caret == null ? null : mentionQueryAtCaret(text, caret))
+    setMentionIndex(0)
+  }, [])
+
+  const acceptMention = useCallback(
+    (agentName: string) => {
+      if (!mentionSpan) return
+      const next = applyMentionCompletion(input, mentionSpan, agentName)
+      setInput(next.text)
+      setMentionSpan(null)
+      requestAnimationFrame(() => {
+        const el = textareaRef.current
+        if (!el) return
+        el.focus()
+        el.setSelectionRange(next.caret, next.caret)
+      })
+    },
+    [input, mentionSpan],
+  )
 
     // Per-conversation draft persistence. Typed-but-unsent text + staged
   // attachments are stashed in the module-scoped `composerDrafts` map so they
@@ -136,6 +214,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
     const d = activeId ? composerDrafts.get(activeId) : undefined
     setInput(d?.input ?? '')
     setChatAttachments(d?.attachments ?? [])
+    setMentionSpan(null)
     setMessageQueue([])
     setQueueDragId(null)
   }, [activeId, input, chatAttachments])
@@ -192,6 +271,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
   const submitComposer = useCallback(
     async (mode: 'send' | 'queue' | 'steer') => {
       if (!activeId || safeMode || !agentReady || inputLocked) return
+      setMentionSpan(null)
       const trimmed = input.trim()
       if (!trimmed && chatAttachments.length === 0) return
 
@@ -479,14 +559,62 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
           ))}
         </div>
       : null}
-      <div className={chatInputRow}>
+      <div className={cn(chatInputRow, 'relative')}>
+        {mentionOpen ?
+          <div className={chatMentionPicker} role="listbox" aria-label="Subagents">
+            {mentionMatches.map((agent, index) => (
+              <button
+                key={agent.name}
+                type="button"
+                role="option"
+                aria-selected={index === mentionIndex}
+                className={cn(chatMentionItem, index === mentionIndex && chatMentionItemActive)}
+                // The textarea would blur before onClick fires, closing the picker.
+                onMouseDown={(e) => e.preventDefault()}
+                onMouseEnter={() => setMentionIndex(index)}
+                onClick={() => acceptMention(agent.name)}
+              >
+                <span className={chatMentionName}>@{agent.name}</span>
+                <span className={chatMentionDesc}>{agent.description}</span>
+              </button>
+            ))}
+          </div>
+        : null}
         <textarea
           ref={textareaRef}
           className={chatInputTextarea}
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            setInput(e.target.value)
+            syncMentionSpan(e.target.value, e.target.selectionStart)
+          }}
+          onBlur={() => setMentionSpan(null)}
           onPaste={(e) => void handleComposerPaste(e)}
           onKeyDown={(e) => {
+            // Mid-IME composition, Enter commits the candidate text — stealing
+            // it for the mention picker would discard what was being typed.
+            if (mentionOpen && !e.nativeEvent.isComposing) {
+              if (e.key === 'ArrowDown') {
+                e.preventDefault()
+                setMentionIndex((i) => (i + 1) % mentionMatches.length)
+                return
+              }
+              if (e.key === 'ArrowUp') {
+                e.preventDefault()
+                setMentionIndex((i) => (i - 1 + mentionMatches.length) % mentionMatches.length)
+                return
+              }
+              if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault()
+                acceptMention((mentionMatches[mentionIndex] ?? mentionMatches[0]!).name)
+                return
+              }
+              if (e.key === 'Escape') {
+                e.preventDefault()
+                setMentionSpan(null)
+                return
+              }
+            }
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
               const immediate = e.ctrlKey || e.metaKey
@@ -511,7 +639,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
               'Waiting for Pi broker…'
             : activeSending ?
               'Queue a follow-up… (Enter = queue, Ctrl+Enter = send now)'
-            : 'Message… (drop files or paste images; `/mcp reconnect`, `/reload`, …)'
+            : 'Message… (`@agent` forces a subagent; drop files or paste images; `/mcp reconnect`, …)'
           }
           disabled={safeMode || (inputLocked && !onThinkTankInject)}
         />

@@ -1086,6 +1086,34 @@ export const chatAttachmentChipName =
 export const chatAttachmentChipRemove =
   'shrink-0 cursor-pointer rounded border-none bg-transparent px-1 py-0 text-base leading-none text-text-secondary hover:bg-[rgb(255_255_255/0.06)] hover:text-text-primary'
 
+/** `@agent` mention picker, floated above the composer input row. */
+export const chatMentionPicker =
+  'absolute bottom-full left-5 right-5 z-20 mb-1 max-h-[220px] overflow-y-auto rounded-xl border border-border bg-bg-tertiary py-1 shadow-lg'
+
+export const chatMentionItem =
+  'flex w-full cursor-pointer items-baseline gap-2 border-0 bg-transparent px-3 py-1.5 text-left'
+
+export const chatMentionItemActive = 'bg-accent/12'
+
+export const chatMentionName = 'shrink-0 font-mono text-[0.82rem] text-accent'
+
+export const chatMentionDesc =
+  'min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-[0.76rem] text-text-secondary'
+
+/**
+ * `@agent` chip inside a sent message. `inline-block` keeps it from breaking
+ * the surrounding `whitespace-pre-wrap` layout.
+ */
+export const chatMentionChip =
+  'mx-px inline-block rounded-md border px-1.5 py-px font-mono text-[0.85em] leading-snug'
+
+/** Mentions that actually forced the turn (the leading run). */
+export const chatMentionChipForced = 'border-accent/45 bg-accent/[0.18] text-accent'
+
+/** A mention further into the prose — names an agent without invoking it. */
+export const chatMentionChipRef =
+  'border-border bg-[rgb(255_255_255/0.05)] text-text-secondary'
+
 /** Cursor-style composer: one rounded field holding the textarea + send.
  *  Queue/attachment strips float above it (no border-t). */
 export const chatInputRow =

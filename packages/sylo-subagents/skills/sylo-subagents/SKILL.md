@@ -21,6 +21,18 @@ Optional fields in `~/.pi/agent/agents/*.md` (or project `.pi/agents/*.md` when 
 
 Bundled agents (scout, planner, worker, reviewer) ship with output sections in their body text.
 
+## Operator-forced runs (`@mention`)
+
+The operator can start a message with `@planner`, `@scout …` (chained left to right). Those agents run
+**before your turn begins**, on their pinned models — you did not choose them and cannot skip them.
+
+When a turn arrives carrying `<subagent_output …>` blocks: that work is **done**. Report it and act on it.
+Do **not** re-run the same agents through `subagent` to "check" it, and do not silently redo the work
+yourself. If a block says `status="failed"`, say so plainly rather than substituting your own answer.
+
+You still decide delegation on your own for every turn *without* mentions — that is what the rest of this
+skill is about.
+
 ## When to delegate
 
 Use `subagent` when:
@@ -64,12 +76,22 @@ Runs appear **inline in chat** under each `subagent` tool row (expand the block)
 
 ## Builtin agents
 
-| Agent | Use for |
-|-------|---------|
-| scout | Fast codebase recon |
-| planner | Implementation plan (read-only) |
-| worker | Implementation |
-| reviewer | Code review |
+| Agent | Use for | Must be handed |
+|-------|---------|----------------|
+| scout | Fast codebase recon | A specific question to answer |
+| planner | Implementation plan (read-only) | Goal + constraints |
+| worker | Implementation | A decided approach — a plan, or a concrete change |
+| reviewer | Code review | What changed and what to check |
+
+`worker` implements; it does not decide *what* to build. Handing it an open objective
+("improve the renderer") makes it plan first and burn its context there instead of
+doing the work. Either run `planner` ahead of it and pass that plan as the worker's
+task, or state the change concretely yourself. In a chain, `{previous}` carries the
+plan into the worker step — prefer `chain: [{ agent: "planner" … }, { agent: "worker",
+task: "Implement {previous}" }]` over sending the raw objective to `worker`.
+
+The same applies in reverse: do not ask `planner` or `reviewer` to make edits. They
+are read-only and will refuse.
 
 Child subprocesses use the **same provider + model** as Sylo **Settings → Model** (orchestrator). Per-agent `model:` frontmatter is ignored so children do not fall back to Pi `settings.json` defaults.
 

@@ -15,12 +15,39 @@ import { Type } from 'typebox'
 
 import { type AgentConfig, type AgentScope, discoverAgents } from './agents.ts'
 import { resolvePiSpawn } from './pi-cli.ts'
+import { resolveSubagentToolPolicy, toolCliArgs } from './pi-tool-policy.ts'
 import { subagentModelCliArgs } from './subagent-model.ts'
 import { cancelSubagentRun, consumeRunCancelled, registerSubagentRun, unregisterSubagentRun } from './subagent-run-registry.ts'
 import { resolveSubagentTimeoutMs } from './subagent-timeout.ts'
 import { newSubagentRunId, notifySyloSubagent, type SyloSubagentRunMode } from './sylo-host.ts'
 
 export { cancelAllSubagentRuns, cancelSubagentRun } from './subagent-run-registry.ts'
+
+/**
+ * Task text for a chain step that follows another agent.
+ *
+ * Labelling the previous step's output neutrally was not enough: handed a plan as
+ * unlabelled "prior output", a worker treats it as reference material and starts
+ * planning again. The handoff has to state that the earlier step is finished and
+ * that this agent's job is its own role only.
+ */
+function chainStepTask(task: string, previous: { agent: string; output: string }): string {
+  return [
+    task,
+    '---',
+    `The \`${previous.agent}\` subagent already ran on this request and produced the output below. That step is DONE and its output is authoritative.`,
+    `Do not redo, redesign, or restate it. Apply your own role to the request using it.`,
+    `<${previous.agent}_output>\n${previous.output.trim()}\n</${previous.agent}_output>`,
+  ].join('\n\n')
+}
+
+/**
+ * Thrown by `runSingleAgent` only after it has already emitted a `cancelled`
+ * lifecycle event. Shared with the callers so "the operator stopped this" can be
+ * told apart from a genuine failure — `runSingleAgent` also throws for setup
+ * errors (temp-file write, a synchronous spawn failure).
+ */
+const SUBAGENT_ABORTED_MESSAGE = 'Subagent was aborted'
 
 const MAX_PARALLEL_TASKS = 8
 const MAX_CONCURRENCY = 4
@@ -72,7 +99,28 @@ function resolveDefaultAgentScope(): AgentScope {
   return 'user'
 }
 
-const BUNDLED_AGENTS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'agents')
+const SOURCE_RELATIVE_AGENTS_DIR = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'agents',
+)
+
+/**
+ * Directory holding the bundled personas (scout/planner/worker/reviewer).
+ *
+ * `import.meta.url` only points at this package when Pi loads the extension from
+ * source. The host also imports this module into the broker bundle to drive
+ * operator-forced runs, and there the source-relative guess lands in the build
+ * output directory — so prefer the extension path the host publishes.
+ */
+function resolveBundledAgentsDir(): string {
+  const ext = process.env.SYLO_SUBAGENTS_EXTENSION?.trim()
+  if (ext) {
+    const candidate = path.join(path.dirname(path.dirname(ext)), 'agents')
+    if (fs.existsSync(candidate)) return candidate
+  }
+  return SOURCE_RELATIVE_AGENTS_DIR
+}
 
 interface UsageStats {
   input: number
@@ -251,9 +299,34 @@ async function runSingleAgent(
     return result
   }
 
+  // The child never loads Sylo's capability guard, so the operator's Capability
+  // manager policy has to be turned into a `--tools` allowlist here or it simply
+  // would not apply inside a subagent.
+  const toolPolicy = resolveSubagentToolPolicy({ ...(agent.tools ? { agentTools: agent.tools } : {}) })
+  if (toolPolicy.kind === 'blocked') {
+    const result: SingleResult = {
+      agent: agentName,
+      agentSource: agent.source,
+      task,
+      exitCode: 1,
+      messages: [],
+      stderr: `Cannot run "${agentName}": ${toolPolicy.reason}`,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+      step,
+      runId,
+    }
+    notifySyloSubagent({
+      type: 'subagent_run_end',
+      runId,
+      status: 'failed',
+      error: result.stderr,
+    })
+    return result
+  }
+
   const args: string[] = ['--mode', 'json', '-p', '--no-session']
   args.push(...subagentModel.args)
-  if (agent.tools && agent.tools.length > 0) args.push('--tools', agent.tools.join(','))
+  args.push(...toolCliArgs(toolPolicy.tools))
 
   let tmpPromptDir: string | null = null
   let tmpPromptPath: string | null = null
@@ -486,9 +559,9 @@ async function runSingleAgent(
         type: 'subagent_run_end',
         runId,
         status: 'cancelled',
-        error: 'Subagent was aborted',
+        error: SUBAGENT_ABORTED_MESSAGE,
       })
-      throw new Error('Subagent was aborted')
+      throw new Error(SUBAGENT_ABORTED_MESSAGE)
     }
 
     const failed = isFailedResult(currentResult)
@@ -525,6 +598,98 @@ async function runSingleAgent(
       }
     }
   }
+}
+
+export type ForcedSubagentOutcome = {
+  agent: string
+  model?: string
+  status: 'succeeded' | 'failed' | 'cancelled'
+  output: string
+}
+
+/**
+ * Run agents without going through the `subagent` tool.
+ *
+ * The tool path is the orchestrator delegating by its own judgment, which it is
+ * free to skip. This is the operator forcing the delegation with an `@mention`:
+ * the host drives the run itself so a pinned persona model is guaranteed to do
+ * the work. Lifecycle events are identical, so the runs strip, the Tasks
+ * dashboard, and per-run cancel all keep working.
+ */
+export async function runForcedSubagentChain(opts: {
+  cwd: string
+  agentNames: string[]
+  task: string
+  agentScope?: AgentScope
+  signal?: AbortSignal
+}): Promise<ForcedSubagentOutcome[]> {
+  const { cwd, agentNames, task, signal } = opts
+  const agentScope = opts.agentScope ?? resolveDefaultAgentScope()
+  const { agents, projectAgentsDir } = discoverAgents(cwd, agentScope, {
+    bundledAgentsDir: resolveBundledAgentsDir(),
+  })
+  const mode: SyloSubagentRunMode = agentNames.length > 1 ? 'chain' : 'single'
+  const makeDetails = (results: SingleResult[]): SubagentDetails => ({
+    mode,
+    agentScope,
+    projectAgentsDir,
+    results,
+  })
+
+  const outcomes: ForcedSubagentOutcome[] = []
+  const groupRunId = newSubagentRunId()
+  let parentRunId: string | undefined
+  let previous: { agent: string; output: string } | undefined
+
+  for (let i = 0; i < agentNames.length; i++) {
+    const agentName = agentNames[i]!
+    const stepTask = previous ? chainStepTask(task, previous) : task
+    const runId = newSubagentRunId()
+
+    let result: SingleResult
+    try {
+      result = await runSingleAgent(
+        cwd,
+        agents,
+        agentName,
+        stepTask,
+        undefined,
+        agentNames.length > 1 ? i + 1 : undefined,
+        signal,
+        undefined,
+        makeDetails,
+        mode,
+        runId,
+        groupRunId,
+        parentRunId,
+      )
+    } catch (e) {
+      // Only an abort has already reported itself as `cancelled`; anything else
+      // is a real failure, and calling it "cancelled" told the operator they
+      // had stopped the run while hiding the actual error.
+      const detail = e instanceof Error ? e.message : String(e)
+      const stopped = signal?.aborted === true || detail === SUBAGENT_ABORTED_MESSAGE
+      outcomes.push(
+        stopped ?
+          { agent: agentName, status: 'cancelled', output: 'Run was cancelled.' }
+        : { agent: agentName, status: 'failed', output: `Subagent failed to start: ${detail}` },
+      )
+      return outcomes
+    }
+
+    const output = getResultOutput(result)
+    if (isFailedResult(result)) {
+      outcomes.push({ agent: agentName, model: result.model, status: 'failed', output })
+      // Later steps consume earlier output, so a failed step makes the rest meaningless.
+      return outcomes
+    }
+
+    outcomes.push({ agent: agentName, model: result.model, status: 'succeeded', output })
+    parentRunId = runId
+    previous = { agent: agentName, output }
+  }
+
+  return outcomes
 }
 
 const TaskItem = Type.Object({
@@ -583,7 +748,9 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const agentScope: AgentScope = params.agentScope ?? resolveDefaultAgentScope()
-      const discovery = discoverAgents(ctx.cwd, agentScope, { bundledAgentsDir: BUNDLED_AGENTS_DIR })
+      const discovery = discoverAgents(ctx.cwd, agentScope, {
+        bundledAgentsDir: resolveBundledAgentsDir(),
+      })
       const agents = discovery.agents
       const confirmProjectAgents = params.confirmProjectAgents ?? true
       const contextPacket = params.context
