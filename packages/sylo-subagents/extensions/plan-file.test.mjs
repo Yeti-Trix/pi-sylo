@@ -14,9 +14,13 @@ import {
   hideFinishedPlan,
   isPlannerAgentName,
   isReviewerAgentName,
+  isWorkerAgentName,
+  markGoalsBuilt,
   markPlanReviewed,
   readPlanMarkdown,
   removeCurrentPlan,
+  reopenFailedGoals,
+  resolveRunGoals,
   restorePlan,
   retractForeignCurrentPlan,
   tickReviewedGoals,
@@ -43,6 +47,9 @@ describe('agent name match', () => {
     assert.equal(isReviewerAgentName('reviewer'), true)
     assert.equal(isReviewerAgentName('security-reviewer'), true)
     assert.equal(isReviewerAgentName('planner'), false)
+    assert.equal(isWorkerAgentName('worker'), true)
+    assert.equal(isWorkerAgentName('ui_worker'), true)
+    assert.equal(isWorkerAgentName('reviewer'), false)
   })
 })
 
@@ -198,6 +205,120 @@ describe('conversation-scoped plan file', () => {
     assert.equal(tickReviewedGoals(cwd, 'conv-2', 'all'), false, 'other chats are untouched')
   })
 
+  test('a worker marks its section built; only a review closes it', () => {
+    const cwd = scratch()
+    writeCurrentPlan(cwd, '# A\n\n## [ ] One\nOpen.\n\n## [ ] Two\nOpen.\n', {
+      conversationId: 'conv-1',
+    })
+    assert.equal(markGoalsBuilt(cwd, 'conv-1', ['One']), true)
+    let todos = parsePlanTodos(readPlanMarkdown(cwd, 'conv-1') ?? '')
+    assert.deepEqual(
+      todos.map((t) => t.state),
+      ['built', 'open'],
+    )
+    assert.equal(markPlanReviewed(cwd, 'conv-1'), false, 'built is not reviewed')
+
+    assert.equal(tickReviewedGoals(cwd, 'conv-1', ['One']), true)
+    todos = parsePlanTodos(readPlanMarkdown(cwd, 'conv-1') ?? '')
+    assert.deepEqual(
+      todos.map((t) => t.state),
+      ['passed', 'open'],
+    )
+  })
+
+  test('a failed review reopens the section it judged', () => {
+    const cwd = scratch()
+    writeCurrentPlan(cwd, '# A\n\n## [ ] One\nOpen.\n', { conversationId: 'conv-1' })
+    markGoalsBuilt(cwd, 'conv-1', ['One'])
+    assert.equal(reopenFailedGoals(cwd, 'conv-1', ['One']), true)
+    assert.equal(parsePlanTodos(readPlanMarkdown(cwd, 'conv-1') ?? '')[0].state, 'open')
+  })
+
+  test('all boxes built but never reviewed keeps the plan open and visible', () => {
+    // The operator's rule: nothing retires a plan except a reviewer.
+    const cwd = scratch()
+    writeCurrentPlan(cwd, '# A\n\n## [ ] One\nOpen.\n\n## [ ] Two\nOpen.\n', {
+      conversationId: 'conv-1',
+    })
+    markGoalsBuilt(cwd, 'conv-1', ['One', 'Two'])
+    assert.equal(markPlanReviewed(cwd, 'conv-1'), false)
+    assert.equal(hideFinishedPlan(cwd, 'conv-1'), false, 'an unreviewed plan is never hidden')
+    assert.ok(readPlanMarkdown(cwd, 'conv-1'))
+  })
+
+  test('every box ticked without a review still does not finish the plan', () => {
+    const cwd = scratch()
+    writeCurrentPlan(cwd, '# A\n\n## [x] One\nDone.\n\n## [x] Two\nDone.\n', {
+      conversationId: 'conv-1',
+    })
+    assert.equal(hideFinishedPlan(cwd, 'conv-1'), false)
+    assert.ok(readPlanMarkdown(cwd, 'conv-1'), 'survives a crash so it can be resumed')
+  })
+
+  describe('resolveRunGoals', () => {
+    // The orchestrator does not pass `goal` — in a real session every single run
+    // arrived without one, so a passing review was read as covering the whole plan
+    // and a half-done plan could never tick anything. The goal is resolved here.
+    function plan() {
+      const cwd = scratch()
+      writeCurrentPlan(cwd, '# A\n\n## [ ] One\nOpen.\n\n## [ ] Two\nOpen.\n', {
+        conversationId: 'conv-1',
+      })
+      return cwd
+    }
+
+    test('a named goal wins when it matches a heading', () => {
+      const cwd = plan()
+      assert.deepEqual(resolveRunGoals(cwd, 'conv-1', 'worker', 'Two'), ['Two'])
+      assert.deepEqual(resolveRunGoals(cwd, 'conv-1', 'worker', 'two.'), ['Two'])
+    })
+
+    test('a goal the plan does not contain falls back to inference', () => {
+      // The orchestrator invents its own names ("S3 maps"); silently ticking
+      // nothing is how a run reaches the end with an untouched plan.
+      const cwd = plan()
+      assert.deepEqual(resolveRunGoals(cwd, 'conv-1', 'worker', 'S3 maps'), ['One'])
+    })
+
+    test('a worker is building the first open section', () => {
+      const cwd = plan()
+      assert.deepEqual(resolveRunGoals(cwd, 'conv-1', 'worker'), ['One'])
+      markGoalsBuilt(cwd, 'conv-1', ['One'])
+      assert.deepEqual(resolveRunGoals(cwd, 'conv-1', 'worker'), ['Two'])
+    })
+
+    test('a reviewer is judging the first built section, not the whole plan', () => {
+      const cwd = plan()
+      markGoalsBuilt(cwd, 'conv-1', ['One'])
+      assert.deepEqual(resolveRunGoals(cwd, 'conv-1', 'reviewer'), ['One'])
+      tickReviewedGoals(cwd, 'conv-1', ['One'])
+      markGoalsBuilt(cwd, 'conv-1', ['Two'])
+      assert.deepEqual(resolveRunGoals(cwd, 'conv-1', 'reviewer'), ['Two'])
+    })
+
+    test('a reviewer with nothing built judges the first unfinished section', () => {
+      const cwd = plan()
+      assert.deepEqual(resolveRunGoals(cwd, 'conv-1', 'reviewer'), ['One'])
+    })
+
+    test('no plan means nothing to mark', () => {
+      const cwd = plan()
+      assert.deepEqual(resolveRunGoals(cwd, 'conv-2', 'worker'), [])
+      assert.equal(markGoalsBuilt(cwd, 'conv-1', []), false)
+    })
+
+    test('a hidden plan is not marked by unrelated later work', () => {
+      // The operator moved on; a worker running now is doing something else, and
+      // guessing a section would tick work nobody did.
+      const cwd = plan()
+      tickReviewedGoals(cwd, 'conv-1', 'all')
+      markPlanReviewed(cwd, 'conv-1')
+      hideFinishedPlan(cwd, 'conv-1')
+      assert.deepEqual(resolveRunGoals(cwd, 'conv-1', 'worker'), [])
+      assert.deepEqual(resolveRunGoals(cwd, 'conv-1', 'reviewer'), [])
+    })
+  })
+
   test('a review with goals still open is not sign-off', () => {
     // The reviewer's own verdict here is "incomplete" — badging the plan reviewed
     // told the operator the work was done while every goal sat unticked.
@@ -209,15 +330,6 @@ describe('conversation-scoped plan file', () => {
     const text = readPlanMarkdown(cwd, 'conv-1') ?? ''
     assert.match(text, /status: active/)
     assert.equal(hideFinishedPlan(cwd, 'conv-1'), false, 'unfinished work stays on the bar')
-  })
-
-  test('next send hides a fully ticked plan even without a review', () => {
-    const cwd = scratch()
-    writeCurrentPlan(cwd, '# A\n\n## [x] One\nDone.\n\n## [x] Two\nDone.\n', {
-      conversationId: 'conv-1',
-    })
-    assert.equal(hideFinishedPlan(cwd, 'conv-1'), true)
-    assert.match(readPlanMarkdown(cwd, 'conv-1') ?? '', /hidden: true/)
   })
 
   test('unscoped current.md is never returned to a named conversation', () => {

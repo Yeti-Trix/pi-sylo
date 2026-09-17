@@ -1,5 +1,7 @@
 import type { ChildProcess } from 'node:child_process'
 
+import { isProcAlive, killSubagentTree } from './subagent-kill.ts'
+
 const active = new Map<string, ChildProcess>()
 const cancelledRuns = new Set<string>()
 
@@ -18,28 +20,20 @@ export function consumeRunCancelled(runId: string): boolean {
   return true
 }
 
-function killProc(proc: ChildProcess): void {
-  if (proc.killed) return
-  proc.kill('SIGTERM')
-  setTimeout(() => {
-    if (!proc.killed) proc.kill('SIGKILL')
-  }, 5000)
-}
-
 /** Kill a child Pi subprocess by run id. Returns true if a live run was found. */
 export function cancelSubagentRun(runId: string): boolean {
   const proc = active.get(runId)
   if (!proc) return false
   cancelledRuns.add(runId)
-  killProc(proc)
+  killSubagentTree(proc)
   return true
 }
 
 export function cancelAllSubagentRuns(): number {
   let count = 0
   for (const [runId, proc] of active) {
-    if (!proc.killed) {
-      killProc(proc)
+    if (isProcAlive(proc)) {
+      killSubagentTree(proc)
       count++
     }
     active.delete(runId)

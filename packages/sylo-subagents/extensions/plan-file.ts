@@ -10,12 +10,18 @@ import { join, relative } from 'node:path'
 import {
   ensureSectionGoals,
   isPlanFinished,
+  nextGoalToBuild,
+  nextGoalToReview,
+  nextOpenGoal,
   parsePlanConversationId,
   parsePlanHidden,
   parsePlanStatus,
+  parsePlanTodos,
   planBodyWithoutFrontmatter,
   planGoalsComplete,
-  tickPlanGoals,
+  sameGoalTitle,
+  setPlanGoalStates,
+  type PlanGoalState,
   type PlanStatus,
 } from './plan-checklist.ts'
 
@@ -30,6 +36,11 @@ export function isPlannerAgentName(name: string): boolean {
 export function isReviewerAgentName(name: string): boolean {
   const n = name.trim().toLowerCase()
   return n === 'reviewer' || n.endsWith('-reviewer') || n.endsWith('_reviewer')
+}
+
+export function isWorkerAgentName(name: string): boolean {
+  const n = name.trim().toLowerCase()
+  return n === 'worker' || n.endsWith('-worker') || n.endsWith('_worker')
 }
 
 export function isSafePlanConversationId(id: string): boolean {
@@ -139,6 +150,80 @@ export function writeCurrentPlan(
 }
 
 /**
+ * Which goal a finished run was actually about.
+ *
+ * The orchestrator is supposed to pass the heading, and in practice it does not: every
+ * run in a real session arrived with no `goal` at all, which meant a passing review was
+ * read as covering the whole plan and a half-done plan could therefore never tick
+ * anything. So the heading is resolved here instead, from the protocol the plan itself
+ * describes — sections in file order, one at a time:
+ *
+ *  - a `worker` was building the first `open` section,
+ *  - a `reviewer` was judging the first `built` section.
+ *
+ * A heading the orchestrator did pass wins, but only if it matches a real goal; its own
+ * invented section names ("S3 maps") must not silently tick nothing.
+ */
+export function resolveRunGoals(
+  cwd: string,
+  conversationId: string,
+  role: 'worker' | 'reviewer',
+  goal?: string,
+): readonly string[] {
+  const raw = readPlanMarkdown(cwd, conversationId)
+  if (!raw) return []
+  // A hidden plan is finished history the operator has moved past, so a run happening
+  // now is not building its sections — inferring one would mark work that never happened.
+  if (parsePlanHidden(raw)) return []
+  const todos = parsePlanTodos(raw)
+  const named = goal?.trim()
+  if (named) {
+    const match = todos.find((t) => sameGoalTitle(t.text, named))
+    if (match) return [match.text]
+  }
+  const inferred = role === 'worker' ? nextGoalToBuild(raw) : nextGoalToReview(raw)
+  // A reviewer with nothing built to judge is reviewing whatever was worked last.
+  const fallback = inferred ?? (role === 'reviewer' ? nextOpenGoal(raw) : undefined)
+  return fallback ? [fallback.text] : []
+}
+
+function writeGoalStates(
+  cwd: string,
+  conversationId: string,
+  goals: readonly string[] | 'all',
+  state: PlanGoalState,
+): boolean {
+  if (!cwd.trim() || !isSafePlanConversationId(conversationId)) return false
+  if (goals !== 'all' && goals.length === 0) return false
+  const convId = conversationId.trim()
+  const abs = conversationPlanAbs(cwd, convId)
+  const raw = readIfExists(abs)
+  if (!raw) return false
+  const next = setPlanGoalStates(raw, goals, state)
+  if (next === raw) return false
+  try {
+    writeFileSync(abs, next, 'utf8')
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * A worker finished a section: mark it built, pending review.
+ *
+ * This is the write that makes a crash survivable. It is not sign-off — only a
+ * reviewer's PASS closes a goal, and only that can finish the plan.
+ */
+export function markGoalsBuilt(
+  cwd: string,
+  conversationId: string,
+  goals: readonly string[],
+): boolean {
+  return writeGoalStates(cwd, conversationId, goals, 'built')
+}
+
+/**
  * Close goals a review passed. `goals` names the reviewed sections; `'all'` is a
  * whole-plan review. Returns true when the file changed.
  */
@@ -147,19 +232,16 @@ export function tickReviewedGoals(
   conversationId: string,
   goals: readonly string[] | 'all',
 ): boolean {
-  if (!cwd.trim() || !isSafePlanConversationId(conversationId)) return false
-  const convId = conversationId.trim()
-  const abs = conversationPlanAbs(cwd, convId)
-  const raw = readIfExists(abs)
-  if (!raw) return false
-  const next = tickPlanGoals(raw, goals)
-  if (next === raw) return false
-  try {
-    writeFileSync(abs, next, 'utf8')
-    return true
-  } catch {
-    return false
-  }
+  return writeGoalStates(cwd, conversationId, goals, 'passed')
+}
+
+/** A review failed: send the section back for work so it is dispatched again. */
+export function reopenFailedGoals(
+  cwd: string,
+  conversationId: string,
+  goals: readonly string[],
+): boolean {
+  return writeGoalStates(cwd, conversationId, goals, 'open')
 }
 
 /** Rewrite only the frontmatter, carrying over whatever the patch does not set. */

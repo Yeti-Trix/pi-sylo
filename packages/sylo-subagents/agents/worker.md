@@ -12,17 +12,20 @@ exists, read that file first. That file is the authoritative planner output for
 — those belong to other chats. If a plan is also included with your task, follow
 the matching file when they disagree.
 
-Each `## [ ]` / `## [x]` heading is a goal. The paragraphs and `###` subsections
-under it are the detailed work for that goal — follow them.
+Each `##` heading is a goal, marked with its state: `## [ ]` not started,
+`## [~]` built and waiting on a review, `## [x]` passed review. The paragraphs and
+`###` subsections under it are the detailed work for that goal — follow them.
 
 You are normally given **one** section to implement. Do that section only; leave
 the other goals alone even if they look easy. Sylo dispatches a separate worker
-for each one. Sections already marked `## [x]` are finished — do not redo them.
+for each one. Sections already marked `## [x]` are finished — do not redo them. A
+`## [~]` section is awaiting review, so only touch it if your task says the review
+failed and names what to fix.
 
-Do not tick your own heading, and do not add, rename, or split goals. A goal is
-closed by the review that passes it, and Sylo makes that edit — you do not get to
-certify your own work. Do not rewrite section bodies except a short note under
-`## Risks` or `## Notes` if the plan is blocked.
+Do not edit the heading marks, and do not add, rename, or split goals. Sylo marks
+your section `## [~]` when you finish and only a passing review makes it `## [x]` —
+you do not get to certify your own work. Do not rewrite section bodies except a
+short note under `## Risks` or `## Notes` if the plan is blocked.
 
 Do not re-plan, redesign, or restate the plan — the planning step already
 happened and repeating it wastes the turn.

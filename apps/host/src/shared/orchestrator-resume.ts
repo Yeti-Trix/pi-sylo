@@ -79,9 +79,15 @@ export const PLAN_SCOPE_TAG = 'sylo_plan_scope'
 export type PlanScope = {
   /** Workspace-relative path to THIS chat's plan, or null when it has none. */
   planRel: string | null
+  /** Goals a reviewer has passed. */
   done: number
   total: number
+  /** Goals a worker built that no reviewer has judged yet. */
+  built?: number
+  /** First section still needing a worker. */
   nextGoal?: string
+  /** First built section still needing a review. */
+  nextReview?: string
   /** On disk but off the goals bar: the operator moved on after it finished. */
   hidden?: boolean
 }
@@ -102,18 +108,24 @@ function planProgressDirectives(scope: PlanScope): string[] {
       `This chat has a finished plan at \`${scope.planRel}\` (${scope.done}/${scope.total} goals done) from earlier work. The operator has moved past it, so it is off their goals bar. Treat the request above as new work and do NOT re-run those goals. If the operator asks to continue that plan, Sylo puts it back and reports its progress here.`,
     ]
   }
+  const built = scope.built ?? 0
   const out = [
-    `This chat's plan is \`${scope.planRel}\` (${scope.done}/${scope.total} goals done). Follow only that file; other files in \`.sylo/plans/\` belong to other chats.`,
-    'Never edit the plan file yourself. Sylo ticks a goal when that section\'s `reviewer` replies `VERDICT: PASS`, so pass `goal` (the exact `##` heading text) on every subagent step.',
+    `This chat's plan is \`${scope.planRel}\`: ${scope.done}/${scope.total} goals passed review${built > 0 ? `, ${built} built and awaiting review` : ''}. Follow only that file; other files in \`.sylo/plans/\` belong to other chats.`,
+    'Never edit the plan file yourself. Sylo marks a section `## [~]` when its `worker` finishes and `## [x]` when a `reviewer` replies `VERDICT: PASS`. Pass `goal` (the exact `##` heading text) on every subagent step so it lands on the right section.',
   ]
   if (scope.done >= scope.total && scope.total > 0) {
-    out.push('Every goal is closed. Report the results. Do not start new sections.')
+    out.push('Every goal has passed review. Report the results. Do not start new sections.')
     return out
   }
+  if (scope.nextReview) {
+    out.push(
+      `"${scope.nextReview}" is built but unreviewed — run a \`reviewer\` on it now, before any further building. Its reply must end with \`VERDICT: PASS\` or \`VERDICT: FAIL\`; without that line the section stays open and the review is wasted.`,
+    )
+  }
   out.push(
-    'Work the unticked `## [ ]` goals one at a time in file order. Give each section its own run — the section\'s own scout/worker/reviewer steps — and do not start the next section until a reviewer has passed the current one.',
-    scope.nextGoal ? `The next section is "${scope.nextGoal}".` : '',
-    'If a review fails, send that same section back to a `worker` with the findings and review it again. Do not stop after the first section, and do not re-dispatch a goal that is already `## [x]`.',
+    'Work the sections one at a time in file order, each as its own run: `worker` to build it, then a `reviewer` on that same section. Do not start the next section until the current one has passed.',
+    scope.nextGoal ? `The next section needing work is "${scope.nextGoal}".` : '',
+    'A failed review reopens that section — send it straight back to a `worker` with the findings and review it again. Do not move past a failed section, do not stop after the first one, and do not re-dispatch a goal that is already `## [x]`.',
   )
   return out.filter(Boolean)
 }
@@ -127,17 +139,30 @@ export function composePlanScopeNote(conversationId: string, scope: PlanScope): 
   ].join(' ')
 }
 
+/**
+ * Nudge a turn that has to pick up after a failed, empty, or cut-off one.
+ *
+ * This exists to stop the parent stalling — burning the turn drafting a plan in the
+ * thinking channel and writing no answer. It is NOT a standing order to delegate: a
+ * plan-driven chat gets the section protocol, but a chat with no plan is told to finish
+ * the request, delegating only if the work is actually big enough to warrant it.
+ * Demanding a `planner` here meant any follow-up after an error spawned subagents.
+ */
 export function composeOrchestratorResumePrompt(userText: string, scope?: PlanScope): string {
-  const planDirective =
+  const directives =
     scope?.planRel ?
-      planProgressDirectives(scope).join(' ')
-    : 'This chat has no plan file. Call `subagent` with agent "planner" (goal, constraints, and what already ran). Do not follow another conversation\'s plan.'
-  const directives = [
-    'You are the orchestrator, not the planner and not the worker.',
-    'Do not write an implementation plan in this chat or in the thinking channel.',
-    planDirective,
-    'Then report the child output. Do not redo the plan yourself.',
-  ]
+      [
+        'You are the orchestrator, not the planner and not the worker.',
+        'Do not write an implementation plan in this chat or in the thinking channel.',
+        planProgressDirectives(scope).join(' '),
+        'Then report the child output. Do not redo the plan yourself.',
+      ]
+    : [
+        'The previous turn did not finish. Pick that work up and complete the operator request above.',
+        'Judge for yourself whether it needs subagents: answer it directly when you can, and delegate only when the work genuinely calls for it (several files or several steps, isolation, or the operator asked for a plan). A resumed turn does not need a plan just because it was resumed.',
+        'If it does warrant a plan, call `subagent` with agent "planner" (goal, constraints, and what already ran) instead of writing the plan here — do not spend this turn planning in the thinking channel. Do not follow another conversation\'s plan.',
+        'Report what you did, and where a subagent ran, report its output rather than redoing the work.',
+      ]
   return [
     `<${ORCHESTRATOR_RESUME_TAG}>`,
     directives.join(' '),

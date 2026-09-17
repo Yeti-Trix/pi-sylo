@@ -94,13 +94,16 @@ describe('shouldInjectOrchestratorResume', () => {
 })
 
 describe('composeOrchestratorResumePrompt', () => {
-  test('keeps the operator text and forbids parent-side planning', () => {
+  test('with no plan, recovers the turn without ordering subagents', () => {
+    // Recovering a turn is not a reason to delegate. Mandating a `planner` here meant
+    // any follow-up after an error spawned subagents for work the parent could finish.
     const out = composeOrchestratorResumePrompt('did you finish?')
     assert.match(out, /did you finish\?/)
-    assert.match(out, /agent "planner"/)
-    assert.match(out, /no plan file/)
-    assert.match(out, /Do not write an implementation plan/)
     assert.match(out, /<operator_request>/)
+    assert.match(out, /Judge for yourself whether it needs subagents/)
+    assert.match(out, /answer it directly when you can/)
+    assert.match(out, /does not need a plan just because it was resumed/)
+    assert.doesNotMatch(out, /You are the orchestrator/)
   })
 
   test('names this chat\'s plan file and the next open section', () => {
@@ -111,7 +114,7 @@ describe('composeOrchestratorResumePrompt', () => {
       nextGoal: 'Wire the goals bar',
     })
     assert.match(out, /\.sylo\/plans\/conv-1\.md/)
-    assert.match(out, /1\/3 goals done/)
+    assert.match(out, /1\/3 goals passed review/)
     assert.match(out, /Wire the goals bar/)
     assert.match(out, /one at a time in file order/)
   })
@@ -133,12 +136,28 @@ describe('composePlanScopeNote', () => {
       nextGoal: 'Section two',
     })
     assert.match(out, /Section two/)
-    assert.match(out, /own scout\/worker\/reviewer steps/)
-    assert.match(out, /do not start the next section until a reviewer has passed/)
-    assert.doesNotMatch(out, /Every goal is closed/)
+    assert.match(out, /one at a time in file order/)
+    assert.match(out, /Do not start the next section until the current one has passed/)
+    assert.doesNotMatch(out, /Every goal has passed review/)
   })
 
-  test('tells the parent Sylo owns the tick, keyed to the reviewer verdict', () => {
+  test('an unreviewed built section is reported and reviewed before more building', () => {
+    // The failure this exists for: the run built several sections and only then ran a
+    // reviewer, which had to fail work that was never finished, so nothing ever closed.
+    const out = composePlanScopeNote('conv-1', {
+      planRel: '.sylo/plans/conv-1.md',
+      done: 1,
+      total: 4,
+      built: 1,
+      nextGoal: 'Section three',
+      nextReview: 'Section two',
+    })
+    assert.match(out, /1 built and awaiting review/)
+    assert.match(out, /"Section two" is built but unreviewed/)
+    assert.match(out, /before any further building/)
+  })
+
+  test('tells the parent Sylo owns the marks, keyed to the reviewer verdict', () => {
     const out = composePlanScopeNote('conv-1', {
       planRel: '.sylo/plans/conv-1.md',
       done: 0,
@@ -146,16 +165,17 @@ describe('composePlanScopeNote', () => {
     })
     assert.match(out, /Never edit the plan file yourself/)
     assert.match(out, /VERDICT: PASS/)
-    assert.match(out, /pass `goal`/)
+    assert.match(out, /Pass `goal`/)
+    assert.match(out, /## \[~\]/, 'the built mark is explained')
   })
 
-  test('stops starting sections once every goal is closed', () => {
+  test('stops starting sections once every goal has passed', () => {
     const out = composePlanScopeNote('conv-1', {
       planRel: '.sylo/plans/conv-1.md',
       done: 4,
       total: 4,
     })
-    assert.match(out, /Every goal is closed/)
+    assert.match(out, /Every goal has passed review/)
     assert.doesNotMatch(out, /one at a time in file order/)
   })
 

@@ -17,6 +17,7 @@ import { type AgentConfig, type AgentScope, discoverAgents } from './agents.ts'
 import { resolvePiSpawn } from './pi-cli.ts'
 import { resolveSubagentToolPolicy, toolCliArgs } from './pi-tool-policy.ts'
 import { subagentModelCliArgs } from './subagent-model.ts'
+import { killSubagentTree } from './subagent-kill.ts'
 import { cancelSubagentRun, consumeRunCancelled, registerSubagentRun, unregisterSubagentRun } from './subagent-run-registry.ts'
 import { resolveSubagentStallMs, resolveSubagentTimeoutMs } from './subagent-timeout.ts'
 import { newSubagentRunId, notifySyloSubagent, type SyloSubagentRunMode } from './sylo-host.ts'
@@ -177,8 +178,25 @@ function getFinalOutput(messages: Message[]): string {
   return ''
 }
 
+/** Why a runaway guard ended a child. Never a success, whatever the exit code says. */
+export type SubagentGuardReason = 'stalled' | 'timeout'
+
+/** Grace period for `close` after a guard kill, before the run ends on its own clock. */
+const GUARD_FINALIZE_GRACE_MS = 10_000
+
+function isGuardKilledResult(result: SingleResult): boolean {
+  return result.stopReason === 'stalled' || result.stopReason === 'timeout'
+}
+
 function isFailedResult(result: SingleResult): boolean {
-  return result.exitCode !== 0 || result.stopReason === 'error' || result.stopReason === 'aborted'
+  return (
+    result.exitCode !== 0 ||
+    result.stopReason === 'error' ||
+    result.stopReason === 'aborted' ||
+    // A killed child can still report exit code 0, so the reason has to be checked
+    // too — otherwise a stalled run is handed to the parent as finished work.
+    isGuardKilledResult(result)
+  )
 }
 
 /**
@@ -203,7 +221,14 @@ const FAILED_RESULT_NOTE =
 
 function getResultOutput(result: SingleResult): string {
   if (isFailedResult(result)) {
-    return result.errorMessage || result.stderr || getFinalOutput(result.messages) || '(no output)'
+    const reason = result.errorMessage || result.stderr || ''
+    if (isGuardKilledResult(result)) {
+      // A stalled child often did real work before it went quiet. Keep that text and
+      // say plainly that it was killed, so the parent resumes instead of restarting.
+      const partial = getFinalOutput(result.messages)
+      return partial ? `${partial}\n\n${reason}`.trim() : reason || '(no output)'
+    }
+    return reason || getFinalOutput(result.messages) || '(no output)'
   }
   return getFinalOutput(result.messages) || '(no output)'
 }
@@ -450,12 +475,17 @@ async function runSingleAgent(
       let buffer = ''
       let timeout: ReturnType<typeof setTimeout> | undefined
       let stallTimer: ReturnType<typeof setInterval> | undefined
+      let forcedFinish: ReturnType<typeof setTimeout> | undefined
       let lastActivityAt = Date.now()
       let guardKilled = false
+      let settled = false
 
       const finish = (code: number) => {
+        if (settled) return
+        settled = true
         if (timeout) clearTimeout(timeout)
         if (stallTimer) clearInterval(stallTimer)
+        if (forcedFinish) clearTimeout(forcedFinish)
         stopUpdates()
         resolve(code)
       }
@@ -465,25 +495,39 @@ async function runSingleAgent(
         provider: subagentModel.provider,
       })
       const stallMs = resolveSubagentStallMs({ provider: subagentModel.provider })
-      const killForGuard = (line: string) => {
+      /**
+       * The guard's own kill is not allowed to be the thing that hangs. A killed shell
+       * can leave the real child holding the stdio pipes, and `close` waits for those,
+       * so the run has to be able to end on the guard's clock instead.
+       */
+      const killForGuard = (reason: SubagentGuardReason, line: string) => {
         if (guardKilled) return
         guardKilled = true
         currentResult.stderr += `\n${line}`
-        proc.kill('SIGTERM')
-        setTimeout(() => {
-          if (!proc.killed) proc.kill('SIGKILL')
-        }, 5000)
+        // Recorded on the result too: a guard kill that arrives as exit code 0 (or as a
+        // null code, which `close` reports for a signalled child) must not read as success.
+        currentResult.stopReason = reason
+        currentResult.errorMessage = line.trim()
+        killSubagentTree(proc)
+        forcedFinish = setTimeout(() => finish(1), GUARD_FINALIZE_GRACE_MS)
+        forcedFinish.unref()
       }
       const bumpActivity = () => {
         lastActivityAt = Date.now()
       }
       timeout = setTimeout(() => {
-        killForGuard(`[timeout] Subagent exceeded time limit (${Math.round(timeoutMs / 1000)}s).`)
+        killForGuard(
+          'timeout',
+          `[timeout] Subagent exceeded time limit (${Math.round(timeoutMs / 1000)}s).`,
+        )
       }, timeoutMs)
       stallTimer = setInterval(() => {
         const idleMs = Date.now() - lastActivityAt
         if (idleMs < stallMs) return
-        killForGuard(`[stall] Subagent produced no output for ${Math.round(idleMs / 1000)}s.`)
+        killForGuard(
+          'stalled',
+          `[stall] Subagent produced no output for ${Math.round(idleMs / 1000)}s. Its last tool call never returned.`,
+        )
       }, 5_000)
 
       type ChildEvent = {
@@ -576,7 +620,8 @@ async function runSingleAgent(
       proc.on('close', (code) => {
         if (buffer.trim()) processLine(buffer)
         dropRegistry()
-        finish(code ?? 0)
+        // A null code means the child died on a signal, never that it succeeded.
+        finish(code ?? 1)
       })
 
       proc.on('error', () => {
@@ -587,10 +632,7 @@ async function runSingleAgent(
       if (signal) {
         const killProc = () => {
           wasAborted = true
-          proc.kill('SIGTERM')
-          setTimeout(() => {
-            if (!proc.killed) proc.kill('SIGKILL')
-          }, 5000)
+          killSubagentTree(proc)
         }
         if (signal.aborted) killProc()
         else signal.addEventListener('abort', killProc, { once: true })

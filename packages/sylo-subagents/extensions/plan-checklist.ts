@@ -1,14 +1,33 @@
 /** Parse planner markdown. Each `##` section is a goal; the body stays detailed. */
 
+/**
+ * How far a goal has got.
+ *
+ * `built` is the state that makes a crash survivable: the worker finished the section
+ * but no reviewer has judged it yet. Without it a run that built two sections and then
+ * died looked identical to one that had done nothing, and the resumed run redid the work.
+ * Only a reviewer's `VERDICT: PASS` promotes `built` to `passed`.
+ */
+export type PlanGoalState = 'open' | 'built' | 'passed'
+
 export type PlanTodo = {
   id: string
   text: string
+  /** Reviewed and passed. Kept separate from `state` so callers counting "done" stay honest. */
   done: boolean
+  state: PlanGoalState
 }
 
 const H1_RE = /^#\s+(.*)$/
 const H2_RE = /^##\s+(.*)$/
-const SECTION_CHECK_RE = /^\[([ xX])\]\s+(.+)$/
+const SECTION_CHECK_RE = /^\[([ xX~])\]\s+(.+)$/
+
+const STATE_MARK: Record<PlanGoalState, string> = { open: ' ', built: '~', passed: 'x' }
+
+function markToState(mark: string): PlanGoalState {
+  if (mark === '~') return 'built'
+  return mark === ' ' ? 'open' : 'passed'
+}
 const LIST_CHECK_RE = /^\s*[-*]\s+\[([ xX])\]\s+(.+?)\s*$/
 const NUMBERED_RE = /^\s*\d+\.\s+(.+?)\s*$/
 
@@ -39,10 +58,10 @@ export function planBodyWithoutFrontmatter(markdown: string): string {
   return stripFrontmatter(markdown).body.trim()
 }
 
-function parseH2Title(raw: string): { done?: boolean; title: string } {
+function parseH2Title(raw: string): { state?: PlanGoalState; title: string } {
   const trimmed = raw.trim()
   const m = SECTION_CHECK_RE.exec(trimmed)
-  if (m) return { done: m[1] !== ' ', title: m[2]!.trim() }
+  if (m) return { state: markToState(m[1]!), title: m[2]!.trim() }
   return { title: trimmed }
 }
 
@@ -62,10 +81,12 @@ export function parsePlanTodos(markdown: string): PlanTodo[] {
     if (!h) continue
     const parsed = parseH2Title(h[1]!)
     if (!isGoalHeading(parsed.title)) continue
+    const state = parsed.state ?? 'open'
     todos.push({
       id: `t${todos.length}`,
       text: parsed.title,
-      done: parsed.done === true,
+      done: state === 'passed',
+      state,
     })
   }
   return todos
@@ -131,16 +152,30 @@ export function planGoalsComplete(markdown: string): boolean {
 }
 
 /**
- * The plan has nothing left to execute: the reviewer signed off, or every
- * goal is ticked. Only a finished plan may be cleared on the next send.
+ * The plan has nothing left to execute, which means exactly one thing: a reviewer
+ * signed it off.
+ *
+ * "Every box ticked" is deliberately NOT enough. Boxes can now be marked by the worker
+ * that did the work, and retiring a plan on that alone would let a run finish with no
+ * review at all — the operator asked for the opposite guarantee.
  */
 export function isPlanFinished(markdown: string): boolean {
-  return parsePlanStatus(markdown) === 'reviewed' || planGoalsComplete(markdown)
+  return parsePlanStatus(markdown) === 'reviewed'
 }
 
-/** First unticked goal — the section the next worker should implement. */
+/** First goal a worker still has to build. */
+export function nextGoalToBuild(markdown: string): PlanTodo | undefined {
+  return parsePlanTodos(markdown).find((t) => t.state === 'open')
+}
+
+/** First built-but-unreviewed goal — the section a reviewer should judge next. */
+export function nextGoalToReview(markdown: string): PlanTodo | undefined {
+  return parsePlanTodos(markdown).find((t) => t.state === 'built')
+}
+
+/** First goal that is not finished, whether it needs building or reviewing. */
 export function nextOpenGoal(markdown: string): PlanTodo | undefined {
-  return parsePlanTodos(markdown).find((t) => !t.done)
+  return parsePlanTodos(markdown).find((t) => t.state !== 'passed')
 }
 
 export type ReviewVerdict = 'pass' | 'fail' | 'none'
@@ -164,7 +199,7 @@ export function parseReviewVerdict(resultText: string | undefined): ReviewVerdic
 }
 
 /** Loose compare for goal titles, so surrounding punctuation or case never blocks a tick. */
-function sameGoalTitle(a: string, b: string): boolean {
+export function sameGoalTitle(a: string, b: string): boolean {
   const norm = (s: string) =>
     s
       .toLowerCase()
@@ -174,15 +209,26 @@ function sameGoalTitle(a: string, b: string): boolean {
   return norm(a) === norm(b) && norm(a).length > 0
 }
 
+/** A goal only moves forward, except a failed review which sends it back to `open`. */
+function canTransition(from: PlanGoalState, to: PlanGoalState): boolean {
+  if (from === to) return false
+  if (to === 'built') return from === 'open'
+  return true
+}
+
 /**
- * Tick goal headings. `goals` names the sections to close; `'all'` closes every
- * goal, which is what a whole-plan review that passed has verified.
+ * Set the state of goal headings. `goals` names the sections; `'all'` applies to every
+ * goal, which is what a whole-plan review covers.
  *
- * Sylo owns this write. Asking the worker to edit its own heading meant the agent
- * that wrote the code also certified it, and in practice it simply never happened —
- * plans sat at 0 ticked through repeated "successful" runs.
+ * Sylo owns this write, not the agents. Asking the worker to edit its own heading meant
+ * the agent that wrote the code also certified it, and in practice it simply never
+ * happened — plans sat at 0 ticked through repeated "successful" runs.
  */
-export function tickPlanGoals(markdown: string, goals: readonly string[] | 'all'): string {
+export function setPlanGoalStates(
+  markdown: string,
+  goals: readonly string[] | 'all',
+  state: PlanGoalState,
+): string {
   const { fm, body } = stripFrontmatter(markdown)
   const wanted = goals === 'all' ? null : goals.filter((g) => g.trim().length > 0)
   if (wanted && wanted.length === 0) return markdown
@@ -194,13 +240,18 @@ export function tickPlanGoals(markdown: string, goals: readonly string[] | 'all'
     if (!h) continue
     const parsed = parseH2Title(h[1]!)
     if (!isGoalHeading(parsed.title)) continue
-    if (parsed.done === true) continue
+    if (!canTransition(parsed.state ?? 'open', state)) continue
     if (wanted && !wanted.some((g) => sameGoalTitle(g, parsed.title))) continue
-    lines[i] = `## [x] ${parsed.title}`
+    lines[i] = `## [${STATE_MARK[state]}] ${parsed.title}`
     changed = true
   }
   if (!changed) return markdown
   return `${fm}${lines.join('\n')}`
+}
+
+/** Close goals outright — a reviewer passed them. */
+export function tickPlanGoals(markdown: string, goals: readonly string[] | 'all'): string {
+  return setPlanGoalStates(markdown, goals, 'passed')
 }
 
 function nextH2Index(lines: string[], start: number): number {
@@ -236,7 +287,7 @@ function injectHeadingChecks(body: string): string {
       if (!h) return line
       const parsed = parseH2Title(h[1]!)
       if (!isGoalHeading(parsed.title)) return line
-      if (parsed.done !== undefined) return line
+      if (parsed.state !== undefined) return line
       return `## [ ] ${parsed.title}`
     })
     .join('\n')

@@ -1,6 +1,6 @@
 ---
 name: sylo-subagents
-description: Orchestrator-only. Never write implementation plans yourself — call the planner subagent. Delegate via the subagent tool (scout/planner/worker/reviewer). After a crash or “continue”, resume through planner or worker, do not plan in the parent.
+description: Orchestrator-only. How to decide whether a turn needs subagents, and how to run them when it does. Most turns you handle yourself; delegate multi-step or multi-file work to scout/planner/worker/reviewer via the subagent tool. Never hand-write an implementation plan — that is the planner's job. After a crash or “continue”, resume the work rather than re-planning in the parent.
 metadata:
   sylo:
     parentOnly: true
@@ -10,18 +10,35 @@ metadata:
 
 You are the **orchestrator**. Child subagents do not receive this skill.
 
-## You do not plan the work
+## Decide first — most turns are yours
 
-Writing an implementation plan in this chat — including in the thinking channel — is a failure.
-The `planner` subagent exists because the parent will otherwise burn the turn planning and then
-write no answer (especially after a crash or “continue”).
+**Delegation is your call, and the default answer is no.** A subagent costs a subprocess, a
+cold context, and often minutes of wall time. Spending that on a question or a one-file edit
+gives the operator a slower, worse answer, not a safer one — and it buries a simple reply
+under machinery they have to expand and read.
 
-- Any non-trivial change, resume after a failed/empty turn, or “continue” / “did you finish?”:
-  call `subagent` with agent `planner` unless `.sylo/plans/<this conversation id>.md`
-  already exists and still fits. Other files in `.sylo/plans/` are other chats —
-  never follow them.
-- Then walk the plan **section by section** (below). Do not implement or re-plan in the parent.
-- Trivial one-step lookups you can do with one built-in tool stay in the parent.
+Handle it yourself, this turn, when the request is:
+
+- a question about the code, the repo, or what you just did,
+- reading, searching, explaining, or summarizing,
+- a small or single-file change, a quick fix, a rename, a config edit,
+- running a command or a test and reporting what happened,
+- a follow-up, correction, or clarification of work already in this chat.
+
+**Delegate** when the work is genuinely bigger than a turn — see [When to delegate](#when-to-delegate).
+The operator can also force it with `@mentions`, and that choice is theirs, not yours to second-guess.
+
+### The one thing you never do yourself
+
+Do not hand-write a multi-section implementation plan, here or in the thinking channel. If you
+catch yourself drafting one, that is the signal the work needs `planner` — not that you should
+keep drafting. The parent that plans in its own head burns the turn and writes no answer,
+which is the failure `planner` exists to prevent.
+
+When a plan is warranted: call `subagent` with agent `planner` unless
+`.sylo/plans/<this conversation id>.md` already exists and still fits, then walk it
+**section by section** (below) rather than implementing in the parent. Other files in
+`.sylo/plans/` belong to other chats — never follow them.
 
 ## Custom agent frontmatter
 
@@ -60,20 +77,31 @@ incomplete one is marked `INCOMPLETE` / `incomplete (token cap)`. Neither is a f
 A truncated **planner** step is the one case to re-run from scratch: a half-written plan is worse
 than none. Re-run `planner` rather than working from the partial output.
 
-You still decide delegation on your own for every turn *without* mentions — that is what the rest of this
-skill is about.
+A turn *without* mentions is yours to judge — that is what the rest of this skill is about.
 
 ## When to delegate
 
 Use `subagent` when:
 
 - The operator wants a **plan** — that is always `planner`, never you.
-- The task needs exploration or implementation in an **isolated context** (scout, worker, reviewer).
+- The change spans **several files or several steps**, enough that working it in one turn would
+  crowd out the answer.
+- The task needs exploration or implementation in an **isolated context** (scout, worker, reviewer)
+  — typically because it would otherwise flood this chat's context.
 - Work splits into **independent** parallel tracks (different dirs or concerns).
 - A **chain** helps: scout → planner → worker, or implement → review.
-- The previous turn crashed, returned no text, or the operator asked to continue that work.
+- The previous turn crashed or returned no text on work that was already being delegated.
 
-Do **not** delegate trivial one-step lookups you can do with one tool call.
+Do **not** delegate:
+
+- anything in the "handle it yourself" list above,
+- a lookup, edit, or command you could finish before a child even loads,
+- work you have already done — do not spawn a `reviewer` to bless your own small edit,
+- a resumed turn purely *because* it was resumed. Resume the actual work; if that work was
+  small, finish it yourself.
+
+When it is borderline, ask whether the operator would rather wait minutes for a subprocess than
+read your answer now. Usually they would not.
 
 ## Context packet (required discipline)
 
@@ -134,27 +162,41 @@ Pass `goal` on every step with the exact heading text (no `## [ ]` marker). Skip
 `scout` step when the section already names the files and the change.
 
 When that section's reviewer passes, the goal is closed and you start the next section's
-stack. Keep going until no `## [ ]` remains — stopping after the first section is the
-common failure, and it leaves the operator with a half-built plan. Use parallel `tasks`
-only for sections that touch different files.
+stack. Keep going until every section is `## [x]` — stopping after the first section is
+the common failure, and it leaves the operator with a half-built plan. Never batch the
+building and leave the reviews for the end: a review that is handed several unfinished
+sections has to fail them, so nothing ever closes. Use parallel `tasks` only for sections
+that touch different files.
 
-### Who closes a goal
+### Who marks a goal, and what the marks mean
 
-**You never edit the plan file, and neither does the worker.** Sylo ticks the goal when
-that section's `reviewer` returns `VERDICT: PASS`, because the agent that wrote the code
-cannot be the one to certify it. The operator watches the boxes fill in as each section
-passes, so a run that never reviews looks like a run that never finished anything.
+**You never edit the plan file, and neither do the agents.** Sylo owns the heading marks:
 
-A `FAIL` closes nothing. Send the section back to a `worker` with the reviewer's findings
-and review it again — the same goal, a fresh reviewer. Do not move to the next section
-with a failed one behind you, and never re-dispatch a section that is already `## [x]`.
+| Mark | Meaning | Set by |
+|------|---------|--------|
+| `## [ ]` | Not started | the planner |
+| `## [~]` | Built, waiting on a review | a `worker` finishing that section |
+| `## [x]` | Passed review — closed | a `reviewer` replying `VERDICT: PASS` |
 
-A `reviewer` given **no** `goal` is judged as a whole-plan review, so a `PASS` there
-closes every goal at once. Only omit `goal` when you really are reviewing the finished
-plan end to end.
+So the operator sees progress the moment a section is built, but nothing counts as done
+until it is reviewed — the agent that wrote the code cannot certify it. A plan is only
+`status: reviewed` once every section has passed.
 
-Sylo does not delete the plan once the goals are all closed — it marks it
+A `FAIL` sends that section back to `## [ ]`. Hand it straight to a `worker` with the
+reviewer's findings and review it again — the same goal, a fresh reviewer. Do not move to
+the next section with a failed one behind you, and never re-dispatch a `## [x]` section.
+
+**Always pass `goal`.** When you omit it Sylo has to guess which section the run was
+about, and it guesses by the protocol above: a `worker` was building the first `## [ ]`,
+a `reviewer` was judging the first `## [~]`. That is usually right and it keeps progress
+moving, but if you worked out of order it will mark the wrong section. A `goal` string
+that matches no heading is treated the same way as none at all, so copy the heading text
+exactly rather than inventing your own section names.
+
+Sylo does not delete the plan once every section has passed — it marks it
 `status: reviewed` so the operator still sees the completed goals above the composer.
+Only a reviewer's sign-off does that: a plan whose boxes were all built but never
+reviewed stays open, and stays on the operator's bar.
 The next message in that chat takes it off the bar (`hidden: true`) but leaves the file,
 so nothing is lost to a crash, an End, or a restart: when the operator asks to continue
 or to see the plan again, Sylo un-hides it and tells you where it stood. Report what the
@@ -176,9 +218,13 @@ The child Pi `-p` user line is only `.` (start trigger). The real task + context
 
 ## Orchestrator loop
 
+Once you have decided a turn warrants delegation — not before:
+
 1. **Clarify** only if the objective is actually missing.
 2. **Pick** which child runs — do not write the implementation plan.
 3. **Dispatch** with a context packet.
 4. **Report** the child output. Do not redo the child's work.
+
+A turn you handle yourself skips all of this. Answer, and say what you did.
 
 Child output is summarized back to you; the operator sees live detail in the **inline subagent block** under each `subagent` tool row in chat.

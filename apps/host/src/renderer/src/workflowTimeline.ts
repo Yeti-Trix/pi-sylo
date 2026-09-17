@@ -887,9 +887,10 @@ export function gapsForOrderedChatSegments(
 
 export function formatDurationMs(ms: number): string {
   if (!Number.isFinite(ms)) return '—'
-  if (ms < 800) return `${Math.round(ms)} ms`
-  if (ms < 90_000) return `${(ms / 1000).toFixed(1)} s`
-  return `${(ms / 60_000).toFixed(1)} min`
+  if (ms < 1000) return `${Math.round(ms)} ms`
+  if (ms < 60_000) return `${Math.floor(ms / 1000)} s`
+  if (ms < 3_600_000) return `${(ms / 60_000).toFixed(1)} min`
+  return `${(ms / 3_600_000).toFixed(1)} hr`
 }
 
 /** One interval the chat UI does not label (or only partially covers). */

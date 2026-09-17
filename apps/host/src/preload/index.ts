@@ -1371,7 +1371,12 @@ contextBridge.exposeInMainWorld('sylo', {
       ipcRenderer.invoke('plan:todos', conversationId) as Promise<{
         conversationId: string
         goal?: string
-        todos: { id: string; text: string; done: boolean }[]
+        todos: {
+          id: string
+          text: string
+          done: boolean
+          state: 'open' | 'built' | 'passed'
+        }[]
         status: 'active' | 'reviewed'
       }>,
     onChanged: (cb: () => void) => {

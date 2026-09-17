@@ -4,7 +4,11 @@ import { parseReviewVerdict } from '../../../../packages/sylo-subagents/extensio
 import {
   isPlannerAgentName,
   isReviewerAgentName,
+  isWorkerAgentName,
+  markGoalsBuilt,
   markPlanReviewed,
+  reopenFailedGoals,
+  resolveRunGoals,
   tickReviewedGoals,
   writeCurrentPlan,
 } from '../../../../packages/sylo-subagents/extensions/plan-file.ts'
@@ -70,16 +74,29 @@ function syncWorkspacePlanFile(
     writeCurrentPlan(cwd, planBodyFromResult(event.resultText), { conversationId })
     return
   }
-  if (event.status === 'succeeded' && isReviewerAgentName(agent)) {
-    // The review's verdict — not the worker that wrote the code — is what closes a
-    // goal. A review naming no goal is a whole-plan pass, so it closes all of them.
-    if (parseReviewVerdict(event.resultText) === 'pass') {
-      const goal = taskGoal(row)
-      tickReviewedGoals(cwd, conversationId, goal ? [goal] : 'all')
+  if (event.status !== 'succeeded') return
+
+  if (isWorkerAgentName(agent)) {
+    // Progress, not sign-off: the section is built and awaiting a review. Recorded in
+    // the plan file so a crash, an End, or a close resumes instead of rebuilding it.
+    markGoalsBuilt(cwd, conversationId, resolveRunGoals(cwd, conversationId, 'worker', taskGoal(row)))
+    return
+  }
+
+  if (isReviewerAgentName(agent)) {
+    const verdict = parseReviewVerdict(event.resultText)
+    if (verdict === 'none') return
+    const goals = resolveRunGoals(cwd, conversationId, 'reviewer', taskGoal(row))
+    if (verdict === 'pass') {
+      // The review's verdict — not the worker that wrote the code — is what closes a goal.
+      tickReviewedGoals(cwd, conversationId, goals)
+      // Sign off, do not delete: the goals bar stays until the operator sends again.
+      // No-ops unless the ticks above completed the plan.
+      markPlanReviewed(cwd, conversationId)
+      return
     }
-    // Sign off, do not delete: the goals bar stays until the operator sends again.
-    // No-ops unless the ticks above completed the plan.
-    markPlanReviewed(cwd, conversationId)
+    // Failed: the section goes back to a worker rather than sitting as built-and-wrong.
+    reopenFailedGoals(cwd, conversationId, goals)
   }
 }
 

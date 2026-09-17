@@ -7,11 +7,14 @@ import {
   ensureSectionGoals,
   extractPlanGoal,
   isPlanFinished,
+  nextGoalToBuild,
+  nextGoalToReview,
   nextOpenGoal,
   parsePlanStatus,
   parsePlanTodos,
   parseReviewVerdict,
   planGoalsComplete,
+  setPlanGoalStates,
   snapshotPlanMarkdown,
   tickPlanGoals,
 } from './plan-checklist.ts'
@@ -139,9 +142,12 @@ describe('plan completion', () => {
     assert.equal(planGoalsComplete('## Risks\nNo goals here.'), false)
   })
 
-  test('an unfinished plan survives so continue can resume it', () => {
+  test('only a reviewer sign-off finishes a plan', () => {
+    // All boxes ticked is NOT enough: boxes can be marked by the worker that did the
+    // work, so retiring a plan on that alone would let a run finish with no review.
     assert.equal(isPlanFinished(PARTIAL), false)
-    assert.equal(isPlanFinished(ALL_DONE), true)
+    assert.equal(isPlanFinished(ALL_DONE), false)
+    assert.equal(planGoalsComplete(ALL_DONE), true, 'the goals are done, the plan is not')
   })
 
   test('reviewer sign-off finishes a plan even with an open goal', () => {
@@ -204,5 +210,56 @@ describe('tickPlanGoals', () => {
   test('already ticked goals are left as they are', () => {
     const done = tickPlanGoals(PLAN, 'all')
     assert.equal(tickPlanGoals(done, 'all'), done)
+  })
+})
+
+describe('goal states', () => {
+  const PLAN = `---\nstatus: active\n---\n\n# Outcome\n\n## [ ] Finalize gun models\nWork.\n\n## [ ] Replace reload overlays\nWork.\n\n## Risks\nNot a goal.\n`
+
+  test('a worker marks its section built, not done', () => {
+    const built = setPlanGoalStates(PLAN, ['Finalize gun models'], 'built')
+    assert.match(built, /## \[~\] Finalize gun models/)
+    const todos = parsePlanTodos(built)
+    assert.equal(todos[0].state, 'built')
+    assert.equal(todos[0].done, false, 'built is progress, never sign-off')
+    assert.equal(planGoalsComplete(built), false)
+  })
+
+  test('a passing review promotes built to passed', () => {
+    const built = setPlanGoalStates(PLAN, 'all', 'built')
+    const passed = setPlanGoalStates(built, 'all', 'passed')
+    assert.equal(
+      parsePlanTodos(passed).every((t) => t.state === 'passed'),
+      true,
+    )
+    assert.equal(planGoalsComplete(passed), true)
+  })
+
+  test('a failed review reopens the section', () => {
+    const built = setPlanGoalStates(PLAN, ['Finalize gun models'], 'built')
+    const reopened = setPlanGoalStates(built, ['Finalize gun models'], 'open')
+    assert.match(reopened, /## \[ \] Finalize gun models/)
+    assert.equal(parsePlanTodos(reopened)[0].state, 'open')
+  })
+
+  test('a passed goal is never demoted to built', () => {
+    // Only a failed review may move a goal backwards, and that reopens it outright.
+    const passed = setPlanGoalStates(PLAN, 'all', 'passed')
+    assert.equal(setPlanGoalStates(passed, 'all', 'built'), passed)
+  })
+
+  test('next-to-build and next-to-review are different questions', () => {
+    const built = setPlanGoalStates(PLAN, ['Finalize gun models'], 'built')
+    assert.equal(nextGoalToBuild(built)?.text, 'Replace reload overlays')
+    assert.equal(nextGoalToReview(built)?.text, 'Finalize gun models')
+    assert.equal(nextOpenGoal(built)?.text, 'Finalize gun models', 'built still is not done')
+    const passed = setPlanGoalStates(PLAN, 'all', 'passed')
+    assert.equal(nextGoalToBuild(passed), undefined)
+    assert.equal(nextGoalToReview(passed), undefined)
+  })
+
+  test('ensureSectionGoals leaves existing marks alone', () => {
+    const built = setPlanGoalStates(PLAN, ['Finalize gun models'], 'built')
+    assert.equal(ensureSectionGoals(built), built.trim())
   })
 })

@@ -144,9 +144,11 @@ export function isolatePlanForConversation(
   const snap = snapshotPlanMarkdown(raw)
   return {
     planRel: conversationPlanRel(conversationId),
-    done: snap.todos.filter((t) => t.done).length,
+    done: snap.todos.filter((t) => t.state === 'passed').length,
     total: snap.todos.length,
-    nextGoal: snap.todos.find((t) => !t.done)?.text,
+    built: snap.todos.filter((t) => t.state === 'built').length,
+    nextGoal: snap.todos.find((t) => t.state === 'open')?.text,
+    nextReview: snap.todos.find((t) => t.state === 'built')?.text,
     hidden: snap.hidden,
   }
 }
