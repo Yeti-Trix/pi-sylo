@@ -631,6 +631,8 @@ function isChatAreaNearBottom(el: HTMLElement, threshold = CHAT_AT_END_PX): bool
  * much frame budget (a 50 KB reply at 50 ms = 1 MB/s of markdown parsing). */
 const STREAM_FLUSH_MS_MIN = 50
 const STREAM_FLUSH_MS_MAX = 200
+/** How long a just-sent turn is trusted before the host's in-flight list wins. */
+const OPTIMISTIC_SEND_GRACE_MS = 15_000
 /** Bytes of streaming text per 1 ms of added flush delay (tuning knob). */
 const STREAM_FLUSH_BYTES_PER_MS = 2000
 
@@ -751,6 +753,12 @@ export function App(): React.ReactElement {
    *  skill-route prefill fired from within chat silently never lands. */
   const [composerPrefillTick, setComposerPrefillTick] = useState(0)
   const [sendingConvIds, setSendingConvIds] = useState<Set<string>>(() => new Set())
+  /**
+   * Sends this renderer just made, keyed by conversation id -> ts. A turn is not in
+   * `pendingTurns` on the host until the broker picks it up, so a reconcile that
+   * lands in that window must not erase it.
+   */
+  const optimisticSendingRef = useRef<Map<string, number>>(new Map())
   /** Conversations with a completed turn the operator has not opened since. */
   const [unreadConvIds, setUnreadConvIds] = useState<Set<string>>(() => new Set())
   /** True when the active conversation has an in-flight agent turn. */
@@ -763,6 +771,52 @@ export function App(): React.ReactElement {
     }
     return null
   }, [activeSending, messages])
+
+  const markOptimisticSending = useCallback((conversationId: string) => {
+    optimisticSendingRef.current.set(conversationId, Date.now())
+    setSendingConvIds((prev) => {
+      if (prev.has(conversationId)) return prev
+      const next = new Set(prev)
+      next.add(conversationId)
+      return next
+    })
+  }, [])
+
+  /**
+   * Re-read the host's in-flight turns. The renderer's own set lives in memory, so
+   * after a reload it is empty even while the agent is mid-turn — which offered
+   * "Send" (starting a second turn) and hid Stop. Also self-heals a set left stale
+   * by a missed `turnFinished`.
+   */
+  const syncActiveTurns = useCallback(async () => {
+    let hostIds: string[]
+    try {
+      hostIds = await window.sylo.chat.activeTurns()
+    } catch {
+      return
+    }
+    const now = Date.now()
+    setSendingConvIds((prev) => {
+      const next = new Set(hostIds)
+      for (const [id, ts] of optimisticSendingRef.current) {
+        if (now - ts < OPTIMISTIC_SEND_GRACE_MS) next.add(id)
+        else optimisticSendingRef.current.delete(id)
+      }
+      if (next.size === prev.size && [...next].every((id) => prev.has(id))) return prev
+      return next
+    })
+  }, [])
+
+  useEffect(() => {
+    void syncActiveTurns()
+  }, [syncActiveTurns, activeId])
+
+  useEffect(() => {
+    const onFocus = () => void syncActiveTurns()
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [syncActiveTurns])
+
     const [brokerHint, setBrokerHint] = useState('')
   const [liveDelta, setLiveDelta] = useState<Record<string, string>>({})
   /**
@@ -2392,6 +2446,7 @@ export function App(): React.ReactElement {
         return
       }
       if (p.kind === 'turnFinished') {
+        optimisticSendingRef.current.delete(p.conversationId)
         setSendingConvIds((prev) => {
           if (!prev.has(p.conversationId)) return prev
           const next = new Set(prev)
@@ -2419,6 +2474,7 @@ export function App(): React.ReactElement {
           activeIdRef.current = undefined
           setActiveId(undefined)
         }
+        optimisticSendingRef.current.delete(p.conversationId)
         setUnreadConvIds((prev) => {
           if (!prev.has(p.conversationId)) return prev
           const next = new Set(prev)
@@ -2521,29 +2577,20 @@ export function App(): React.ReactElement {
       try {
         const r = await window.sylo.chat.deliverQueued(activeId, text, attachments)
         if (!r.ok) return false
-        setSendingConvIds((prev) => {
-          if (!activeId || prev.has(activeId)) return prev
-          const next = new Set(prev)
-          next.add(activeId)
-          return next
-        })
+        markOptimisticSending(activeId)
         void refreshMessages()
         return true
       } catch {
         return false
       }
     },
-    [activeId, safeMode, agentReady, refreshMessages],
+    [activeId, safeMode, agentReady, refreshMessages, markOptimisticSending],
   )
 
   const handleSendingStarted = useCallback(() => {
-    setSendingConvIds((prev) => {
-      if (!activeId || prev.has(activeId)) return prev
-      const next = new Set(prev)
-      next.add(activeId)
-      return next
-    })
-  }, [activeId])
+    if (!activeId) return
+    markOptimisticSending(activeId)
+  }, [activeId, markOptimisticSending])
 
   const handleSegmentToggle = useCallback((key: string, next: boolean) => {
     setSegmentOverrides((prev) => ({ ...prev, [key]: next }))

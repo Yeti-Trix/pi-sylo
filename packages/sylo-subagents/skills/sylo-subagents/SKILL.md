@@ -113,27 +113,52 @@ Runs appear **inline in chat** under each `subagent` tool row (expand the block)
 | scout | Fast codebase recon | A specific question to answer |
 | planner | Detailed sectioned plan (each `##` is a goal). Sylo writes it to `.sylo/plans/<this conversation id>.md` | Goal + constraints |
 | worker | Implementation of **one** plan section | A decided approach — one `##` goal, or a concrete change |
-| reviewer | Code review of **all** the work, once the plan is fully ticked | What changed and what to check |
+| reviewer | Code review that closes a goal, or the whole plan | What changed and what to check |
 
-## Working a plan: one section per worker, reviewer last
+## Working a plan: one stack per section
 
-The plan file is a list of `##` goals. Run **one `worker` per unticked goal**, in file
-order, handing that worker only its own section. When it returns and the heading is
-`## [x]`, dispatch the next unticked section immediately. Keep going until no `## [ ]`
-remains.
+The plan file is a list of `##` goals. Each goal gets **its own run of agents, start to
+finish**, before you move to the next one — the planner writes each section with its own
+scout/worker/reviewer steps and its own `### Done when`, so work the sections one at a
+time in file order:
 
-Stopping after the first section is the common failure — the operator is left with a
-half-built plan and a review of one slice. **`reviewer` runs once, at the end**, over
-all sections together. Do not interleave a review between sections.
+```
+chain: [
+  { agent: "scout",    task: "…recon for this section…",   goal: "Finalize gun models and first-person presentation" },
+  { agent: "worker",   task: "Implement {previous}",       goal: "Finalize gun models and first-person presentation" },
+  { agent: "reviewer", task: "Review against Done when…",  goal: "Finalize gun models and first-person presentation" },
+]
+```
 
-A chain works when the sections are known up front:
-`chain: [{ agent: "worker", task: "Implement section 1 of <plan>" }, { agent: "worker",
-task: "Implement section 2 …" }, { agent: "reviewer", task: "Review all sections" }]`.
-Use parallel `tasks` only for sections that touch different files.
+Pass `goal` on every step with the exact heading text (no `## [ ]` marker). Skip the
+`scout` step when the section already names the files and the change.
 
-Sylo does not delete the plan when the reviewer finishes — it marks it `status: reviewed`
-so the operator still sees the completed goals above the composer. The file is cleared
-when the operator sends the next message in that chat.
+When that section's reviewer passes, the goal is closed and you start the next section's
+stack. Keep going until no `## [ ]` remains — stopping after the first section is the
+common failure, and it leaves the operator with a half-built plan. Use parallel `tasks`
+only for sections that touch different files.
+
+### Who closes a goal
+
+**You never edit the plan file, and neither does the worker.** Sylo ticks the goal when
+that section's `reviewer` returns `VERDICT: PASS`, because the agent that wrote the code
+cannot be the one to certify it. The operator watches the boxes fill in as each section
+passes, so a run that never reviews looks like a run that never finished anything.
+
+A `FAIL` closes nothing. Send the section back to a `worker` with the reviewer's findings
+and review it again — the same goal, a fresh reviewer. Do not move to the next section
+with a failed one behind you, and never re-dispatch a section that is already `## [x]`.
+
+A `reviewer` given **no** `goal` is judged as a whole-plan review, so a `PASS` there
+closes every goal at once. Only omit `goal` when you really are reviewing the finished
+plan end to end.
+
+Sylo does not delete the plan once the goals are all closed — it marks it
+`status: reviewed` so the operator still sees the completed goals above the composer.
+The next message in that chat takes it off the bar (`hidden: true`) but leaves the file,
+so nothing is lost to a crash, an End, or a restart: when the operator asks to continue
+or to see the plan again, Sylo un-hides it and tells you where it stood. Report what the
+plan scope note says stands open — never re-run a section that is already `## [x]`.
 
 `worker` implements; it does not decide *what* to build. Handing it an open objective
 ("improve the renderer") makes it plan first and burn its context there instead of

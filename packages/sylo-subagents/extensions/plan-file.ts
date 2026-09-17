@@ -11,7 +11,11 @@ import {
   ensureSectionGoals,
   isPlanFinished,
   parsePlanConversationId,
+  parsePlanHidden,
+  parsePlanStatus,
   planBodyWithoutFrontmatter,
+  planGoalsComplete,
+  tickPlanGoals,
   type PlanStatus,
 } from './plan-checklist.ts'
 
@@ -67,7 +71,7 @@ function ensurePlansDir(cwd: string): string {
 
 export function formatPlanFile(
   body: string,
-  meta?: { conversationId?: string; status?: PlanStatus },
+  meta?: { conversationId?: string; status?: PlanStatus; hidden?: boolean },
 ): string {
   const lines = [
     '---',
@@ -75,6 +79,7 @@ export function formatPlanFile(
     `updated: ${formatPlanDate()}`,
     `status: ${meta?.status ?? 'active'}`,
   ]
+  if (meta?.hidden) lines.push('hidden: true')
   if (meta?.conversationId?.trim()) {
     lines.push(`conversation_id: ${meta.conversationId.trim()}`)
   }
@@ -134,24 +139,50 @@ export function writeCurrentPlan(
 }
 
 /**
- * Reviewer sign-off. The plan is NOT deleted here — the operator still needs to
- * see the finished goals above the composer. The next send clears it.
+ * Close goals a review passed. `goals` names the reviewed sections; `'all'` is a
+ * whole-plan review. Returns true when the file changed.
  */
-export function markPlanReviewed(cwd: string, conversationId: string): boolean {
+export function tickReviewedGoals(
+  cwd: string,
+  conversationId: string,
+  goals: readonly string[] | 'all',
+): boolean {
   if (!cwd.trim() || !isSafePlanConversationId(conversationId)) return false
   const convId = conversationId.trim()
   const abs = conversationPlanAbs(cwd, convId)
   const raw = readIfExists(abs)
   if (!raw) return false
+  const next = tickPlanGoals(raw, goals)
+  if (next === raw) return false
   try {
-    writeFileSync(
-      abs,
-      formatPlanFile(planBodyWithoutFrontmatter(raw), {
-        conversationId: convId,
-        status: 'reviewed',
-      }),
-      'utf8',
-    )
+    writeFileSync(abs, next, 'utf8')
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Rewrite only the frontmatter, carrying over whatever the patch does not set. */
+function rewritePlanMeta(
+  cwd: string,
+  conversationId: string,
+  patch: { status?: PlanStatus; hidden?: boolean },
+): boolean {
+  if (!cwd.trim() || !isSafePlanConversationId(conversationId)) return false
+  const convId = conversationId.trim()
+  const abs = conversationPlanAbs(cwd, convId)
+  const raw = readIfExists(abs)
+  if (!raw) return false
+  const status = patch.status ?? parsePlanStatus(raw)
+  const hidden = patch.hidden ?? parsePlanHidden(raw)
+  const next = formatPlanFile(planBodyWithoutFrontmatter(raw), {
+    conversationId: convId,
+    status,
+    hidden,
+  })
+  if (next === raw) return false
+  try {
+    writeFileSync(abs, next, 'utf8')
     return true
   } catch {
     return false
@@ -159,15 +190,39 @@ export function markPlanReviewed(cwd: string, conversationId: string): boolean {
 }
 
 /**
- * Clear this chat's plan only when it has nothing left to execute (reviewed, or
- * every goal ticked). An unfinished plan survives so "continue" can resume it.
+ * Reviewer sign-off. The plan is NOT deleted here — the operator still needs to
+ * see the finished goals above the composer. The next send hides it.
+ *
+ * A review that ran while goals are still open is not sign-off: the reviewer's own
+ * verdict in that case is "incomplete". Badging the plan `reviewed` at 0/3 told the
+ * operator the opposite, so the status only moves once every goal is ticked.
  */
-export function clearFinishedPlan(cwd: string, conversationId: string): boolean {
-  if (!cwd.trim() || !isSafePlanConversationId(conversationId)) return false
+export function markPlanReviewed(cwd: string, conversationId: string): boolean {
   const raw = readPlanMarkdown(cwd, conversationId)
-  if (!raw || !isPlanFinished(raw)) return false
-  return removeCurrentPlan(cwd, conversationId)
+  if (!raw || !planGoalsComplete(raw)) return false
+  return rewritePlanMeta(cwd, conversationId, { status: 'reviewed' })
 }
+
+/**
+ * Take a finished plan off the goals bar once the operator sends something new.
+ *
+ * The file stays on disk. Deleting it here meant a later "continue" — after a
+ * crash, an End, or closing the app — had no goals left to bring back, and the
+ * orchestrator lost the record of what had already passed review.
+ */
+export function hideFinishedPlan(cwd: string, conversationId: string): boolean {
+  const raw = readPlanMarkdown(cwd, conversationId)
+  if (!raw || !isPlanFinished(raw) || parsePlanHidden(raw)) return false
+  return rewritePlanMeta(cwd, conversationId, { hidden: true })
+}
+
+/** Put this chat's plan back on the goals bar, ticks intact. */
+export function restorePlan(cwd: string, conversationId: string): boolean {
+  const raw = readPlanMarkdown(cwd, conversationId)
+  if (!raw || !parsePlanHidden(raw)) return false
+  return rewritePlanMeta(cwd, conversationId, { hidden: false })
+}
+
 
 /** Remove this conversation's plan. Without an id, only a leftover current.md. */
 export function removeCurrentPlan(cwd: string, conversationId?: string): boolean {

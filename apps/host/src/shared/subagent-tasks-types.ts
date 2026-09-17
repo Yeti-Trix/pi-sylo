@@ -18,6 +18,12 @@ export type SyloSubagentHostEvent =
       parentRunId?: string
       stepIndex?: number
       model?: string
+      /**
+       * Plan goal heading this run is working, when the orchestrator named one.
+       * A reviewer's verdict closes exactly this goal; without it a passing review
+       * is treated as covering the whole plan.
+       */
+      goal?: string
     }
   | {
       type: 'subagent_run_update'
@@ -75,6 +81,8 @@ export type AgentTaskSpec = {
   agent: string
   groupRunId: string
   stepIndex?: number
+  /** Plan goal heading this run was dispatched against, if any. */
+  goal?: string
   lastPartialText?: string
   lastPartialThinking?: string
   lastThinkingLive?: boolean

@@ -12,10 +12,11 @@ import {
   type PlanTodo,
 } from '../../../../packages/sylo-subagents/extensions/plan-checklist.ts'
 import {
-  clearFinishedPlan,
   conversationPlanRel,
+  hideFinishedPlan,
   readPlanMarkdown,
   removeCurrentPlan,
+  restorePlan,
   retractForeignCurrentPlan,
 } from '../../../../packages/sylo-subagents/extensions/plan-file.ts'
 import type { PlanScope } from '../shared/orchestrator-resume.js'
@@ -93,6 +94,8 @@ export function readPlanTodos(conversationId: string): PlanTodosSnapshot {
   if (!raw) return empty
   const snap = snapshotPlanMarkdown(raw)
   if (snap.conversationId && snap.conversationId !== conversationId) return empty
+  // Still on disk so "continue" can bring it back — just not on the bar right now.
+  if (snap.hidden) return empty
   return {
     conversationId,
     goal: snap.goal,
@@ -117,17 +120,22 @@ const NO_PLAN: PlanScope = { planRel: null, done: 0, total: 0 }
 /**
  * Runs at the start of every operator turn in this chat:
  *  - drops a leftover `current.md` owned by another conversation,
- *  - clears this chat's plan only if it is finished (reviewed / all ticked), so
- *    the previous run's goals disappear exactly when the operator sends again,
- *  - reports remaining progress so the orchestrator dispatches the next section.
+ *  - hides this chat's plan if it is finished (reviewed / all ticked), so the
+ *    previous run's goals leave the bar exactly when the operator sends again,
+ *  - or puts a hidden plan back when the operator asks to continue,
+ *  - reports remaining progress so the orchestrator works the next section.
  */
-export function isolatePlanForConversation(conversationId: string): PlanScope {
+export function isolatePlanForConversation(
+  conversationId: string,
+  options?: { resume?: boolean },
+): PlanScope {
   if (!conversationId.trim()) return NO_PLAN
   const cwd = cwdForConversation(conversationId)
   if (!cwd) return NO_PLAN
   if (!subagentsRunning()) {
     retractForeignCurrentPlan(cwd, conversationId)
-    clearFinishedPlan(cwd, conversationId)
+    if (options?.resume) restorePlan(cwd, conversationId)
+    else hideFinishedPlan(cwd, conversationId)
   }
   const raw = readPlanMarkdown(cwd, conversationId)
   emitChanged()
@@ -139,5 +147,6 @@ export function isolatePlanForConversation(conversationId: string): PlanScope {
     done: snap.todos.filter((t) => t.done).length,
     total: snap.todos.length,
     nextGoal: snap.todos.find((t) => !t.done)?.text,
+    hidden: snap.hidden,
   }
 }

@@ -328,6 +328,8 @@ contextBridge.exposeInMainWorld('sylo', {
       ipcRenderer.invoke('chat:abort', conversationId) as Promise<
         { ok: true } | { ok: false; error: string }
       >,
+    /** Conversation ids the host still has a turn running for (survives a reload). */
+    activeTurns: () => ipcRenderer.invoke('chat:activeTurns') as Promise<string[]>,
     steer: (
       conversationId: string,
       text: string,

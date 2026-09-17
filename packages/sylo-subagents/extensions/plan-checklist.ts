@@ -114,6 +114,16 @@ export function parsePlanStatus(markdown: string): PlanStatus {
   return parsePlanField(markdown, 'status') === 'reviewed' ? 'reviewed' : 'active'
 }
 
+/**
+ * The operator has moved on, so the goals bar stops showing this plan.
+ *
+ * Hiding is not deleting: a finished plan used to be unlinked on the next send,
+ * which meant "continue" after a crash or a close had nothing left to bring back.
+ */
+export function parsePlanHidden(markdown: string): boolean {
+  return parsePlanField(markdown, 'hidden') === 'true'
+}
+
 /** Every goal heading ticked. False when the plan has no goals at all. */
 export function planGoalsComplete(markdown: string): boolean {
   const todos = parsePlanTodos(markdown)
@@ -131,6 +141,66 @@ export function isPlanFinished(markdown: string): boolean {
 /** First unticked goal — the section the next worker should implement. */
 export function nextOpenGoal(markdown: string): PlanTodo | undefined {
   return parsePlanTodos(markdown).find((t) => !t.done)
+}
+
+export type ReviewVerdict = 'pass' | 'fail' | 'none'
+
+/**
+ * Read a reviewer's `VERDICT: PASS` / `VERDICT: FAIL` sign-off line.
+ *
+ * Only the marker line counts, and the last one wins — reviewers quote the plan's
+ * own "return explicit PASS/FAIL" wording in their prose, so scanning for the bare
+ * words would read a template echo as a verdict. Anything else is `none`, which
+ * leaves the goal open.
+ */
+export function parseReviewVerdict(resultText: string | undefined): ReviewVerdict {
+  if (!resultText) return 'none'
+  let verdict: ReviewVerdict = 'none'
+  for (const line of resultText.split(/\r?\n/)) {
+    const m = /^\s*>?\s*\**\s*VERDICT\s*\**\s*:\s*\**\s*(PASS|FAIL)\b/i.exec(line)
+    if (m) verdict = m[1]!.toLowerCase() === 'pass' ? 'pass' : 'fail'
+  }
+  return verdict
+}
+
+/** Loose compare for goal titles, so surrounding punctuation or case never blocks a tick. */
+function sameGoalTitle(a: string, b: string): boolean {
+  const norm = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/[`*_]/g, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim()
+  return norm(a) === norm(b) && norm(a).length > 0
+}
+
+/**
+ * Tick goal headings. `goals` names the sections to close; `'all'` closes every
+ * goal, which is what a whole-plan review that passed has verified.
+ *
+ * Sylo owns this write. Asking the worker to edit its own heading meant the agent
+ * that wrote the code also certified it, and in practice it simply never happened —
+ * plans sat at 0 ticked through repeated "successful" runs.
+ */
+export function tickPlanGoals(markdown: string, goals: readonly string[] | 'all'): string {
+  const { fm, body } = stripFrontmatter(markdown)
+  const wanted = goals === 'all' ? null : goals.filter((g) => g.trim().length > 0)
+  if (wanted && wanted.length === 0) return markdown
+
+  const lines = body.split(/\r?\n/)
+  let changed = false
+  for (let i = 0; i < lines.length; i++) {
+    const h = H2_RE.exec(lines[i]!)
+    if (!h) continue
+    const parsed = parseH2Title(h[1]!)
+    if (!isGoalHeading(parsed.title)) continue
+    if (parsed.done === true) continue
+    if (wanted && !wanted.some((g) => sameGoalTitle(g, parsed.title))) continue
+    lines[i] = `## [x] ${parsed.title}`
+    changed = true
+  }
+  if (!changed) return markdown
+  return `${fm}${lines.join('\n')}`
 }
 
 function nextH2Index(lines: string[], start: number): number {
@@ -239,6 +309,7 @@ export type PlanSnapshot = {
   todos: PlanTodo[]
   conversationId?: string
   status: PlanStatus
+  hidden: boolean
 }
 
 export function snapshotPlanMarkdown(markdown: string): PlanSnapshot {
@@ -247,5 +318,6 @@ export function snapshotPlanMarkdown(markdown: string): PlanSnapshot {
     todos: parsePlanTodos(markdown),
     conversationId: parsePlanConversationId(markdown),
     status: parsePlanStatus(markdown),
+    hidden: parsePlanHidden(markdown),
   }
 }

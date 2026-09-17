@@ -24,6 +24,23 @@ export function isResumeLikeRequest(text: string): boolean {
   return RESUME_LIKE.test(t) || SHORT_RESUME.test(t)
 }
 
+/**
+ * Asking for the previous run's goals back, either by resuming ("continue",
+ * "finish it") or by naming them ("show the plan", "bring the checkboxes back").
+ * Sylo hides a finished plan on the next send; this is what un-hides it.
+ */
+const PLAN_NOUN = /\b(plan|goals?|checklist|checkboxe?s?)\b/i
+const PLAN_RECALL_VERB =
+  /\b(show|see|bring|put|restore|re-?open|display|finish|complete|get back to)\b/i
+
+export function isPlanRestoreRequest(text: string): boolean {
+  const t = text.trim()
+  if (!t || isTrivialAck(t)) return false
+  if (isResumeLikeRequest(t)) return true
+  // Either order: "show the goals", "put the checkboxes back up".
+  return PLAN_NOUN.test(t) && PLAN_RECALL_VERB.test(t)
+}
+
 export function lastAssistantLooksIncomplete(content: string, status?: string): boolean {
   if (status === 'failed') return true
   const c = content.trim()
@@ -65,12 +82,14 @@ export type PlanScope = {
   done: number
   total: number
   nextGoal?: string
+  /** On disk but off the goals bar: the operator moved on after it finished. */
+  hidden?: boolean
 }
 
 /**
- * The section loop, stated for the orchestrator: one worker per unticked `##`
- * goal, and the reviewer only once every goal is ticked. Left to itself the
- * parent runs worker-once-then-reviewer and abandons the remaining sections.
+ * The section loop, stated for the orchestrator: one full stack per unticked `##`
+ * goal, ending in the review that closes it. Left to itself the parent runs
+ * worker-once-then-reviewer and abandons the remaining sections.
  */
 function planProgressDirectives(scope: PlanScope): string[] {
   if (!scope.planRel) {
@@ -78,19 +97,23 @@ function planProgressDirectives(scope: PlanScope): string[] {
       'This chat has no plan file. Do not read or execute any file in `.sylo/plans/` — those belong to other chats.',
     ]
   }
+  if (scope.hidden) {
+    return [
+      `This chat has a finished plan at \`${scope.planRel}\` (${scope.done}/${scope.total} goals done) from earlier work. The operator has moved past it, so it is off their goals bar. Treat the request above as new work and do NOT re-run those goals. If the operator asks to continue that plan, Sylo puts it back and reports its progress here.`,
+    ]
+  }
   const out = [
-    `This chat's plan is \`${scope.planRel}\` (${scope.done}/${scope.total} goals done). Follow and tick only that file; other files in \`.sylo/plans/\` belong to other chats.`,
+    `This chat's plan is \`${scope.planRel}\` (${scope.done}/${scope.total} goals done). Follow only that file; other files in \`.sylo/plans/\` belong to other chats.`,
+    'Never edit the plan file yourself. Sylo ticks a goal when that section\'s `reviewer` replies `VERDICT: PASS`, so pass `goal` (the exact `##` heading text) on every subagent step.',
   ]
   if (scope.done >= scope.total && scope.total > 0) {
-    out.push(
-      'Every goal is ticked. Run `reviewer` once over all of the work, then report. Do not start new sections.',
-    )
+    out.push('Every goal is closed. Report the results. Do not start new sections.')
     return out
   }
   out.push(
-    'Dispatch one `worker` per unticked `## [ ]` goal, in file order, and hand it that section only.',
+    'Work the unticked `## [ ]` goals one at a time in file order. Give each section its own run — the section\'s own scout/worker/reviewer steps — and do not start the next section until a reviewer has passed the current one.',
     scope.nextGoal ? `The next section is "${scope.nextGoal}".` : '',
-    'When that worker returns and the goal is ticked, immediately dispatch the next unticked section — keep going until none are left. Do NOT run `reviewer` until every goal is ticked, and do not stop after the first section.',
+    'If a review fails, send that same section back to a `worker` with the findings and review it again. Do not stop after the first section, and do not re-dispatch a goal that is already `## [x]`.',
   )
   return out.filter(Boolean)
 }

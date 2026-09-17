@@ -208,6 +208,7 @@ export function insertAgentTaskStart(input: {
   task: string
   stepIndex?: number
   model?: string
+  goal?: string
   now?: number
 }): AgentTaskRow {
   const now = input.now ?? Date.now()
@@ -219,6 +220,7 @@ export function insertAgentTaskStart(input: {
     groupRunId: input.groupRunId,
     ...(input.stepIndex !== undefined ? { stepIndex: input.stepIndex } : {}),
     ...(input.model?.trim() ? { model: input.model.trim() } : {}),
+    ...(input.goal?.trim() ? { goal: input.goal.trim() } : {}),
   }
   const row: AgentTaskRow = {
     id: input.id,

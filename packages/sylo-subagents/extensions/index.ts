@@ -275,6 +275,7 @@ async function runSingleAgent(
   runId: string,
   groupRunId: string,
   parentRunId?: string,
+  goal?: string,
 ): Promise<SingleResult> {
   const agent = agents.find((a) => a.name === agentName)
   const subagentModel = agent ? subagentModelCliArgs(agent.name) : { args: [] as string[] }
@@ -295,6 +296,7 @@ async function runSingleAgent(
     parentRunId,
     stepIndex: step,
     model: modelLabel,
+    ...(goal?.trim() ? { goal: goal.trim() } : {}),
   })
 
   if (!agent) {
@@ -735,16 +737,21 @@ export async function runForcedSubagentChain(opts: {
   return outcomes
 }
 
+const GOAL_DESCRIPTION =
+  'Exact plan goal heading this step works, copied from the plan file without the `## [ ]` marker. Sylo ticks that goal when a reviewer passes it.'
+
 const TaskItem = Type.Object({
   agent: Type.String({ description: 'Name of the agent to invoke' }),
   task: Type.String({ description: 'Task to delegate to the agent' }),
   cwd: Type.Optional(Type.String({ description: 'Working directory for the agent process' })),
+  goal: Type.Optional(Type.String({ description: GOAL_DESCRIPTION })),
 })
 
 const ChainItem = Type.Object({
   agent: Type.String({ description: 'Name of the agent to invoke' }),
   task: Type.String({ description: 'Task with optional {previous} placeholder for prior output' }),
   cwd: Type.Optional(Type.String({ description: 'Working directory for the agent process' })),
+  goal: Type.Optional(Type.String({ description: GOAL_DESCRIPTION })),
 })
 
 const AgentScopeSchema = StringEnum(['user', 'project', 'both'] as const, {
@@ -755,6 +762,7 @@ const AgentScopeSchema = StringEnum(['user', 'project', 'both'] as const, {
 const SubagentParams = Type.Object({
   agent: Type.Optional(Type.String({ description: 'Name of the agent to invoke (for single mode)' })),
   task: Type.Optional(Type.String({ description: 'Task to delegate (for single mode)' })),
+  goal: Type.Optional(Type.String({ description: `${GOAL_DESCRIPTION} (single mode)` })),
   tasks: Type.Optional(
     Type.Array(TaskItem, { description: 'Array of {agent, task} for parallel execution' }),
   ),
@@ -895,6 +903,7 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
             runId,
             groupRunId,
             parentRunId,
+            step.goal,
           )
           results.push(result)
 
@@ -995,6 +1004,8 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
             'parallel',
             runId,
             groupRunId,
+            undefined,
+            t.goal,
           )
           allResults[index] = result
           emitParallelUpdate()
@@ -1043,6 +1054,8 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
           'single',
           runId,
           runId,
+          undefined,
+          params.goal,
         )
         const isError = isFailedResult(result)
         if (isError) {

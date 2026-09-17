@@ -65,6 +65,7 @@ import {
 import {
   composeOrchestratorResumePrompt,
   composePlanScopeNote,
+  isPlanRestoreRequest,
   shouldInjectOrchestratorResume,
 } from '../shared/orchestrator-resume.js'
 import {
@@ -2968,7 +2969,11 @@ async function startChatTurn(
   }
   let promptText = prepared.promptText
   if (subagentExtensionEnabled() && !brokerChatOnlyPref()) {
-    const planScope = isolatePlanForConversation(conversationId)
+    // "continue" / "finish it" after a crash, an End, or a restart puts the previous
+    // run's goals back on the bar instead of starting from an empty one.
+    const planScope = isolatePlanForConversation(conversationId, {
+      resume: isPlanRestoreRequest(prepared.text),
+    })
     promptText = `${composePlanScopeNote(conversationId, planScope)}\n\n${promptText}`
     if (!options?.forced) {
       const prior = lastAssistantForResume(conversationId, assistant.id)
@@ -7419,6 +7424,18 @@ function registerIpc(): void {
       })
     },
   )
+
+  /**
+   * Conversations with a turn the host is still working on. The renderer holds its
+   * in-flight set in memory, so a reload (or a second window) has to ask — otherwise
+   * the composer offers "Send" on a live turn and the Stop button disappears.
+   */
+  ipcMain.handle('chat:activeTurns', (): string[] => {
+    const ids = new Set<string>()
+    for (const pending of pendingTurns.values()) ids.add(pending.convId)
+    for (const deferred of deferredChatTurns) ids.add(deferred.conversationId)
+    return [...ids]
+  })
 
   ipcMain.handle(
     'chat:abort',

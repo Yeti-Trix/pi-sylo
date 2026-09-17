@@ -544,6 +544,8 @@ declare global {
         abort: (
           conversationId: string,
         ) => Promise<{ ok: true } | { ok: false; error: string }>
+        /** Conversation ids the host still has a turn running for (survives a reload). */
+        activeTurns: () => Promise<string[]>
         steer: (
           conversationId: string,
           text: string,

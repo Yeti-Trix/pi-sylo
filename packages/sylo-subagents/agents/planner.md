@@ -31,13 +31,15 @@ Concrete steps, order, and decisions. Name APIs, functions, and edge cases.
 - `path` — what changes and why
 
 ### Done when
-Verifiable acceptance for this goal only.
+Verifiable acceptance for this goal only. Sylo closes the goal when a reviewer
+checks the section against these criteria and passes it, so write them so someone
+who did not do the work can check them.
 
 ## [ ] Next goal title
 Same four parts. Add as many `##` goals as the work needs.
 
 ## Risks
-Cross-cutting risks only (not a goal). The worker does not tick this heading.
+Cross-cutting risks only (not a goal). It is never ticked.
 
 Do not emit a standalone `## Checklist` of one-liners. Details live inside each
 goal section. Use `###` for subsections — those are not goals.

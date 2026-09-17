@@ -50,7 +50,8 @@
     "test:subagent-plan-file": "esbuild ../../packages/sylo-subagents/extensions/plan-file.test.mjs --bundle --platform=node --format=esm --outfile=out/test/subagent-plan-file.test.mjs --packages=external && node --test out/test/subagent-plan-file.test.mjs",
     "test:subagent-plan-checklist": "esbuild ../../packages/sylo-subagents/extensions/plan-checklist.test.mjs --bundle --platform=node --format=esm --outfile=out/test/subagent-plan-checklist.test.mjs --packages=external && node --test out/test/subagent-plan-checklist.test.mjs",
     "test:model-max-tokens": "esbuild src/main/model-input.ts --bundle --platform=node --format=esm --outfile=out/test/model-input.mjs --packages=external && node --test src/main/model-max-tokens.test.mjs",
-    "test:skill-nav-layout": "esbuild src/renderer/src/skill-nav-layout.ts --bundle --platform=node --format=esm --outfile=out/test/skill-nav-layout.mjs --packages=external && node --test src/renderer/src/skill-nav-layout.test.mjs"
+    "test:skill-nav-layout": "esbuild src/renderer/src/skill-nav-layout.ts --bundle --platform=node --format=esm --outfile=out/test/skill-nav-layout.mjs --packages=external && node --test src/renderer/src/skill-nav-layout.test.mjs",
+    "test:subagent-batch-match": "esbuild src/renderer/src/components/subagent/matchSubagentBatches.ts --bundle --platform=node --format=esm --outfile=out/test/matchSubagentBatches.mjs --packages=external && node --test src/renderer/src/components/subagent/matchSubagentBatches.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.84.2",

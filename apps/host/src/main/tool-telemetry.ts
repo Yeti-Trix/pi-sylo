@@ -86,23 +86,51 @@ export function appendPersistedToolEvents(
   return out
 }
 
+function toolCallIdOf(entry: StampedToolEvent): string {
+  const raw = entry.event.toolCallId
+  return typeof raw === 'string' ? raw : ''
+}
+
+/**
+ * `tool_execution_start` rows for calls that have not ended yet. A tool the operator
+ * is still waiting on only renders as a live run because of its start row, so trimming
+ * must never drop one — a long turn that lost it showed the running subagent as
+ * "starting…" (or as some earlier, already-finished run) until the turn ended.
+ */
+export function openToolStartEntries(entries: readonly StampedToolEvent[]): StampedToolEvent[] {
+  const starts = new Map<string, StampedToolEvent>()
+  for (const entry of entries) {
+    const type = entry.event.type
+    if (type !== 'tool_execution_start' && type !== 'tool_execution_end') continue
+    const id = toolCallIdOf(entry)
+    if (!id) continue
+    if (type === 'tool_execution_start') starts.set(id, entry)
+    else starts.delete(id)
+  }
+  return [...starts.values()]
+}
+
 /**
  * Serialize for SQLite, dropping the oldest entries if the blob is still over the
  * ceiling after merging. Losing the head of an extreme turn keeps the app alive;
- * a marker entry records what went away.
+ * a marker entry records what went away. Starts for still-open tool calls are carried
+ * over regardless of age so in-flight work stays visible.
  */
 export function persistedToolEventsToJson(entries: StampedToolEvent[]): string {
   let json = JSON.stringify(entries)
   if (json.length <= MAX_BLOB_CHARS) return json
 
-  const kept = entries.slice()
+  const openStarts = openToolStartEntries(entries)
+  const held = new Set(openStarts)
+  const kept = entries.filter((entry) => !held.has(entry))
   let dropped = 0
+  json = JSON.stringify([...openStarts, ...kept])
   while (kept.length > 1 && json.length > MAX_BLOB_CHARS) {
     // Drop in chunks so an oversized blob does not re-serialize thousands of times.
     const cut = Math.max(1, Math.ceil(kept.length * 0.1))
     kept.splice(0, cut)
     dropped += cut
-    json = JSON.stringify(kept)
+    json = JSON.stringify([...openStarts, ...kept])
   }
   const marker: StampedToolEvent = {
     ts: entries[0]?.ts ?? Date.now(),
@@ -112,7 +140,8 @@ export function persistedToolEventsToJson(entries: StampedToolEvent[]): string {
       reason: `telemetry exceeded ${MAX_BLOB_CHARS} characters`,
     },
   }
-  return JSON.stringify([marker, ...kept])
+  // Consumers sort by ts, so the carried-over starts can sit at the front.
+  return JSON.stringify([marker, ...openStarts, ...kept])
 }
 
 /** Flush cadence for a message's telemetry, backing off once the blob gets large. */

@@ -14,6 +14,8 @@ export type SyloSubagentHostEvent =
       stepIndex?: number
       /** Provider/id the child was spawned with, for the run title. */
       model?: string
+      /** Plan goal heading this run is working, when the orchestrator named one. */
+      goal?: string
     }
   | {
       type: 'subagent_run_update'

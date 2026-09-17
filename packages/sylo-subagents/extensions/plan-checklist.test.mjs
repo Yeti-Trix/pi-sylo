@@ -10,8 +10,10 @@ import {
   nextOpenGoal,
   parsePlanStatus,
   parsePlanTodos,
+  parseReviewVerdict,
   planGoalsComplete,
   snapshotPlanMarkdown,
+  tickPlanGoals,
 } from './plan-checklist.ts'
 
 const DETAILED = `# Persist planner goals
@@ -109,6 +111,16 @@ describe('snapshotPlanMarkdown', () => {
     assert.equal(snap.goal, 'Title')
     assert.equal(snap.todos[0]?.text, 'One')
     assert.equal(snap.status, 'active')
+    assert.equal(snap.hidden, false)
+  })
+
+  test('hidden is frontmatter, independent of status', () => {
+    const snap = snapshotPlanMarkdown(
+      '---\nsource: planner\nstatus: reviewed\nhidden: true\n---\n\n# Title\n\n## [x] One\nBody.\n',
+    )
+    assert.equal(snap.hidden, true)
+    assert.equal(snap.status, 'reviewed')
+    assert.equal(snap.todos[0]?.done, true, 'a hidden plan keeps its ticks')
   })
 })
 
@@ -137,5 +149,60 @@ describe('plan completion', () => {
     assert.equal(parsePlanStatus(reviewed), 'reviewed')
     assert.equal(isPlanFinished(reviewed), true)
     assert.equal(parsePlanStatus(PARTIAL), 'active')
+  })
+})
+
+describe('parseReviewVerdict', () => {
+  test('reads the sign-off line', () => {
+    assert.equal(parseReviewVerdict('## Summary\nLooks good.\n\nVERDICT: PASS'), 'pass')
+    assert.equal(parseReviewVerdict('## Critical\nBroken.\n\nVERDICT: FAIL'), 'fail')
+    assert.equal(parseReviewVerdict('**VERDICT:** PASS'), 'pass')
+    assert.equal(parseReviewVerdict('verdict: pass'), 'pass')
+  })
+
+  test('the last verdict wins', () => {
+    assert.equal(parseReviewVerdict('VERDICT: PASS\n\nOn reflection:\n\nVERDICT: FAIL'), 'fail')
+  })
+
+  test('prose quoting the plan is not a verdict', () => {
+    // Plans literally say "Return explicit PASS/FAIL", and reviewers echo that back.
+    // Treating the bare word as sign-off would close goals off a template quote.
+    assert.equal(parseReviewVerdict('The plan asks me to return explicit PASS/FAIL.'), 'none')
+    assert.equal(parseReviewVerdict('I would PASS this if the tests existed.'), 'none')
+    assert.equal(parseReviewVerdict(undefined), 'none')
+    assert.equal(parseReviewVerdict(''), 'none')
+  })
+})
+
+describe('tickPlanGoals', () => {
+  const PLAN = `---\nstatus: active\n---\n\n# Outcome\n\n## [ ] Finalize gun models\nWork.\n\n## [ ] Replace reload overlays\nWork.\n\n## Risks\nNot a goal.\n`
+
+  test('closes only the named goal', () => {
+    const out = tickPlanGoals(PLAN, ['Finalize gun models'])
+    assert.match(out, /## \[x\] Finalize gun models/)
+    assert.match(out, /## \[ \] Replace reload overlays/)
+    assert.match(out, /^## Risks$/m, 'reserved headings are never ticked')
+  })
+
+  test('matches a goal despite case and punctuation drift', () => {
+    const out = tickPlanGoals(PLAN, ['finalize gun models.'])
+    assert.match(out, /## \[x\] Finalize gun models/)
+  })
+
+  test('a whole-plan pass closes every goal but no reserved heading', () => {
+    const out = tickPlanGoals(PLAN, 'all')
+    assert.equal(planGoalsComplete(out), true)
+    assert.match(out, /^## Risks$/m)
+  })
+
+  test('keeps the frontmatter and leaves unknown goals alone', () => {
+    assert.match(tickPlanGoals(PLAN, 'all'), /^---\nstatus: active\n---/)
+    assert.equal(tickPlanGoals(PLAN, ['Something never planned']), PLAN)
+    assert.equal(tickPlanGoals(PLAN, []), PLAN)
+  })
+
+  test('already ticked goals are left as they are', () => {
+    const done = tickPlanGoals(PLAN, 'all')
+    assert.equal(tickPlanGoals(done, 'all'), done)
   })
 })

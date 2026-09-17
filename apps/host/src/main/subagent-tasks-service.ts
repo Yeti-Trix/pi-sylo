@@ -1,9 +1,11 @@
 import { existsSync } from 'node:fs'
 
+import { parseReviewVerdict } from '../../../../packages/sylo-subagents/extensions/plan-checklist.ts'
 import {
   isPlannerAgentName,
   isReviewerAgentName,
   markPlanReviewed,
+  tickReviewedGoals,
   writeCurrentPlan,
 } from '../../../../packages/sylo-subagents/extensions/plan-file.ts'
 import type { SyloSubagentHostEvent } from '../shared/subagent-tasks-types.js'
@@ -45,6 +47,17 @@ function planBodyFromResult(resultText: string | undefined): string {
   return resultText.replace(/\n\nPlan saved to `[^`]+`\. Later turns should read that file instead of re-planning\.\s*$/u, '').trim()
 }
 
+/** Goal heading this run was dispatched against, when the orchestrator named one. */
+function taskGoal(row: ReturnType<typeof store.getAgentTask>): string | undefined {
+  if (!row) return undefined
+  try {
+    const spec = JSON.parse(row.spec_json) as { goal?: unknown }
+    return typeof spec.goal === 'string' && spec.goal.trim() ? spec.goal.trim() : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function syncWorkspacePlanFile(
   conversationId: string,
   event: Extract<SyloSubagentHostEvent, { type: 'subagent_run_end' }>,
@@ -58,7 +71,14 @@ function syncWorkspacePlanFile(
     return
   }
   if (event.status === 'succeeded' && isReviewerAgentName(agent)) {
+    // The review's verdict — not the worker that wrote the code — is what closes a
+    // goal. A review naming no goal is a whole-plan pass, so it closes all of them.
+    if (parseReviewVerdict(event.resultText) === 'pass') {
+      const goal = taskGoal(row)
+      tickReviewedGoals(cwd, conversationId, goal ? [goal] : 'all')
+    }
     // Sign off, do not delete: the goals bar stays until the operator sends again.
+    // No-ops unless the ticks above completed the plan.
     markPlanReviewed(cwd, conversationId)
   }
 }
@@ -80,6 +100,7 @@ export function handleSubagentHostEvent(conversationId: string, event: SyloSubag
         task: event.task,
         stepIndex: event.stepIndex,
         model: event.model,
+        goal: event.goal,
       })
       break
     case 'subagent_run_update':

@@ -6,18 +6,20 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
-import { parsePlanTodos } from './plan-checklist.ts'
+import { parsePlanHidden, parsePlanTodos } from './plan-checklist.ts'
 import {
-  clearFinishedPlan,
   conversationPlanAbs,
   conversationPlanRel,
   currentPlanAbs,
+  hideFinishedPlan,
   isPlannerAgentName,
   isReviewerAgentName,
   markPlanReviewed,
   readPlanMarkdown,
   removeCurrentPlan,
+  restorePlan,
   retractForeignCurrentPlan,
+  tickReviewedGoals,
   writeCurrentPlan,
 } from './plan-file.ts'
 
@@ -119,26 +121,103 @@ describe('conversation-scoped plan file', () => {
     assert.equal(parsePlanTodos(text).length, 1)
   })
 
-  test('next send clears a reviewed plan but keeps an unfinished one', () => {
+  test('next send hides a reviewed plan but keeps an unfinished one showing', () => {
     const cwd = scratch()
     writeCurrentPlan(cwd, '# A\n\n## [x] One\nDone.\n\n## [ ] Two\nOpen.\n', {
       conversationId: 'conv-1',
     })
-    assert.equal(clearFinishedPlan(cwd, 'conv-1'), false)
-    assert.ok(readPlanMarkdown(cwd, 'conv-1'))
+    assert.equal(hideFinishedPlan(cwd, 'conv-1'), false)
+    assert.equal(parsePlanHidden(readPlanMarkdown(cwd, 'conv-1') ?? ''), false)
 
+    writeCurrentPlan(cwd, '# A\n\n## [x] One\nDone.\n\n## [x] Two\nDone.\n', {
+      conversationId: 'conv-1',
+    })
     markPlanReviewed(cwd, 'conv-1')
-    assert.equal(clearFinishedPlan(cwd, 'conv-1'), true)
-    assert.equal(readPlanMarkdown(cwd, 'conv-1'), null)
+    assert.equal(hideFinishedPlan(cwd, 'conv-1'), true)
+    assert.equal(hideFinishedPlan(cwd, 'conv-1'), false, 'hiding twice is a no-op')
+    const hiddenText = readPlanMarkdown(cwd, 'conv-1') ?? ''
+    assert.match(hiddenText, /hidden: true/)
+    assert.match(hiddenText, /status: reviewed/, 'sign-off survives the hide')
   })
 
-  test('next send clears a fully ticked plan even without a review', () => {
+  test('hidden goals come back on request, ticks and all', () => {
+    // A crash, an End, or a close must not cost the operator the plan: "continue"
+    // has to be able to put the same boxes back.
     const cwd = scratch()
     writeCurrentPlan(cwd, '# A\n\n## [x] One\nDone.\n\n## [x] Two\nDone.\n', {
       conversationId: 'conv-1',
     })
-    assert.equal(clearFinishedPlan(cwd, 'conv-1'), true)
-    assert.equal(readPlanMarkdown(cwd, 'conv-1'), null)
+    markPlanReviewed(cwd, 'conv-1')
+    hideFinishedPlan(cwd, 'conv-1')
+
+    assert.equal(restorePlan(cwd, 'conv-1'), true)
+    const text = readPlanMarkdown(cwd, 'conv-1') ?? ''
+    assert.equal(parsePlanHidden(text), false)
+    assert.match(text, /status: reviewed/)
+    assert.equal(
+      parsePlanTodos(text).every((t) => t.done),
+      true,
+      'the ticks the reviewer earned are still there',
+    )
+    assert.equal(restorePlan(cwd, 'conv-1'), false, 'a visible plan needs no restore')
+    assert.equal(restorePlan(cwd, 'conv-2'), false, 'other chats have nothing to restore')
+  })
+
+  test('a passing per-section review closes just that goal', () => {
+    const cwd = scratch()
+    writeCurrentPlan(cwd, '# A\n\n## [ ] One\nOpen.\n\n## [ ] Two\nOpen.\n', {
+      conversationId: 'conv-1',
+    })
+    assert.equal(tickReviewedGoals(cwd, 'conv-1', ['One']), true)
+    const todos = parsePlanTodos(readPlanMarkdown(cwd, 'conv-1') ?? '')
+    assert.deepEqual(
+      todos.map((t) => [t.text, t.done]),
+      [
+        ['One', true],
+        ['Two', false],
+      ],
+    )
+  })
+
+  test('a whole-plan pass closes every goal and then signs off', () => {
+    const cwd = scratch()
+    writeCurrentPlan(cwd, '# A\n\n## [ ] One\nOpen.\n\n## [ ] Two\nOpen.\n', {
+      conversationId: 'conv-1',
+    })
+    assert.equal(tickReviewedGoals(cwd, 'conv-1', 'all'), true)
+    assert.equal(markPlanReviewed(cwd, 'conv-1'), true)
+    const text = readPlanMarkdown(cwd, 'conv-1') ?? ''
+    assert.match(text, /status: reviewed/)
+    assert.equal(parsePlanTodos(text).every((t) => t.done), true)
+  })
+
+  test('ticking a goal no plan contains changes nothing', () => {
+    const cwd = scratch()
+    writeCurrentPlan(cwd, '# A\n\n## [ ] One\nOpen.\n', { conversationId: 'conv-1' })
+    assert.equal(tickReviewedGoals(cwd, 'conv-1', ['Not a goal here']), false)
+    assert.equal(tickReviewedGoals(cwd, 'conv-2', 'all'), false, 'other chats are untouched')
+  })
+
+  test('a review with goals still open is not sign-off', () => {
+    // The reviewer's own verdict here is "incomplete" — badging the plan reviewed
+    // told the operator the work was done while every goal sat unticked.
+    const cwd = scratch()
+    writeCurrentPlan(cwd, '# A\n\n## [ ] One\nOpen.\n\n## [ ] Two\nOpen.\n', {
+      conversationId: 'conv-1',
+    })
+    assert.equal(markPlanReviewed(cwd, 'conv-1'), false)
+    const text = readPlanMarkdown(cwd, 'conv-1') ?? ''
+    assert.match(text, /status: active/)
+    assert.equal(hideFinishedPlan(cwd, 'conv-1'), false, 'unfinished work stays on the bar')
+  })
+
+  test('next send hides a fully ticked plan even without a review', () => {
+    const cwd = scratch()
+    writeCurrentPlan(cwd, '# A\n\n## [x] One\nDone.\n\n## [x] Two\nDone.\n', {
+      conversationId: 'conv-1',
+    })
+    assert.equal(hideFinishedPlan(cwd, 'conv-1'), true)
+    assert.match(readPlanMarkdown(cwd, 'conv-1') ?? '', /hidden: true/)
   })
 
   test('unscoped current.md is never returned to a named conversation', () => {
