@@ -5,8 +5,8 @@ import { resolveToolsPackageDir } from './tools-bundles.js'
 
 const hostMainDir = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(hostMainDir, '..', '..', '..', '..')
-// Package moved to the sylo-tools-controls bundle (2026-09-02); in-repo path kept as fallback.
-const packageRoot = resolveToolsPackageDir(repoRoot, 'sylo-tools-controls', 'sylo-logicforge')
+// Parse/template engine moved to sylo-forge; in-repo path is retained as a fallback.
+const packageRoot = resolveToolsPackageDir(repoRoot, 'sylo-tools-controls', 'sylo-forge')
 const parseDir = join(packageRoot, 'assets', 'parse')
 const parseConfigPath = join(parseDir, 'parse_config.json')
 const settingsPath = join(parseDir, 'settings.json')
@@ -38,7 +38,7 @@ export function logicforgeParseRulesGet(): {
   const settings = readJsonFile(settingsPath)
   if (parse_config == null && settings == null) {
     throw new Error(
-      'parse rules not seeded — restore packages/sylo-logicforge/assets/parse from git or enable sylo-logicforge',
+      'parse rules not seeded — restore packages/sylo-forge/assets/parse from git or enable sylo-forge',
     )
   }
   return {
@@ -80,7 +80,7 @@ export function logicforgeParseRulesReset(): ReturnType<typeof logicforgeParseRu
   const srcSettings = existsSync(defaultSettings) ? defaultSettings : fallbackSettings
   if (!existsSync(srcParse) && !existsSync(srcSettings)) {
     throw new Error(
-      'parse rule defaults missing — restore packages/sylo-logicforge/assets/parse/_defaults from git',
+      'parse rule defaults missing — restore packages/sylo-forge/assets/parse/_defaults from git',
     )
   }
   if (existsSync(srcParse)) {

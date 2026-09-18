@@ -946,6 +946,8 @@ declare global {
           modelId: string,
           visionCapable: boolean,
         ) => Promise<{ ok: true } | { ok: false; error: string }>
+        /** Providers with a working login — chat / subagent pickers hide the rest. */
+        configuredProviders: () => Promise<string[]>
       }
       /** Provider API keys — stored in Pi's `~/.pi/agent/auth.json` (masked reads). */
       piAuth: {

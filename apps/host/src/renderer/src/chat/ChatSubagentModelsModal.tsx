@@ -3,7 +3,6 @@ import React, { useCallback, useEffect, useState } from 'react'
 import {
   CHATGPT_CODEX_MODELS,
   CHATGPT_CODEX_PROVIDER,
-  SYLO_MODEL_PROVIDERS,
   SYLO_MODEL_PROVIDER_LABELS,
 } from '../../../shared/chatgpt-codex'
 import {
@@ -13,6 +12,7 @@ import {
 import { cn } from '../lib/cn'
 import { normalizeOllamaOriginUi, OllamaModelSelect } from '../panels/ollama-ui'
 import { btnGhostSm, btnPrimarySm, input, mutedText, select } from '../panels/ui-classes'
+import { useConfiguredProviders } from './useConfiguredProviders'
 
 /**
  * Per-chat subagent model and thinking pins.
@@ -59,6 +59,11 @@ export function ChatSubagentModelsModal({
   const [ollamaTags, setOllamaTags] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const pinProviders = [
+    ...Object.values(chatPins).map((p) => p.provider),
+    ...Object.values(globalPins).map((p) => p.provider),
+  ]
+  const providers = useConfiguredProviders(pinProviders)
 
   // Everything loads on open rather than with the chat bar: the tag list and agent scan
   // are only worth paying for once someone actually reaches for this.
@@ -180,7 +185,7 @@ export function ChatSubagentModelsModal({
                       aria-label={`${agent.name} provider`}
                     >
                       <option value="">Inherit ({pinLabel(globalPins[agent.name])})</option>
-                      {SYLO_MODEL_PROVIDERS.map((p) => (
+                      {providers.map((p) => (
                         <option key={p} value={p}>
                           {SYLO_MODEL_PROVIDER_LABELS[p]}
                         </option>

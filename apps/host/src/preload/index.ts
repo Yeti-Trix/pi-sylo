@@ -700,6 +700,9 @@ contextBridge.exposeInMainWorld('sylo', {
       ipcRenderer.invoke('models:setVision', provider, modelId, visionCapable) as Promise<
         { ok: true } | { ok: false; error: string }
       >,
+    /** Providers with a working login — chat / subagent pickers hide the rest. */
+    configuredProviders: () =>
+      ipcRenderer.invoke('models:configuredProviders') as Promise<string[]>,
   },
   /** Provider API keys — stored in Pi's `~/.pi/agent/auth.json` (masked reads). */
   piAuth: {

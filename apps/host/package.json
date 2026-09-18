@@ -42,6 +42,7 @@
     "test:subagent-agents": "esbuild src/main/subagent-agents.test.mjs --bundle --platform=node --format=esm --outfile=out/test/subagent-agents.test.mjs --packages=external && node --test out/test/subagent-agents.test.mjs",
     "test:global-agents": "esbuild src/main/global-agents.test.mjs --bundle --platform=node --format=esm --outfile=out/test/global-agents.test.mjs --packages=external && node --test out/test/global-agents.test.mjs",
     "test:chatgpt-codex": "esbuild src/shared/chatgpt-codex.ts --bundle --platform=node --format=esm --outfile=out/test/chatgpt-codex.mjs --packages=external && node --test src/shared/chatgpt-codex.test.mjs",
+    "test:configured-providers": "esbuild src/shared/configured-providers.ts --bundle --platform=node --format=esm --outfile=out/test/configured-providers.mjs --packages=external && node --test src/shared/configured-providers.test.mjs",
     "test:ask-question": "esbuild src/shared/ask-question.ts --bundle --platform=node --format=esm --outfile=out/test/ask-question.mjs --packages=external && node --test src/shared/ask-question.test.mjs",
     "test:subagent-mentions": "esbuild src/shared/subagent-mentions.ts --bundle --platform=node --format=esm --outfile=out/test/subagent-mentions.mjs --packages=external && node --test src/shared/subagent-mentions.test.mjs",
     "test:empty-reply": "esbuild src/broker/empty-reply.ts --bundle --platform=node --format=esm --outfile=out/test/empty-reply.mjs --packages=external && node --test src/broker/empty-reply.test.mjs",

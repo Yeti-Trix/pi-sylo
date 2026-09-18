@@ -23,6 +23,7 @@ import {
   isPiBuiltinToolId,
   type PiBuiltinToolId,
 } from '../../../shared/pi-builtin-tools'
+import { useConfiguredProviders } from '../chat/useConfiguredProviders'
 import { invalidateSubagentNames } from '../chat/useSubagentNames'
 import { cn } from '../lib/cn'
 import { normalizeOllamaOriginUi, OllamaModelSelect } from './ollama-ui'
@@ -78,6 +79,7 @@ function SubagentModelFields({
   pin,
   onChange,
   ollamaTags,
+  providers,
 }: {
   idPrefix: string
   label: string
@@ -86,6 +88,7 @@ function SubagentModelFields({
   pin: SubagentModelPin
   onChange: (next: SubagentModelPin) => void
   ollamaTags: string[]
+  providers: readonly string[]
 }): React.ReactElement {
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -97,9 +100,9 @@ function SubagentModelFields({
         aria-label={`${label} provider`}
       >
         <option value="">{inheritLabel}</option>
-        {SYLO_MODEL_PROVIDERS.map((p) => (
+        {providers.map((p) => (
           <option key={p} value={p}>
-            {SYLO_MODEL_PROVIDER_LABELS[p]}
+            {SYLO_MODEL_PROVIDER_LABELS[p as keyof typeof SYLO_MODEL_PROVIDER_LABELS] ?? p}
           </option>
         ))}
       </select>
@@ -275,6 +278,11 @@ export function SettingsPanel({
   const [gaDraft, setGaDraft] = useState('')
   const [gaDirty, setGaDirty] = useState(false)
   const [gaBusy, setGaBusy] = useState(false)
+  const [configuredProviderRefresh, setConfiguredProviderRefresh] = useState(0)
+  const configuredProviders = useConfiguredProviders(
+    [subagentProvider, newAgentPin.provider, ...Object.values(agentPins).map((p) => p.provider)],
+    configuredProviderRefresh,
+  )
 
   const loadGlobalAgents = useCallback(async () => {
     try {
@@ -562,6 +570,7 @@ export function SettingsPanel({
         setChatgptProgress(null)
         await refreshChatgptStatus()
         if (modelId.trim() === '') setModelId(CHATGPT_CODEX_DEFAULT_MODEL)
+        setConfiguredProviderRefresh((n) => n + 1)
       } else if (!r.cancelled) {
         setChatgptError(r.error)
         setChatgptProgress(null)
@@ -595,6 +604,7 @@ export function SettingsPanel({
     }
     setChatgptConnected(false)
     setChatgptAccountId(null)
+    setConfiguredProviderRefresh((n) => n + 1)
   }, [])
 
     const saveModelPrefs = async () => {
@@ -667,6 +677,7 @@ export function SettingsPanel({
     }
     // Chat caption + AgentSession read the running broker; prefs alone do not hot-swap the model.
     await window.sylo.broker.restart()
+    setConfiguredProviderRefresh((n) => n + 1)
     onChanged()
   }
 
@@ -1026,6 +1037,7 @@ export function SettingsPanel({
                         }
                         setOrAuthHasKey(false)
                         setOrAuthPreview(null)
+                        setConfiguredProviderRefresh((n) => n + 1)
                       })()
                     }}
                   >
@@ -1767,6 +1779,7 @@ export function SettingsPanel({
                 setSubagentThinking(next.thinkingLevel ?? '')
               }}
               ollamaTags={ollamaTags}
+              providers={configuredProviders}
             />
           </label>
 
@@ -1822,6 +1835,7 @@ export function SettingsPanel({
                       setAgentPins((prev) => ({ ...prev, [agent.name]: next }))
                     }
                     ollamaTags={ollamaTags}
+                    providers={configuredProviders}
                   />
                 </div>
               ))}
@@ -1906,6 +1920,7 @@ export function SettingsPanel({
               pin={newAgentPin}
               onChange={setNewAgentPin}
               ollamaTags={ollamaTags}
+              providers={configuredProviders}
             />
           </label>
           <div className="flex flex-col gap-1">

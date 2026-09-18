@@ -51,6 +51,11 @@ import { BUILD_INFO } from '../generated/build-info.js'
 import { DefaultPackageManager, SettingsManager } from '@earendil-works/pi-coding-agent'
 import { SYLO_MODEL_PROVIDERS, CHATGPT_CODEX_MODELS } from '../shared/chatgpt-codex.js'
 import {
+  API_PROVIDER_ENV_VARS,
+  listConfiguredModelProviders,
+  providerHasStoredCredential,
+} from '../shared/configured-providers.js'
+import {
   mergeSubagentPins,
   parseSubagentPins,
   serializeSubagentPins,
@@ -1307,8 +1312,9 @@ let canvasOpenState = false
  *  `skill-nav-layout.ts`), computes the final per-section rows for the active
  *  workspace, and pushes them here via `menu:set-sections`. The main process
  *  only renders this list into native top-level menus (Dashboards / Tools /
- *  Developer) and forwards clicks back to the main window. Pinned route/tab
- *  rows also get a Pin/Unpin submenu so they can be parked in the sidebar. */
+ *  Developer) and forwards clicks back to the main window. Dashboards/Tools
+ *  route/tab rows also get a Pin/Unpin submenu so they can be parked in the
+ *  sidebar; Developer items stay click-only. */
 type MenuActionItem =
   | { kind: 'route'; key: string; title: string; sep?: boolean; pinned?: boolean }
   | { kind: 'tab'; tab: string; title: string; sep?: boolean; pinned?: boolean }
@@ -1353,11 +1359,14 @@ function sendMenuAction(item: MenuActionItem): void {
   if (mw && !mw.isDestroyed()) mw.webContents.send('menu:action', item)
 }
 
-/** Route/tab rows keep a Pin submenu (native menus have no item-level
- *  right-click). Clicking the parent still opens; the submenu is the pin
- *  button the operator asked for. */
-function buildSyncedMenuItem(item: MenuActionItem): MenuItemConstructorOptions {
-  if (item.kind === 'action' || item.kind === 'pin') {
+/** Dashboards/Tools route/tab rows keep a Pin submenu (native menus have no
+ *  item-level right-click). Clicking the parent still opens; the submenu is
+ *  the pin button the operator asked for. Developer items are click-only. */
+function buildSyncedMenuItem(
+  item: MenuActionItem,
+  opts: { pinnable?: boolean } = {},
+): MenuItemConstructorOptions {
+  if (item.kind === 'action' || item.kind === 'pin' || opts.pinnable === false) {
     return {
       label: item.title,
       click: () => sendMenuAction(item),
@@ -1442,7 +1451,7 @@ function buildAppMenu(): Menu {
       // label/click ignored — so the separator must be its own row, never
       // merged into the item it precedes.
       if (item.sep && submenu.length > 0) submenu.push({ type: 'separator' })
-      submenu.push(buildSyncedMenuItem(item))
+      submenu.push(buildSyncedMenuItem(item, { pinnable: sec.id !== 'dev' }))
     }
     template.push({ label: sec.label, submenu })
   }
@@ -3184,7 +3193,10 @@ function inferOllamaBaseOriginFromModelsJson(agentDir: string): string | null {
   }
 }
 
-async function fetchOllamaTagNames(baseOrigin: string): Promise<{ ok: true; models: string[] } | { ok: false; error: string }> {
+async function fetchOllamaTagNames(
+  baseOrigin: string,
+  timeoutMs = 10_000,
+): Promise<{ ok: true; models: string[] } | { ok: false; error: string }> {
   let tagsUrl: URL
   try {
     tagsUrl = new URL('/api/tags', `${normalizeOllamaOrigin(baseOrigin)}/`)
@@ -3195,7 +3207,7 @@ async function fetchOllamaTagNames(baseOrigin: string): Promise<{ ok: true; mode
     return { ok: false, error: 'Only http(s) URLs are allowed' }
   }
   const ac = new AbortController()
-  const t = setTimeout(() => ac.abort(), 10_000)
+  const t = setTimeout(() => ac.abort(), timeoutMs)
   try {
     const res = await fetch(tagsUrl, { signal: ac.signal })
     if (!res.ok) {
@@ -3413,6 +3425,50 @@ function readProviderAuthInfo(
   const trimmed = key.trim()
   const tail = trimmed.length > 12 ? '…' + trimmed.slice(-8) : '…' + trimmed.slice(-4)
   return { ok: true, hasKey: true, keyPreview: tail }
+}
+
+function readAuthJsonRoot(agentDir: string): Record<string, unknown> {
+  const authPath = join(agentDir, 'auth.json')
+  if (!existsSync(authPath)) return {}
+  try {
+    const root = JSON.parse(readFileSync(authPath, 'utf8')) as unknown
+    if (!root || typeof root !== 'object' || Array.isArray(root)) return {}
+    return root as Record<string, unknown>
+  } catch {
+    return {}
+  }
+}
+
+function envHasProviderKey(provider: string): boolean {
+  const envName = API_PROVIDER_ENV_VARS[provider as keyof typeof API_PROVIDER_ENV_VARS]
+  if (!envName) return false
+  const v = process.env[envName]
+  return typeof v === 'string' && v.trim() !== ''
+}
+
+/** Providers the chat / companion / subagent pickers may offer right now. */
+function resolveConfiguredModelProviders(ollamaReachable: boolean): string[] {
+  const agentDir = hostAgentDir()
+  const storedProvider = (db.getPref('sylo.model_provider', '') as string).trim()
+  const auth = readAuthJsonRoot(agentDir)
+  const chatgpt = chatgptAuthStatus(agentDir)
+  const hasCredential: Record<string, boolean> = {}
+  for (const p of SYLO_MODEL_PROVIDERS) {
+    if (p === 'ollama' || p === 'openai-codex') continue
+    hasCredential[p] = providerHasStoredCredential(auth[p]) || envHasProviderKey(p)
+  }
+  return listConfiguredModelProviders({
+    ollamaReachable,
+    chatgptConnected: chatgpt.connected,
+    hasCredential,
+    alwaysInclude: [storedProvider],
+  })
+}
+
+async function listConfiguredModelProvidersForHost(timeoutMs = 1200): Promise<string[]> {
+  const origin = resolveOllamaBaseOriginForPrefs()
+  const tags = await fetchOllamaTagNames(origin, timeoutMs)
+  return resolveConfiguredModelProviders(tags.ok)
 }
 
 /**
@@ -4477,7 +4533,7 @@ function registerIpc(): void {
           imageModelProvider: (db.getPref('sylo.image_model_provider', 'ollama') as string).trim(),
         },
         ollamaOrigin: origin,
-        providers: [...SYLO_MODEL_PROVIDERS],
+        providers: resolveConfiguredModelProviders(tags.ok),
         ollamaModels,
         chatgptModels: CHATGPT_CODEX_MODELS.map((m) => ({ id: m.id, name: m.name, visionCapable: m.vision })),
       }
@@ -6893,6 +6949,8 @@ function registerIpc(): void {
     const agentDir = hostAgentDir()
     return writeModelInputTypes(agentDir, provider, modelId.trim(), visionCapable)
   })
+
+  ipcMain.handle('models:configuredProviders', () => listConfiguredModelProvidersForHost())
 
   ipcMain.handle('ollama:inferBaseUrl', () => {
     const pref = (db.getPref('sylo.ollama_base_url', '') as string).trim()
