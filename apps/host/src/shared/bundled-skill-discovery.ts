@@ -158,7 +158,14 @@ export function discoverBundledSkillPathsFromExtensionPaths(extensionPaths: stri
   return dedupeNormalizedPaths(collected)
 }
 
-/** Skills shipped under packageRoot/skills for each enabled npm package in Pi settings. */
+function resolveLocalPackageRoot(agentDir: string, spec: string): string | null {
+  const trimmed = spec.trim()
+  if (!trimmed || /^(npm:|git:|https?:|ssh:|file:)/i.test(trimmed)) return null
+  const abs = resolve(expandHome(agentDir), trimmed)
+  return existsSync(abs) ? abs : null
+}
+
+/** Skills shipped under packageRoot/skills for each enabled npm or local-path package. */
 export function discoverBundledSkillPathsFromPiPackages(
   agentDir: string,
   projectCwd: string,
@@ -166,10 +173,14 @@ export function discoverBundledSkillPathsFromPiPackages(
   const collected: string[] = []
   for (const spec of readPiPackageSpecs(agentDir, projectCwd)) {
     const npmName = npmPackageNameFromSpec(spec)
-    if (!npmName) continue
-    for (const root of resolveNpmPackageRoots(npmName, agentDir, projectCwd)) {
-      collected.push(...discoverBundledSkillPathsFromPackageRoot(root))
+    if (npmName) {
+      for (const root of resolveNpmPackageRoots(npmName, agentDir, projectCwd)) {
+        collected.push(...discoverBundledSkillPathsFromPackageRoot(root))
+      }
+      continue
     }
+    const local = resolveLocalPackageRoot(agentDir, spec)
+    if (local) collected.push(...discoverBundledSkillPathsFromPackageRoot(local))
   }
   return dedupeNormalizedPaths(collected)
 }

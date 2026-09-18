@@ -1,3 +1,4 @@
+import { app } from 'electron'
 import { X509Certificate } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { hostname, homedir } from 'node:os'
@@ -28,8 +29,28 @@ export type CompanionTlsTrustInfo = {
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const HOST_ROOT = join(__dirname, '..', '..')
+/** Operator-placed mkcert certificates living beside the app tree. */
 export const COMPANION_CERTS_DIR = join(HOST_ROOT, 'certs')
 export const COMPANION_ROOT_CA_DOWNLOAD_PATH = '/api/companion/root-ca.pem'
+
+/**
+ * Where generated certificates are written.
+ *
+ * An installer replaces the whole program directory, so a Tailscale cert
+ * written next to the app tree would disappear on every upgrade (and the
+ * program directory may not be writable at all for a per-machine install).
+ * Installed builds therefore keep generated material in userData alongside the
+ * Sylo CA; a dev clone keeps using the repo's certs/ directory as before.
+ */
+function generatedCertsDir(userDataPath: string): string {
+  return app.isPackaged ? join(userDataPath, 'companion-certs') : COMPANION_CERTS_DIR
+}
+
+/** Both certificate locations, nearest first, de-duplicated for dev clones. */
+function certSearchDirs(userDataPath: string): string[] {
+  const generated = generatedCertsDir(userDataPath)
+  return generated === COMPANION_CERTS_DIR ? [generated] : [generated, COMPANION_CERTS_DIR]
+}
 
 const MKCERT_CERT_CANDIDATES = ['sylo-companion', 'sylo-tailscale'] as const
 
@@ -55,12 +76,16 @@ function mapAltNames(altNames: string[]) {
   )
 }
 
-function resolveMkcertPaths(): { certPath: string; keyPath: string; certName: string } | null {
-  for (const name of MKCERT_CERT_CANDIDATES) {
-    const certPath = join(COMPANION_CERTS_DIR, `${name}.crt`)
-    const keyPath = join(COMPANION_CERTS_DIR, `${name}.key`)
-    if (existsSync(certPath) && existsSync(keyPath)) {
-      return { certPath, keyPath, certName: name }
+function resolveMkcertPaths(
+  userDataPath: string,
+): { certPath: string; keyPath: string; certName: string; certsDir: string } | null {
+  for (const dir of certSearchDirs(userDataPath)) {
+    for (const name of MKCERT_CERT_CANDIDATES) {
+      const certPath = join(dir, `${name}.crt`)
+      const keyPath = join(dir, `${name}.key`)
+      if (existsSync(certPath) && existsSync(keyPath)) {
+        return { certPath, keyPath, certName: name, certsDir: dir }
+      }
     }
   }
   return null
@@ -79,9 +104,12 @@ function defaultMkcertRootCaPath(): string | null {
   return null
 }
 
-function resolveBundledRootCaPath(): string | null {
-  const bundled = join(COMPANION_CERTS_DIR, 'rootCA.pem')
-  return existsSync(bundled) ? bundled : null
+function resolveBundledRootCaPath(userDataPath: string): string | null {
+  for (const dir of certSearchDirs(userDataPath)) {
+    const bundled = join(dir, 'rootCA.pem')
+    if (existsSync(bundled)) return bundled
+  }
+  return null
 }
 
 function syloCaPaths(userDataPath: string) {
@@ -97,13 +125,13 @@ function syloCaPaths(userDataPath: string) {
 }
 
 export function getCompanionTlsTrustInfo(userDataPath: string): CompanionTlsTrustInfo {
-  const mkcert = resolveMkcertPaths()
+  const mkcert = resolveMkcertPaths(userDataPath)
   if (mkcert) {
     return {
       mode: 'mkcert',
       certName: mkcert.certName,
-      certsDir: COMPANION_CERTS_DIR,
-      rootCaPath: resolveBundledRootCaPath() ?? defaultMkcertRootCaPath(),
+      certsDir: mkcert.certsDir,
+      rootCaPath: resolveBundledRootCaPath(userDataPath) ?? defaultMkcertRootCaPath(),
       rootCaDownloadPath: COMPANION_ROOT_CA_DOWNLOAD_PATH,
     }
   }
@@ -119,9 +147,9 @@ export function getCompanionTlsTrustInfo(userDataPath: string): CompanionTlsTrus
 
 /** PEM body for phone CA install. Public — no auth required. */
 export function readCompanionRootCaPem(userDataPath: string): string | null {
-  const mkcert = resolveMkcertPaths()
+  const mkcert = resolveMkcertPaths(userDataPath)
   if (mkcert) {
-    const bundled = resolveBundledRootCaPath()
+    const bundled = resolveBundledRootCaPath(userDataPath)
     if (bundled) return readFileSync(bundled, 'utf8')
     const system = defaultMkcertRootCaPath()
     if (system) return readFileSync(system, 'utf8')
@@ -134,13 +162,13 @@ export function readCompanionRootCaPem(userDataPath: string): string | null {
 
 /**
  * The public DNS name baked into the *override* cert (e.g. the Tailscale
- * `*.ts.net` Let's Encrypt cert in `apps/host/certs/sylo-tailscale.crt`).
+ * `*.ts.net` Let's Encrypt cert, `sylo-tailscale.crt`).
  * Returns null for the self-signed Sylo CA (whose SAN is IPs/localhost only) so
  * the UI falls back to the raw LAN IP URLs. No hardcoding — derived from the
  * cert itself, so it is correct on whichever machine provisioned its cert.
  */
 export function readCompanionPublicFqdn(userDataPath: string): string | null {
-  const override = resolveMkcertPaths()
+  const override = resolveMkcertPaths(userDataPath)
   if (!override || !existsSync(override.certPath)) return null
   try {
     const x509 = new X509Certificate(readFileSync(override.certPath, 'utf8'))
@@ -199,12 +227,12 @@ async function generateSyloCaAndServer(userDataPath: string, altNames: string[])
 }
 
 /**
- * mkcert override in apps/host/certs/, else auto CA + server cert in userData.
+ * mkcert override in the certs directory, else auto CA + server cert in userData.
  *
  * When the companion is LAN-bound and a Tailscale interface is present, this
  * first best-effort provisions/renews a Tailscale Let's Encrypt cert for the
- * node's MagicDNS name into `apps/host/certs/sylo-tailscale.{crt,key}`; that
- * override is then picked up by `resolveMkcertPaths` so the phone URL becomes
+ * node's MagicDNS name into `sylo-tailscale.{crt,key}`; that override is then
+ * picked up by `resolveMkcertPaths` so the phone URL becomes
  * `https://<node>.<tailnet>.ts.net:<port>` with no manual step. Any failure
  * falls through to the self-signed Sylo CA.
  */
@@ -213,9 +241,9 @@ export async function ensureCompanionTlsMaterial(
   bind?: CompanionBindMode,
 ): Promise<CompanionTlsMaterial> {
   if (bind === 'lan') {
-    await ensureTailscaleCompanionCert({ certsDir: COMPANION_CERTS_DIR })
+    await ensureTailscaleCompanionCert({ certsDir: generatedCertsDir(userDataPath) })
   }
-  const mkcert = resolveMkcertPaths()
+  const mkcert = resolveMkcertPaths(userDataPath)
   if (mkcert) {
     return {
       key: readFileSync(mkcert.keyPath, 'utf8'),

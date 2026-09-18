@@ -12,6 +12,8 @@
     "start": "npm run start -w apps/host",
     "build": "npm run build -w apps/host",
     "bootstrap-pi": "node ./scripts/bootstrap-pi.mjs",
+    "stage:installer": "node ./scripts/stage-package.mjs",
+    "dist:win": "node ./scripts/make-installer.mjs",
     "sync-skill-surfaces": "node ./scripts/sync-smoke-skills.mjs",
     "boostrap-pi": "npm run bootstrap-pi",
     "rebuild:native": "npm run rebuild:native -w apps/host",
@@ -44,6 +46,7 @@
   },
   "devDependencies": {
     "electron": "^41.10.5",
+    "electron-builder": "^26.15.3",
     "patch-package": "^8.0.1"
   }
 }

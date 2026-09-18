@@ -1,6 +1,9 @@
 node_modules/
 **/out/
 dist/
+# electron-builder buildResources — icon.png is copied from apps/host/resources
+# by scripts/stage-package.mjs on every installer build.
+/build/
 # Generated build metadata (scripts/gen-build-info.mjs — regenerated on install/build)
 apps/host/src/generated/
 tracker-dashboard.html

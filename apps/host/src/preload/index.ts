@@ -1201,6 +1201,29 @@ contextBridge.exposeInMainWorld('sylo', {
   userPackages: {
     list: () => ipcRenderer.invoke('user-packages:list') as Promise<unknown>,
   },
+  customTools: {
+    list: () =>
+      ipcRenderer.invoke('custom-tools:list') as Promise<
+        { id: string; name: string; version: string | null; description: string | null; dir: string }[]
+      >,
+    exportPack: (ids?: string[]) =>
+      ipcRenderer.invoke('custom-tools:export', ids) as Promise<
+        | { ok: true; path: string; packages: { id: string; name: string }[] }
+        | { ok: false; cancelled?: true; error?: string }
+      >,
+    importPack: () =>
+      ipcRenderer.invoke('custom-tools:import') as Promise<
+        | {
+            ok: true
+            imported: { id: string; name: string; dir: string }[]
+            registered: string[]
+            npm: { id: string; ok: boolean; detail: string }[]
+            skillsCopied: string[]
+          }
+        | { ok: false; cancelled?: true; error?: string }
+      >,
+  },
+  relaunch: () => ipcRenderer.invoke('app:relaunch') as Promise<void>,
   tasksDb: {
     snapshotGet: (workspaceCwd: string) =>
       ipcRenderer.invoke('tasks:db-snapshot-get', workspaceCwd),

@@ -1442,6 +1442,32 @@ declare global {
           }>
         >
       }
+      customTools: {
+        list: () => Promise<
+          Array<{
+            id: string
+            name: string
+            version: string | null
+            description: string | null
+            dir: string
+          }>
+        >
+        exportPack: (ids?: string[]) => Promise<
+          | { ok: true; path: string; packages: Array<{ id: string; name: string }> }
+          | { ok: false; cancelled?: true; error?: string }
+        >
+        importPack: () => Promise<
+          | {
+              ok: true
+              imported: Array<{ id: string; name: string; dir: string }>
+              registered: string[]
+              npm: Array<{ id: string; ok: boolean; detail: string }>
+              skillsCopied: string[]
+            }
+          | { ok: false; cancelled?: true; error?: string }
+        >
+      }
+      relaunch: () => Promise<void>
       updates: {
         status: () => Promise<import('../shared/app-update-types.js').AppUpdateStatus>
         checkNow: () => Promise<import('../shared/app-update-types.js').AppUpdateStatus>

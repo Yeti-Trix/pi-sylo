@@ -11,4 +11,7 @@ export type AppUpdateStatus = {
   checkedAt: number | null
   /** Last check error (fetch/parse); null on success. */
   error: string | null
+  /** True for installer builds, false for a dev clone. Decides whether the
+   *  banner tells the user to run the new setup .exe or to `git pull`. */
+  isInstalledBuild: boolean
 }

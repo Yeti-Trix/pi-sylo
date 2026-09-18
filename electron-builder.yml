@@ -1,0 +1,83 @@
+# Sylo installer — single-file NSIS setup for Windows.
+#
+# The payload is produced by scripts/stage-package.mjs, which mirrors the repo
+# layout (apps/host/out, apps/host/src, packages, node_modules) so the main
+# process's existing SYLO_REPO_ROOT resolution keeps working once installed.
+# Run `npm run dist:win` (or make-installer.cmd) rather than invoking
+# electron-builder directly — it will not build the payload for you.
+
+appId: YetiTrix.Sylo
+productName: Sylo
+copyright: Copyright © Yeti-Trix
+
+directories:
+  app: dist/stage
+  buildResources: build
+  output: dist/installer
+
+# asar must stay off. The broker child runs under ELECTRON_RUN_AS_NODE — plain
+# Node, without Electron's asar filesystem shim — and it is the process that
+# loads every Pi extension as live TypeScript from packages/ and apps/host/src.
+asar: false
+
+# The payload is pre-built and its native modules (better-sqlite3, node-pty)
+# are already compiled against this Electron version by
+# scripts/rebuild-better-sqlite3.mjs. Re-resolving or rebuilding here would
+# fight the staging script.
+npmRebuild: false
+buildDependenciesFromSource: false
+
+# Ship the payload verbatim. scripts/stage-package.mjs already decided what
+# belongs here, and filtering again is actively dangerous: Markdown is content
+# in this app, not documentation. Every skill is a SKILL.md, every subagent
+# persona is agents/*.md, and every workflow playbook is a .md file, so a
+# blanket '!**/*.md' silently removes most of Sylo's capabilities. Source maps
+# are the only safe thing to drop.
+files:
+  - '**/*'
+  - '!**/*.map'
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: Sylo-Setup-${version}.exe
+  # Unsigned: Windows SmartScreen will warn on first run until the installer
+  # builds reputation (or a code-signing certificate is configured).
+  signAndEditExecutable: true
+
+nsis:
+  # Per-user install under %LOCALAPPDATA%\Programs\Sylo — no UAC prompt, and the
+  # install directory stays writable, which the app relies on for the
+  # .sylo-last-good marker and the companion server's Tailscale certificates.
+  oneClick: true
+  perMachine: false
+  allowElevation: false
+
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Sylo
+
+  # Upgrade safety. All durable state lives outside the install directory —
+  # %APPDATA%\@sylo\host (SQLite: chats, messages, prefs; checkpoints;
+  # attachments), %USERPROFILE%\.pi\agent (Pi auth, models, session
+  # transcripts, skills), %USERPROFILE%\.sylo, and the workspace folders under
+  # Documents\GitHub. Re-running a newer setup replaces only the program files.
+  # deleteAppDataOnUninstall stays false so even a full uninstall leaves chats
+  # and credentials intact.
+  deleteAppDataOnUninstall: false
+
+  # Differential/blockmap generation is for electron-updater; without it the
+  # build skips hashing the whole payload.
+  differentialPackage: false
+
+  # In-place upgrade: skip the previous Uninstall Sylo.exe (it reports
+  # "Sylo cannot be closed" when it cannot delete a locked file in the large
+  # asar-off tree, even if Sylo is not running). Close only Sylo.exe.
+  # See scripts/nsis/installer.nsh.
+  include: installer.nsh
+  allowToChangeInstallationDirectory: false
+
+# No auto-update channel: users install a newer setup .exe over the old one.
+publish: null

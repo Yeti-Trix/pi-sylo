@@ -118,6 +118,7 @@ import {
 } from './tasks-live.js'
 import { readSkillMd, writeSkillMd } from './skill-md-io.js'
 import { installCrashHandlers } from './crash-log.js'
+import { pinSyloUserDataDir, syncBundledSkills } from './packaged-runtime.js'
 import {
   appendPersistedToolEvents,
   persistedToolEventsToJson,
@@ -363,6 +364,14 @@ import {
 } from './tts-config.js'
 import { generateTtsWav, listTtsVoices, synthOptionsFromRecords } from './tts-engine.js'
 import { readUserPackages } from './user-packages.js'
+import {
+  ensureLocalPackageSkillsInstalled,
+  ensureLocalPackageSkillSurfaces,
+  importCustomToolsFromZip,
+  listCustomToolPackages,
+  suggestedExportFileName,
+  writeCustomToolsZip,
+} from './custom-tools-pack.js'
 import { loadEvalDashboard, runEvalBaseline } from './eval-dashboard.js'
 import {
   ensureWebAccessConfigSchema,
@@ -446,6 +455,13 @@ import { closeAllWorkspaceScheduleDbs } from './workspace-db.js'
 if (process.platform === 'win32' && process.env.ELECTRON_RENDERER_URL) {
   app.disableHardwareAcceleration()
 }
+
+// Before anything can read userData: the installed build's app manifest is
+// named differently than the dev clone's, and Electron derives userData from
+// the app name. Pinning it keeps chats, credentials, and prefs in the same
+// directory across both. Nothing in this file's imports resolves a userData
+// path at module scope, so here is early enough.
+pinSyloUserDataDir()
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const WORKSPACE_NODE_MODULES = join(__dirname, '../../../..', 'node_modules')
@@ -6052,6 +6068,65 @@ function registerIpc(): void {
   // `pi install` shows here as always-on.
   ipcMain.handle('user-packages:list', () => readUserPackages(hostAgentDir()))
 
+  ipcMain.handle('custom-tools:list', () => listCustomToolPackages(SYLO_REPO_ROOT))
+
+  ipcMain.handle('custom-tools:export', async (_e, idsArg?: unknown) => {
+    if (!mainWindow) return { ok: false as const, error: 'no_window' }
+    const ids = Array.isArray(idsArg)
+      ? idsArg.filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim())
+      : []
+    const listed = listCustomToolPackages(SYLO_REPO_ROOT)
+    const selected = ids.length > 0 ? listed.filter((p) => ids.includes(p.id)) : listed
+    if (selected.length === 0) return { ok: false as const, error: 'No custom tools to export' }
+    const r = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export custom tools',
+      defaultPath: suggestedExportFileName(selected.map((p) => p.id)),
+      filters: [{ name: 'Sylo custom tools', extensions: ['zip'] }],
+    })
+    if (r.canceled || !r.filePath) return { ok: false as const, cancelled: true as const }
+    const dest = r.filePath.toLowerCase().endsWith('.zip') ? r.filePath : `${r.filePath}.zip`
+    const written = writeCustomToolsZip({
+      repoRoot: SYLO_REPO_ROOT,
+      destZip: dest,
+      ids: selected.map((p) => p.id),
+    })
+    if (!written.ok) return { ok: false as const, error: written.error }
+    return {
+      ok: true as const,
+      path: written.path,
+      packages: written.packages.map((p) => ({ id: p.id, name: p.name })),
+    }
+  })
+
+  ipcMain.handle('custom-tools:import', async () => {
+    if (!mainWindow) return { ok: false as const, error: 'no_window' }
+    const picked = await dialog.showOpenDialog(mainWindow, {
+      title: 'Import custom tools',
+      properties: ['openFile'],
+      filters: [{ name: 'Sylo custom tools', extensions: ['zip'] }],
+    })
+    const zipPath = picked.filePaths[0]
+    if (picked.canceled || !zipPath) return { ok: false as const, cancelled: true as const }
+    const stagingDir = join(app.getPath('temp'), `sylo-custom-tools-${Date.now()}`)
+    const rendererSurface = join(__dirname, '../renderer/skill-surface')
+    return importCustomToolsFromZip({
+      repoRoot: SYLO_REPO_ROOT,
+      agentDir: hostAgentDir(),
+      zipPath,
+      stagingDir,
+      installDeps: true,
+      surfaceDests: [
+        join(SYLO_REPO_ROOT, 'apps/host/test-fixtures/skill-surface'),
+        ...(existsSync(dirname(rendererSurface)) ? [rendererSurface] : []),
+      ],
+    })
+  })
+
+  ipcMain.handle('app:relaunch', () => {
+    app.relaunch()
+    app.exit(0)
+  })
+
   // ── sylo-tasks sidebar dashboard (Phase 3) ────────────────────────────
   // The dashboard iframe talks to the host via the skill-route bridge; the
   // renderer dispatches `tasks:*` ops to `window.sylo.tasksDb.*` (preload) →
@@ -7674,6 +7749,9 @@ async function detectUnpushedGithubWorkspaces(): Promise<string[]> {
  * deep fallback and notifies the operator to RDP.
  */
 function markLastGoodCommit(): void {
+  // Installed builds are not git checkouts and have no supervisor to revert
+  // them, so there is nothing to mark.
+  if (app.isPackaged) return
   try {
     execFile('git', ['-C', SYLO_REPO_ROOT, 'rev-parse', 'HEAD'], (err, stdout) => {
       if (err) return
@@ -7860,6 +7938,19 @@ app.whenReady().then(() => {
     get: (key, fallback) => db.getPref(key, fallback),
     set: (key, value) => db.setPref(key, value),
   })
+  // Installed builds have no `npm run prepare:dev` to install the bundled
+  // skills into the Pi agent dir, so do it here — once per app version, before
+  // the broker starts and enumerates skills.
+  syncBundledSkills(SYLO_REPO_ROOT, hostAgentDir(), {
+    getPref: (key, fallback) => db.getPref(key, fallback),
+    setPref: (key, value) => db.setPref(key, value),
+  })
+  const customSurfaceDests = [
+    join(SYLO_REPO_ROOT, 'apps/host/test-fixtures/skill-surface'),
+    join(__dirname, '../renderer/skill-surface'),
+  ]
+  ensureLocalPackageSkillsInstalled(hostAgentDir())
+  ensureLocalPackageSkillSurfaces(hostAgentDir(), customSurfaceDests)
   ensureDefaultCloneDir()
   // Missing user-data workspace? When the folder the primary (universal)
   // workspace row points at does not exist on disk — deleted externally, a new

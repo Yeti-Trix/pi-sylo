@@ -301,6 +301,13 @@ export function CapabilityManagerPanel({
       loaded: boolean
     }[]
   >([])
+  const [customToolPacks, setCustomToolPacks] = useState<
+    { id: string; name: string; version: string | null; description: string | null; dir: string }[]
+  >([])
+  const [exportCustomOpen, setExportCustomOpen] = useState(false)
+  const [exportCustomIds, setExportCustomIds] = useState<Set<string>>(() => new Set())
+  const [customPackBusy, setCustomPackBusy] = useState<'export' | 'import' | null>(null)
+  const [importRestart, setImportRestart] = useState<{ names: string; extra: string } | null>(null)
   const [excludeAgentNotice, setExcludeAgentNotice] = useState<string | null>(null)
   const [extensionConfigPaths, setExtensionConfigPaths] = useState<Set<string>>(() => new Set())
   const [configModal, setConfigModal] = useState<
@@ -820,6 +827,72 @@ export function CapabilityManagerPanel({
     await onRefresh()
   }, [onRefresh])
 
+  const refreshCustomToolPacks = useCallback(async () => {
+    try {
+      const rows = await window.sylo.customTools.list()
+      setCustomToolPacks(Array.isArray(rows) ? rows : [])
+    } catch {
+      setCustomToolPacks([])
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshCustomToolPacks()
+  }, [refreshCustomToolPacks, settingsJson.packages])
+
+  const openExportCustom = () => {
+    const ids = new Set(customToolPacks.map((p) => p.id))
+    setExportCustomIds(ids)
+    setExportCustomOpen(true)
+    void refreshCustomToolPacks()
+  }
+
+  const runExportCustom = async () => {
+    const ids = [...exportCustomIds]
+    if (ids.length === 0) {
+      alert('Select at least one custom tool bundle to export.')
+      return
+    }
+    setCustomPackBusy('export')
+    setInstallFlash(null)
+    try {
+      const r = await window.sylo.customTools.exportPack(ids)
+      if (r.ok) {
+        setExportCustomOpen(false)
+        setInstallFlash(
+          `Exported ${r.packages.map((p) => p.id).join(', ')} to ${r.path}. This zip is functionality only — no saved dashboard data.`,
+        )
+      } else if (!r.cancelled) {
+        alert(`Export failed:\n${r.error ?? '(no detail)'}`)
+      }
+    } finally {
+      setCustomPackBusy(null)
+    }
+  }
+
+  const runImportCustom = async () => {
+    setCustomPackBusy('import')
+    setInstallFlash(null)
+    try {
+      const r = await window.sylo.customTools.importPack()
+      if (r.ok) {
+        const npmFails = r.npm.filter((n) => !n.ok)
+        const names = r.imported.map((p) => p.id).join(', ')
+        const extra =
+          npmFails.length > 0
+            ? ` npm install failed for ${npmFails.map((n) => n.id).join(', ')} — run it in that Custom folder after restart.`
+            : ''
+        // Do not refresh capabilities here — the running broker still has the
+        // old package set, and that is what painted a wall of stale warnings.
+        setImportRestart({ names, extra })
+      } else if (!r.cancelled) {
+        alert(`Import failed:\n${r.error ?? '(no detail)'}`)
+      }
+    } finally {
+      setCustomPackBusy(null)
+    }
+  }
+
   const packageWorkspaceId = exclusionWorkspaceId.trim() || undefined
 
   const patchStandaloneExclude = useCallback(
@@ -1183,6 +1256,29 @@ export function CapabilityManagerPanel({
             stay installed. To remove files from the machine, use <strong>Uninstall</strong> (<code>pi uninstall</code>);
             restart the broker after either. Per-skill/per-extension <strong>disable</strong> (hide from AI only) is
             under <strong>Skills</strong> and <strong>Extensions</strong> above.
+          </p>
+          <div className={capActions}>
+            <button
+              type="button"
+              className={btnGhostSm}
+              disabled={!!customPackBusy || customToolPacks.length === 0}
+              onClick={openExportCustom}
+            >
+              {customPackBusy === 'export' ? 'Exporting…' : 'Export custom tools…'}
+            </button>
+            <button
+              type="button"
+              className={btnGhostSm}
+              disabled={!!customPackBusy}
+              onClick={() => void runImportCustom()}
+            >
+              {customPackBusy === 'import' ? 'Importing…' : 'Import custom tools…'}
+            </button>
+          </div>
+          <p className={cn(mutedText, capSectionLeadTight)}>
+            Share <code>Custom/</code> tool bundles locally as a zip (dashboards and tools only — not saved data,
+            tokens, or <code>node_modules</code>). Import on another Sylo by picking that zip — Sylo will ask you to
+            restart so Dashboards and Tools menus appear.
           </p>
           {hostPlugins.length > 0 && (
             <div className="mb-3">
@@ -1784,6 +1880,115 @@ export function CapabilityManagerPanel({
           document.body,
         )
       : null}
+
+      {importRestart
+        ? createPortal(
+            <div className={modalOverlay} role="presentation">
+              <div
+                className={modalShell}
+                role="dialog"
+                aria-labelledby="import-restart-title"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className={modalBody}>
+                  <h3 id="import-restart-title" className={modalTitle}>
+                    Restart Sylo to finish import
+                  </h3>
+                  <p className={cn(mutedText, capSectionLeadTight)}>
+                    Imported <strong>{importRestart.names}</strong>. Tools and dashboards load only after
+                    Sylo restarts — Restart broker is not enough.
+                    {importRestart.extra}
+                  </p>
+                  <div className={modalActions}>
+                    <button
+                      type="button"
+                      className={btnPrimary}
+                      onClick={() => {
+                        void window.sylo.relaunch()
+                      }}
+                    >
+                      Restart Sylo now
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+
+      {exportCustomOpen
+        ? createPortal(
+            <div className={modalOverlay} role="presentation" onClick={() => setExportCustomOpen(false)}>
+              <div
+                className={modalShell}
+                role="dialog"
+                aria-labelledby="export-custom-tools-title"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className={modalBody}>
+                  <h3 id="export-custom-tools-title" className={modalTitle}>
+                    Export custom tools
+                  </h3>
+                  <p className={cn(mutedText, capSectionLeadTight)}>
+                    Packs the selected <code>Custom/</code> bundles into a zip you can copy to another Sylo. Saved data,
+                    tokens, <code>.sylo</code>, and <code>node_modules</code> are left out.
+                  </p>
+                  {customToolPacks.length === 0 ? (
+                    <p className={cn(mutedText, capEmptyNote)}>
+                      No custom tool bundles found under <code>Custom/</code>.
+                    </p>
+                  ) : (
+                    <ul className={rowList}>
+                      {customToolPacks.map((pkg) => {
+                        const checked = exportCustomIds.has(pkg.id)
+                        return (
+                          <li key={pkg.id} className={capSkillRow}>
+                            <label className={rowHeadline}>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => {
+                                  setExportCustomIds((prev) => {
+                                    const next = new Set(prev)
+                                    if (next.has(pkg.id)) next.delete(pkg.id)
+                                    else next.add(pkg.id)
+                                    return next
+                                  })
+                                }}
+                              />
+                              <span className={rowName}>{pkg.name}</span>
+                              {pkg.version ? (
+                                <span className={cn(mutedText, 'ml-2 font-mono text-xs')}>v{pkg.version}</span>
+                              ) : null}
+                            </label>
+                            {pkg.description ? (
+                              <p className={cn(mutedText, 'mt-1 text-sm')}>{pkg.description}</p>
+                            ) : null}
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  )}
+                  <div className={modalActions}>
+                    <button type="button" className={btnGhost} onClick={() => setExportCustomOpen(false)}>
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className={btnPrimary}
+                      disabled={!!customPackBusy || exportCustomIds.size === 0}
+                      onClick={() => void runExportCustom()}
+                    >
+                      {customPackBusy === 'export' ? 'Exporting…' : 'Export zip…'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
 
       <ConfigFormModal
         open={configModal !== null}

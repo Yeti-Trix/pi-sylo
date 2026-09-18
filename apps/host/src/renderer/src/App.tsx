@@ -4383,7 +4383,25 @@ export function App(): React.ReactElement {
         {updateStatus?.isUpdateAvailable && updateStatus.latestVersion && dismissedUpdateVersion !== updateStatus.latestVersion && (
           <div className={banner}>
             <strong>Sylo {updateStatus.latestVersion}</strong> is available — you have{' '}
-            {updateStatus.currentVersion}. Update: <code>git pull</code> + <code>npm install</code> + restart Sylo.{' '}
+            {updateStatus.currentVersion}.{' '}
+            {updateStatus.isInstalledBuild ? (
+              <>
+                Update: download the new installer and run it — your chats and settings are
+                kept.{' '}
+                <a
+                  href="https://github.com/Yeti-Trix/pi-sylo/releases/latest"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Download
+                </a>
+                {' · '}
+              </>
+            ) : (
+              <>
+                Update: <code>git pull</code> + <code>npm install</code> + restart Sylo.{' '}
+              </>
+            )}
             <a
               href="https://github.com/Yeti-Trix/pi-sylo/blob/main/CHANGELOG.md"
               target="_blank"

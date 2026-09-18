@@ -644,6 +644,7 @@ function InterleavedAssistantBody({
             key={`subagent-block-${seg.id}`}
             batch={batch}
             segmentId={seg.id}
+            live={seg.endTs === null}
             onNotice={onSubagentNotice}
           />,
         )
