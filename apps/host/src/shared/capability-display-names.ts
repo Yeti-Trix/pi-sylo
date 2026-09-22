@@ -65,6 +65,7 @@ export function deriveExtensionDisplayName(path: string): string {
   if (builtin === 'scheduler') return 'sylo-scheduler'
   if (builtin === 'ask-question') return 'sylo-ask-question'
   if (builtin === 'tools-guard') return 'sylo-builtin-tools-guard'
+  if (builtin === 'compaction-anchor') return 'sylo-compaction-anchor'
 
   const optional = classifySyloOptionalPackageId(path)
   if (optional) return optional

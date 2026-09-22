@@ -1,16 +1,28 @@
 # Work coordination — Sylo dev repo
 
-All work on this repo is coordinated through **GitHub Issues** (plus the "Sylo work
-board" Projects kanban). The rule in one line: **no unclaimed, untracked work — if it
-isn't an issue, it isn't being coordinated.**
+All work on this repo is coordinated through **GitHub Issues** and the **Sylo work
+board** (user-level GitHub Project). The rule in one line: **no unclaimed, untracked
+work — if it isn't an issue, it isn't being coordinated.**
 
 This applies to every agent session and human, regardless of tool (Sylo chats, Cursor,
 GitHub Desktop, CLI). `AGENTS.md` carries only the pointer; this file is the process.
 
+## Where things live
+
+| Surface | Purpose |
+|---|---|
+| Issues on **Yeti-Trix/pi-sylo-dev** (private) | In-flight/confidential work: unreleased features, bugs, refactors. Design docs live in the issue body. |
+| Issues on **Yeti-Trix/pi-sylo** (public) | Shipped/community-facing items: public roadmap, user-facing bug reports. |
+| **Sylo work board** (GitHub Project, user-level) | The kanban across both repos; cards auto-move on PR open/merge — never drag by hand. |
+
+The folder trackers (`features_tracker/`, `issue_tracker/`) were retired 2026-09-11
+(pi-sylo-dev #20). Old docs remain in git history:
+`git log --oneline -- features_tracker` / `git show <rev>:<path>` to recover one.
+
 ## Before starting ANY feature, fix, or refactor
 
 1. **Check what's in flight** for the area you're about to touch:
-   - `gh issue list` — open issues and who's assigned
+   - `gh issue list` on **both** repos — open issues and who's assigned
    - `gh pr list` — open PRs (work with an open PR belongs to its author)
    - If someone is already assigned, **do not start** — pick something else or
      coordinate with them first. This is what prevents two agent sessions editing
@@ -25,22 +37,20 @@ GitHub Desktop, CLI). `AGENTS.md` carries only the pointer; this file is the pro
 5. **Keep PRs small.** Long-lived branches are the main source of merge collisions.
    Commit and merge often.
 
-## Where things live
+## Direct commits vs PRs
 
-| Artifact | Location | Purpose |
-|---|---|---|
-| Issue board | GitHub Issues on this repo | The shared backlog + claims — the single source of "what's being worked" |
-| Kanban | GitHub Project "Sylo work board" | Visual status; cards auto-move on PR open/merge |
-| Deep design docs | `features_tracker/active/*.md` (private dev repo only) | Per-feature design + history; link the file from its issue; move to `features_tracker/completed/` when shipped |
-| Agent conventions | `AGENTS.md` | Points here — keep it short, it's in every session's context |
+`Fixes #N` in a commit pushed **directly to the default branch** closes the issue but
+**skips the board automation** — it keys off PR bodies, so the card never appears. If
+you commit directly, add the card to the board yourself (or better: open the PR).
+Statuses: `Todo` → `In Progress` (PR opened with `Fixes #N`) → `Done` (PR merged or
+issue closed).
 
 ## Board automation — never move cards by hand
 
-The board (GitHub Project "Sylo work board") keeps itself honest:
+The board (GitHub Project "Sylo work board", user-level) keeps itself honest:
 
 - PR opened with `Fixes #N` in the body → the linked issue is added to the board
-  (if missing) and its card slides to **In Progress** (`.github/workflows/board-slide.yml`
-  on the public repo)
+  (if missing) and its card slides to **In Progress** (`.github/workflows/board-slide.yml`)
 - PR merged → card slides to **Done**, issue auto-closes
 - Issue closed directly → card slides to **Done**
 

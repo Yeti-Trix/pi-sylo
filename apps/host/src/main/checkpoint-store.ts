@@ -2,7 +2,7 @@
  * Agent checkpoints — per-turn file snapshots so the operator can UNDO an
  * agent turn (Cursor-style), WITHOUT ever touching the operator's git repo.
  *
- * Hard rules (see features_tracker/active/2026-09-10_23-46-00_agent_checkpoints_undo.md):
+ * Hard rules (design: pi-sylo-dev issue #14 — folder trackers retired 2026-09-11):
  *  - Storage lives in Sylo app data (`userData/checkpoints/<convId>/...`),
  *    never in the workspace. No git commands, no .git additions, ever.
  *  - A capture happens at TURN START (pre-images of the whole tracked tree,

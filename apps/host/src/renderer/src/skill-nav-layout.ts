@@ -9,6 +9,7 @@ export type SkillRouteRowLite = {
 
 export type SkillNavLayoutState = {
   hidden: string[]
+  /** Route keys (`skillFolder:routeId`) and builtin tabs (`tab:<id>`) pinned to the sidebar. */
   pinned: string[]
   /** Per-section route keys (`skillFolder:routeId`); establishes order among unpinned routes in that section. */
   order: Partial<Record<SkillRouteNavSection, string[]>>
@@ -24,6 +25,57 @@ export const ROUTE_NAV_SECTION_SEQUENCE: SkillRouteNavSection[] = ['domain', 'to
 
 export function skillRouteRowKey(r: SkillRouteRowLite): string {
   return `${r.skillFolderName}:${r.routeId}`
+}
+
+/** Builtin Tools/Developer tabs that can be pinned next to skill routes. */
+export const PINNABLE_BUILTIN_TABS = [
+  { tab: 'schedules', title: 'Schedules' },
+  { tab: 'proposals', title: 'Proposals' },
+  { tab: 'evals', title: 'Testing' },
+  { tab: 'skills', title: 'Capability manager' },
+  { tab: 'settings', title: 'Settings' },
+] as const
+
+export type PinnedNavEntry =
+  | { kind: 'route'; key: string; title: string }
+  | { kind: 'tab'; key: string; title: string; tab: string }
+
+export function tabNavKey(tab: string): string {
+  return `tab:${tab}`
+}
+
+export function togglePinnedKey(layout: SkillNavLayoutState, key: string): SkillNavLayoutState {
+  const k = key.trim()
+  if (!k) return layout
+  const pinned = layout.pinned.includes(k)
+    ? layout.pinned.filter((x) => x !== k)
+    : [...layout.pinned, k]
+  return { ...layout, pinned }
+}
+
+export function isPinnedKey(layout: SkillNavLayoutState, key: string): boolean {
+  return layout.pinned.includes(key)
+}
+
+/** Resolve saved pin keys to currently available routes/tabs, preserving pin order. */
+export function resolvePinnedNavEntries<T extends SkillRouteRowLite & { title: string }>(
+  pinned: readonly string[],
+  routes: readonly T[],
+  tabs: readonly { tab: string; title: string }[] = PINNABLE_BUILTIN_TABS,
+): PinnedNavEntry[] {
+  const byRouteKey = new Map(routes.map((r) => [skillRouteRowKey(r), r] as const))
+  const byTabKey = new Map(tabs.map((t) => [tabNavKey(t.tab), t] as const))
+  const out: PinnedNavEntry[] = []
+  for (const key of pinned) {
+    const route = byRouteKey.get(key)
+    if (route) {
+      out.push({ kind: 'route', key, title: route.title })
+      continue
+    }
+    const tab = byTabKey.get(key)
+    if (tab) out.push({ kind: 'tab', key, title: tab.title, tab: tab.tab })
+  }
+  return out
 }
 
 /** Sort routes for one sidebar section: pinned first, then ordered list + discovery tail. */

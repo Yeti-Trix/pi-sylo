@@ -1,10 +1,12 @@
 /**
  * App update checker — informs only, never auto-updates.
  *
- * Sylo is distributed as a git clone of the public repo (Yeti-Trix/pi-sylo);
- * users update with `git pull` + `npm install` + restart. There are no GitHub
- * Releases/installers, so "latest available" = the `version` field of the
- * public repo's root package.json on main (bumped by the publish scripts).
+ * "Latest available" = the `version` field of the public repo's root
+ * package.json on main (bumped by the publish scripts), which is what both
+ * distribution channels are cut from: a git clone (update with `git pull` +
+ * `npm install` + restart) and the NSIS installer (download the newer setup and
+ * run it — it upgrades in place). `isInstalledBuild` tells the renderer which
+ * of those two instructions to show.
  *
  * Check cadence: once ~30s after launch, then every 12h while running. Each
  * completed check pushes the status to the renderer (`app:update-status`), so
@@ -32,6 +34,7 @@ let status: AppUpdateStatus = {
   isUpdateAvailable: false,
   checkedAt: null,
   error: null,
+  isInstalledBuild: false,
 }
 
 let started = false
@@ -70,7 +73,11 @@ async function fetchLatestVersion(): Promise<{ version: string | null; error: st
 }
 
 export function getAppUpdateStatus(): AppUpdateStatus {
-  return { ...status, currentVersion: status.currentVersion || app.getVersion() }
+  return {
+    ...status,
+    currentVersion: status.currentVersion || app.getVersion(),
+    isInstalledBuild: app.isPackaged,
+  }
 }
 
 function notifyRenderer(): void {
@@ -90,6 +97,7 @@ export async function checkForAppUpdate(): Promise<AppUpdateStatus> {
       isUpdateAvailable: !!version && compareVersions(version, app.getVersion()) > 0,
       checkedAt: Date.now(),
       error,
+      isInstalledBuild: app.isPackaged,
     }
   } finally {
     checking = false

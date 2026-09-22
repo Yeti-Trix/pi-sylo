@@ -7,7 +7,8 @@
  *
  * Optional Sylo package (enable in Capability Manager) — not a base/always-on builtin.
  *
- * @see features_tracker/active/2026-07-17_17-00-00_sylo_workflows_base_package.md
+ * @see pi-sylo-dev git history (folder trackers retired 2026-09-11):
+ * features_tracker/active/2026-07-17_17-00-00_sylo_workflows_base_package.md
  */
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'

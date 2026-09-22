@@ -1,4 +1,20 @@
+import { existsSync } from 'node:fs'
+
+import { parseReviewVerdict } from '../../../../packages/sylo-subagents/extensions/plan-checklist.ts'
+import {
+  isPlannerAgentName,
+  isReviewerAgentName,
+  isWorkerAgentName,
+  markGoalsBuilt,
+  markPlanReviewed,
+  reopenFailedGoals,
+  resolveRunGoals,
+  tickReviewedGoals,
+  writeCurrentPlan,
+} from '../../../../packages/sylo-subagents/extensions/plan-file.ts'
 import type { SyloSubagentHostEvent } from '../shared/subagent-tasks-types.js'
+import { getConversation, getWorkspace } from './database.js'
+import { notifyPlanTodosChanged } from './plan-todos-host.js'
 import * as store from './subagent-tasks-db.js'
 
 let currentHostSessionId: string | undefined
@@ -23,6 +39,67 @@ export function getCurrentHostSessionId(): string | undefined {
   return currentHostSessionId
 }
 
+function conversationWorkspaceCwd(conversationId: string): string | null {
+  const conv = getConversation(conversationId)
+  if (!conv?.workspace_id) return null
+  const cwd = getWorkspace(conv.workspace_id)?.pi_cwd?.trim() ?? ''
+  return cwd && existsSync(cwd) ? cwd : null
+}
+
+function planBodyFromResult(resultText: string | undefined): string {
+  if (!resultText) return ''
+  return resultText.replace(/\n\nPlan saved to `[^`]+`\. Later turns should read that file instead of re-planning\.\s*$/u, '').trim()
+}
+
+/** Goal heading this run was dispatched against, when the orchestrator named one. */
+function taskGoal(row: ReturnType<typeof store.getAgentTask>): string | undefined {
+  if (!row) return undefined
+  try {
+    const spec = JSON.parse(row.spec_json) as { goal?: unknown }
+    return typeof spec.goal === 'string' && spec.goal.trim() ? spec.goal.trim() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function syncWorkspacePlanFile(
+  conversationId: string,
+  event: Extract<SyloSubagentHostEvent, { type: 'subagent_run_end' }>,
+): void {
+  const row = store.getAgentTask(event.runId)
+  const agent = row?.agent_name ?? ''
+  const cwd = conversationWorkspaceCwd(conversationId)
+  if (!cwd) return
+  if (event.status === 'succeeded' && isPlannerAgentName(agent)) {
+    writeCurrentPlan(cwd, planBodyFromResult(event.resultText), { conversationId })
+    return
+  }
+  if (event.status !== 'succeeded') return
+
+  if (isWorkerAgentName(agent)) {
+    // Progress, not sign-off: the section is built and awaiting a review. Recorded in
+    // the plan file so a crash, an End, or a close resumes instead of rebuilding it.
+    markGoalsBuilt(cwd, conversationId, resolveRunGoals(cwd, conversationId, 'worker', taskGoal(row)))
+    return
+  }
+
+  if (isReviewerAgentName(agent)) {
+    const verdict = parseReviewVerdict(event.resultText)
+    if (verdict === 'none') return
+    const goals = resolveRunGoals(cwd, conversationId, 'reviewer', taskGoal(row))
+    if (verdict === 'pass') {
+      // The review's verdict — not the worker that wrote the code — is what closes a goal.
+      tickReviewedGoals(cwd, conversationId, goals)
+      // Sign off, do not delete: the goals bar stays until the operator sends again.
+      // No-ops unless the ticks above completed the plan.
+      markPlanReviewed(cwd, conversationId)
+      return
+    }
+    // Failed: the section goes back to a worker rather than sitting as built-and-wrong.
+    reopenFailedGoals(cwd, conversationId, goals)
+  }
+}
+
 export function handleSubagentHostEvent(conversationId: string, event: SyloSubagentHostEvent): void {
   const hostSessionId = currentHostSessionId
   if (!hostSessionId) return
@@ -40,6 +117,7 @@ export function handleSubagentHostEvent(conversationId: string, event: SyloSubag
         task: event.task,
         stepIndex: event.stepIndex,
         model: event.model,
+        goal: event.goal,
       })
       break
     case 'subagent_run_update':
@@ -65,6 +143,8 @@ export function handleSubagentHostEvent(conversationId: string, event: SyloSubag
         },
         tokensUsed: event.usage ? event.usage.input + event.usage.output : undefined,
       })
+      syncWorkspacePlanFile(conversationId, event)
+      notifyPlanTodosChanged()
       break
   }
 }

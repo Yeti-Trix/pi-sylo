@@ -56,8 +56,8 @@ const DEFAULT_CONFIG: WebAccessConfig = {
   // role:"tool" message, so pi-ai relocates tool-result images into a synthetic
   // role:"user" turn ("Attached image(s) from tool result:"). Small local models read
   // that as the operator sharing an image / as the turn already being answered. Keep
-  // previews off unless a vision workflow explicitly needs them. See
-  // issue_tracker/resolved/2026-06-09_web_search_tool_result_image_role_confusion.md.
+  // previews off unless a vision workflow explicitly needs them. (Rationale doc lives
+  // in the private dev repo's git history — folder trackers retired 2026-09-11.)
   previewImagesEnabled: false,
   maxPreviewImagesPerPage: 1,
 }

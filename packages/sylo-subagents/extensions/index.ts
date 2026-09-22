@@ -15,12 +15,40 @@ import { Type } from 'typebox'
 
 import { type AgentConfig, type AgentScope, discoverAgents } from './agents.ts'
 import { resolvePiSpawn } from './pi-cli.ts'
+import { resolveSubagentToolPolicy, toolCliArgs } from './pi-tool-policy.ts'
 import { subagentModelCliArgs } from './subagent-model.ts'
+import { killSubagentTree } from './subagent-kill.ts'
 import { cancelSubagentRun, consumeRunCancelled, registerSubagentRun, unregisterSubagentRun } from './subagent-run-registry.ts'
-import { resolveSubagentTimeoutMs } from './subagent-timeout.ts'
+import { resolveSubagentStallMs, resolveSubagentTimeoutMs } from './subagent-timeout.ts'
 import { newSubagentRunId, notifySyloSubagent, type SyloSubagentRunMode } from './sylo-host.ts'
 
 export { cancelAllSubagentRuns, cancelSubagentRun } from './subagent-run-registry.ts'
+
+/**
+ * Task text for a chain step that follows another agent.
+ *
+ * Labelling the previous step's output neutrally was not enough: handed a plan as
+ * unlabelled "prior output", a worker treats it as reference material and starts
+ * planning again. The handoff has to state that the earlier step is finished and
+ * that this agent's job is its own role only.
+ */
+function chainStepTask(task: string, previous: { agent: string; output: string }): string {
+  return [
+    task,
+    '---',
+    `The \`${previous.agent}\` subagent already ran on this request and produced the output below. That step is DONE and its output is authoritative.`,
+    `Do not redo, redesign, or restate it. Apply your own role to the request using it.`,
+    `<${previous.agent}_output>\n${previous.output.trim()}\n</${previous.agent}_output>`,
+  ].join('\n\n')
+}
+
+/**
+ * Thrown by `runSingleAgent` only after it has already emitted a `cancelled`
+ * lifecycle event. Shared with the callers so "the operator stopped this" can be
+ * told apart from a genuine failure — `runSingleAgent` also throws for setup
+ * errors (temp-file write, a synchronous spawn failure).
+ */
+const SUBAGENT_ABORTED_MESSAGE = 'Subagent was aborted'
 
 const MAX_PARALLEL_TASKS = 8
 const MAX_CONCURRENCY = 4
@@ -72,7 +100,28 @@ function resolveDefaultAgentScope(): AgentScope {
   return 'user'
 }
 
-const BUNDLED_AGENTS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'agents')
+const SOURCE_RELATIVE_AGENTS_DIR = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'agents',
+)
+
+/**
+ * Directory holding the bundled personas (scout/planner/worker/reviewer).
+ *
+ * `import.meta.url` only points at this package when Pi loads the extension from
+ * source. The host also imports this module into the broker bundle to drive
+ * operator-forced runs, and there the source-relative guess lands in the build
+ * output directory — so prefer the extension path the host publishes.
+ */
+function resolveBundledAgentsDir(): string {
+  const ext = process.env.SYLO_SUBAGENTS_EXTENSION?.trim()
+  if (ext) {
+    const candidate = path.join(path.dirname(path.dirname(ext)), 'agents')
+    if (fs.existsSync(candidate)) return candidate
+  }
+  return SOURCE_RELATIVE_AGENTS_DIR
+}
 
 interface UsageStats {
   input: number
@@ -129,13 +178,57 @@ function getFinalOutput(messages: Message[]): string {
   return ''
 }
 
-function isFailedResult(result: SingleResult): boolean {
-  return result.exitCode !== 0 || result.stopReason === 'error' || result.stopReason === 'aborted'
+/** Why a runaway guard ended a child. Never a success, whatever the exit code says. */
+export type SubagentGuardReason = 'stalled' | 'timeout'
+
+/** Grace period for `close` after a guard kill, before the run ends on its own clock. */
+const GUARD_FINALIZE_GRACE_MS = 10_000
+
+function isGuardKilledResult(result: SingleResult): boolean {
+  return result.stopReason === 'stalled' || result.stopReason === 'timeout'
 }
+
+function isFailedResult(result: SingleResult): boolean {
+  return (
+    result.exitCode !== 0 ||
+    result.stopReason === 'error' ||
+    result.stopReason === 'aborted' ||
+    // A killed child can still report exit code 0, so the reason has to be checked
+    // too — otherwise a stalled run is handed to the parent as finished work.
+    isGuardKilledResult(result)
+  )
+}
+
+/**
+ * A child the provider cut off at its per-reply token cap. The process exited 0, so
+ * without this check its partial text is handed to the parent as a finished result and
+ * the step is silently half-done. The parent has to be told to re-run it.
+ */
+function isTruncatedResult(result: SingleResult): boolean {
+  return result.stopReason === 'length'
+}
+
+const TRUNCATED_RESULT_NOTE =
+  '[INCOMPLETE: this subagent hit its per-reply token cap, so the text above stops mid-answer and the step is NOT finished. Re-run the same agent to finish it (narrower task, or tell it to continue), or raise Max tokens in Sylo Settings → Model. Do not treat this as done and do not finish the work yourself in the parent.]'
+
+function withTruncationNote(result: SingleResult, text: string): string {
+  return isTruncatedResult(result) ? `${text}\n\n${TRUNCATED_RESULT_NOTE}` : text
+}
+
+/** Retry guidance for a child that failed outright, so the parent acts instead of stalling. */
+const FAILED_RESULT_NOTE =
+  '[This step did NOT run to completion. Retry it once with the same agent (tighten the task or shorten the context if it looks like a limit), and if it fails again report the failure plainly. Do not silently do the work in the parent and do not skip to a later step.]'
 
 function getResultOutput(result: SingleResult): string {
   if (isFailedResult(result)) {
-    return result.errorMessage || result.stderr || getFinalOutput(result.messages) || '(no output)'
+    const reason = result.errorMessage || result.stderr || ''
+    if (isGuardKilledResult(result)) {
+      // A stalled child often did real work before it went quiet. Keep that text and
+      // say plainly that it was killed, so the parent resumes instead of restarting.
+      const partial = getFinalOutput(result.messages)
+      return partial ? `${partial}\n\n${reason}`.trim() : reason || '(no output)'
+    }
+    return reason || getFinalOutput(result.messages) || '(no output)'
   }
   return getFinalOutput(result.messages) || '(no output)'
 }
@@ -207,6 +300,7 @@ async function runSingleAgent(
   runId: string,
   groupRunId: string,
   parentRunId?: string,
+  goal?: string,
 ): Promise<SingleResult> {
   const agent = agents.find((a) => a.name === agentName)
   const subagentModel = agent ? subagentModelCliArgs(agent.name) : { args: [] as string[] }
@@ -227,6 +321,7 @@ async function runSingleAgent(
     parentRunId,
     stepIndex: step,
     model: modelLabel,
+    ...(goal?.trim() ? { goal: goal.trim() } : {}),
   })
 
   if (!agent) {
@@ -251,9 +346,34 @@ async function runSingleAgent(
     return result
   }
 
+  // The child never loads Sylo's capability guard, so the operator's Capability
+  // manager policy has to be turned into a `--tools` allowlist here or it simply
+  // would not apply inside a subagent.
+  const toolPolicy = resolveSubagentToolPolicy({ ...(agent.tools ? { agentTools: agent.tools } : {}) })
+  if (toolPolicy.kind === 'blocked') {
+    const result: SingleResult = {
+      agent: agentName,
+      agentSource: agent.source,
+      task,
+      exitCode: 1,
+      messages: [],
+      stderr: `Cannot run "${agentName}": ${toolPolicy.reason}`,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+      step,
+      runId,
+    }
+    notifySyloSubagent({
+      type: 'subagent_run_end',
+      runId,
+      status: 'failed',
+      error: result.stderr,
+    })
+    return result
+  }
+
   const args: string[] = ['--mode', 'json', '-p', '--no-session']
   args.push(...subagentModel.args)
-  if (agent.tools && agent.tools.length > 0) args.push('--tools', agent.tools.join(','))
+  args.push(...toolCliArgs(toolPolicy.tools))
 
   let tmpPromptDir: string | null = null
   let tmpPromptPath: string | null = null
@@ -354,9 +474,18 @@ async function runSingleAgent(
       const dropRegistry = () => unregisterSubagentRun(runId)
       let buffer = ''
       let timeout: ReturnType<typeof setTimeout> | undefined
+      let stallTimer: ReturnType<typeof setInterval> | undefined
+      let forcedFinish: ReturnType<typeof setTimeout> | undefined
+      let lastActivityAt = Date.now()
+      let guardKilled = false
+      let settled = false
 
       const finish = (code: number) => {
+        if (settled) return
+        settled = true
         if (timeout) clearTimeout(timeout)
+        if (stallTimer) clearInterval(stallTimer)
+        if (forcedFinish) clearTimeout(forcedFinish)
         stopUpdates()
         resolve(code)
       }
@@ -365,13 +494,41 @@ async function runSingleAgent(
         timeoutSeconds: agent.timeoutSeconds,
         provider: subagentModel.provider,
       })
+      const stallMs = resolveSubagentStallMs({ provider: subagentModel.provider })
+      /**
+       * The guard's own kill is not allowed to be the thing that hangs. A killed shell
+       * can leave the real child holding the stdio pipes, and `close` waits for those,
+       * so the run has to be able to end on the guard's clock instead.
+       */
+      const killForGuard = (reason: SubagentGuardReason, line: string) => {
+        if (guardKilled) return
+        guardKilled = true
+        currentResult.stderr += `\n${line}`
+        // Recorded on the result too: a guard kill that arrives as exit code 0 (or as a
+        // null code, which `close` reports for a signalled child) must not read as success.
+        currentResult.stopReason = reason
+        currentResult.errorMessage = line.trim()
+        killSubagentTree(proc)
+        forcedFinish = setTimeout(() => finish(1), GUARD_FINALIZE_GRACE_MS)
+        forcedFinish.unref()
+      }
+      const bumpActivity = () => {
+        lastActivityAt = Date.now()
+      }
       timeout = setTimeout(() => {
-        currentResult.stderr += `\n[timeout] Subagent exceeded time limit (${Math.round(timeoutMs / 1000)}s).`
-        proc.kill('SIGTERM')
-        setTimeout(() => {
-          if (!proc.killed) proc.kill('SIGKILL')
-        }, 5000)
+        killForGuard(
+          'timeout',
+          `[timeout] Subagent exceeded time limit (${Math.round(timeoutMs / 1000)}s).`,
+        )
       }, timeoutMs)
+      stallTimer = setInterval(() => {
+        const idleMs = Date.now() - lastActivityAt
+        if (idleMs < stallMs) return
+        killForGuard(
+          'stalled',
+          `[stall] Subagent produced no output for ${Math.round(idleMs / 1000)}s. Its last tool call never returned.`,
+        )
+      }, 5_000)
 
       type ChildEvent = {
         type?: string
@@ -398,6 +555,7 @@ async function runSingleAgent(
           if (am.type === 'text_delta') liveText = appendPreviewTail(liveText, am.delta)
           else if (am.type === 'thinking_delta') liveThinking = appendPreviewTail(liveThinking, am.delta)
           else return
+          bumpActivity()
           scheduleUpdate()
           return
         }
@@ -405,6 +563,7 @@ async function runSingleAgent(
         if (event.type === 'tool_execution_start') {
           liveToolName = typeof event.toolName === 'string' ? event.toolName : undefined
           liveToolPreview = summarizeToolArgs(event.args)
+          bumpActivity()
           scheduleUpdate()
           return
         }
@@ -421,6 +580,7 @@ async function runSingleAgent(
           liveText = ''
           liveThinking = ''
 
+          bumpActivity()
           if (msg.role === 'assistant') {
             currentResult.usage.turns++
             const usage = msg.usage
@@ -441,6 +601,7 @@ async function runSingleAgent(
 
         if (event.type === 'tool_result_end' && event.message) {
           currentResult.messages.push(event.message)
+          bumpActivity()
           emitUpdate()
         }
       }
@@ -459,7 +620,8 @@ async function runSingleAgent(
       proc.on('close', (code) => {
         if (buffer.trim()) processLine(buffer)
         dropRegistry()
-        finish(code ?? 0)
+        // A null code means the child died on a signal, never that it succeeded.
+        finish(code ?? 1)
       })
 
       proc.on('error', () => {
@@ -470,10 +632,7 @@ async function runSingleAgent(
       if (signal) {
         const killProc = () => {
           wasAborted = true
-          proc.kill('SIGTERM')
-          setTimeout(() => {
-            if (!proc.killed) proc.kill('SIGKILL')
-          }, 5000)
+          killSubagentTree(proc)
         }
         if (signal.aborted) killProc()
         else signal.addEventListener('abort', killProc, { once: true })
@@ -486,17 +645,18 @@ async function runSingleAgent(
         type: 'subagent_run_end',
         runId,
         status: 'cancelled',
-        error: 'Subagent was aborted',
+        error: SUBAGENT_ABORTED_MESSAGE,
       })
-      throw new Error('Subagent was aborted')
+      throw new Error(SUBAGENT_ABORTED_MESSAGE)
     }
 
     const failed = isFailedResult(currentResult)
+    const resultText = failed ? undefined : getResultOutput(currentResult)
     notifySyloSubagent({
       type: 'subagent_run_end',
       runId,
       status: failed ? 'failed' : 'succeeded',
-      resultText: failed ? undefined : getResultOutput(currentResult),
+      resultText,
       thinking: previewThinking() || undefined,
       model: currentResult.model,
       error: failed ? getResultOutput(currentResult) : undefined,
@@ -527,16 +687,113 @@ async function runSingleAgent(
   }
 }
 
+export type ForcedSubagentOutcome = {
+  agent: string
+  model?: string
+  status: 'succeeded' | 'failed' | 'cancelled'
+  output: string
+}
+
+/**
+ * Run agents without going through the `subagent` tool.
+ *
+ * The tool path is the orchestrator delegating by its own judgment, which it is
+ * free to skip. This is the operator forcing the delegation with an `@mention`:
+ * the host drives the run itself so a pinned persona model is guaranteed to do
+ * the work. Lifecycle events are identical, so the runs strip, the Tasks
+ * dashboard, and per-run cancel all keep working.
+ */
+export async function runForcedSubagentChain(opts: {
+  cwd: string
+  agentNames: string[]
+  task: string
+  agentScope?: AgentScope
+  signal?: AbortSignal
+}): Promise<ForcedSubagentOutcome[]> {
+  const { cwd, agentNames, task, signal } = opts
+  const agentScope = opts.agentScope ?? resolveDefaultAgentScope()
+  const { agents, projectAgentsDir } = discoverAgents(cwd, agentScope, {
+    bundledAgentsDir: resolveBundledAgentsDir(),
+  })
+  const mode: SyloSubagentRunMode = agentNames.length > 1 ? 'chain' : 'single'
+  const makeDetails = (results: SingleResult[]): SubagentDetails => ({
+    mode,
+    agentScope,
+    projectAgentsDir,
+    results,
+  })
+
+  const outcomes: ForcedSubagentOutcome[] = []
+  const groupRunId = newSubagentRunId()
+  let parentRunId: string | undefined
+  let previous: { agent: string; output: string } | undefined
+
+  for (let i = 0; i < agentNames.length; i++) {
+    const agentName = agentNames[i]!
+    const stepTask = previous ? chainStepTask(task, previous) : task
+    const runId = newSubagentRunId()
+
+    let result: SingleResult
+    try {
+      result = await runSingleAgent(
+        cwd,
+        agents,
+        agentName,
+        stepTask,
+        undefined,
+        agentNames.length > 1 ? i + 1 : undefined,
+        signal,
+        undefined,
+        makeDetails,
+        mode,
+        runId,
+        groupRunId,
+        parentRunId,
+      )
+    } catch (e) {
+      // Only an abort has already reported itself as `cancelled`; anything else
+      // is a real failure, and calling it "cancelled" told the operator they
+      // had stopped the run while hiding the actual error.
+      const detail = e instanceof Error ? e.message : String(e)
+      const stopped = signal?.aborted === true || detail === SUBAGENT_ABORTED_MESSAGE
+      outcomes.push(
+        stopped ?
+          { agent: agentName, status: 'cancelled', output: 'Run was cancelled.' }
+        : { agent: agentName, status: 'failed', output: `Subagent failed to start: ${detail}` },
+      )
+      return outcomes
+    }
+
+    const output = getResultOutput(result)
+    if (isFailedResult(result)) {
+      outcomes.push({ agent: agentName, model: result.model, status: 'failed', output })
+      // Later steps consume earlier output, so a failed step makes the rest meaningless.
+      return outcomes
+    }
+
+    outcomes.push({ agent: agentName, model: result.model, status: 'succeeded', output })
+    parentRunId = runId
+    previous = { agent: agentName, output }
+  }
+
+  return outcomes
+}
+
+const GOAL_DESCRIPTION =
+  'Exact plan goal heading this step works, copied from the plan file without the `## [ ]` marker. Sylo ticks that goal when a reviewer passes it.'
+
 const TaskItem = Type.Object({
   agent: Type.String({ description: 'Name of the agent to invoke' }),
   task: Type.String({ description: 'Task to delegate to the agent' }),
   cwd: Type.Optional(Type.String({ description: 'Working directory for the agent process' })),
+  goal: Type.Optional(Type.String({ description: GOAL_DESCRIPTION })),
 })
 
 const ChainItem = Type.Object({
   agent: Type.String({ description: 'Name of the agent to invoke' }),
   task: Type.String({ description: 'Task with optional {previous} placeholder for prior output' }),
   cwd: Type.Optional(Type.String({ description: 'Working directory for the agent process' })),
+  goal: Type.Optional(Type.String({ description: GOAL_DESCRIPTION })),
 })
 
 const AgentScopeSchema = StringEnum(['user', 'project', 'both'] as const, {
@@ -547,6 +804,7 @@ const AgentScopeSchema = StringEnum(['user', 'project', 'both'] as const, {
 const SubagentParams = Type.Object({
   agent: Type.Optional(Type.String({ description: 'Name of the agent to invoke (for single mode)' })),
   task: Type.Optional(Type.String({ description: 'Task to delegate (for single mode)' })),
+  goal: Type.Optional(Type.String({ description: `${GOAL_DESCRIPTION} (single mode)` })),
   tasks: Type.Optional(
     Type.Array(TaskItem, { description: 'Array of {agent, task} for parallel execution' }),
   ),
@@ -583,7 +841,9 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const agentScope: AgentScope = params.agentScope ?? resolveDefaultAgentScope()
-      const discovery = discoverAgents(ctx.cwd, agentScope, { bundledAgentsDir: BUNDLED_AGENTS_DIR })
+      const discovery = discoverAgents(ctx.cwd, agentScope, {
+        bundledAgentsDir: resolveBundledAgentsDir(),
+      })
       const agents = discovery.agents
       const confirmProjectAgents = params.confirmProjectAgents ?? true
       const contextPacket = params.context
@@ -685,6 +945,7 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
             runId,
             groupRunId,
             parentRunId,
+            step.goal,
           )
           results.push(result)
 
@@ -693,25 +954,30 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
               content: [
                 {
                   type: 'text',
-                  text: `Chain stopped at step ${i + 1} (${step.agent}): ${getResultOutput(result)}`,
+                  text: `Chain stopped at step ${i + 1} (${step.agent}): ${getResultOutput(result)}\n\n${FAILED_RESULT_NOTE}`,
                 },
               ],
               details: makeDetails('chain')(results),
               isError: true,
             }
           }
-          previousOutput = getFinalOutput(result.messages)
+          previousOutput = withTruncationNote(result, getFinalOutput(result.messages))
           parentRunId = runId
         }
 
+        const lastStep = results[results.length - 1]!
         return {
           content: [
             {
               type: 'text',
-              text: getFinalOutput(results[results.length - 1]!.messages) || '(no output)',
+              text: withTruncationNote(
+                lastStep,
+                getFinalOutput(lastStep.messages) || '(no output)',
+              ),
             },
           ],
           details: makeDetails('chain')(results),
+          ...(results.some(isTruncatedResult) ? { isError: true as const } : {}),
         }
       }
 
@@ -780,28 +1046,37 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
             'parallel',
             runId,
             groupRunId,
+            undefined,
+            t.goal,
           )
           allResults[index] = result
           emitParallelUpdate()
           return result
         })
 
-        const successCount = results.filter((r) => !isFailedResult(r)).length
+        const successCount = results.filter(
+          (r) => !isFailedResult(r) && !isTruncatedResult(r),
+        ).length
         const summaries = results.map((r) => {
-          const output = truncateParallelOutput(getResultOutput(r))
-          const status = isFailedResult(r)
-            ? `failed${r.stopReason && r.stopReason !== 'end' ? ` (${r.stopReason})` : ''}`
+          const output = withTruncationNote(r, truncateParallelOutput(getResultOutput(r)))
+          const status =
+            isFailedResult(r) ?
+              `failed${r.stopReason && r.stopReason !== 'end' ? ` (${r.stopReason})` : ''}`
+            : isTruncatedResult(r) ? 'incomplete (token cap)'
             : 'completed'
           return `### [${r.agent}] ${status}\n\n${output}`
         })
+        const parallelTail =
+          successCount < results.length ? `\n\n---\n\n${FAILED_RESULT_NOTE}` : ''
         return {
           content: [
             {
               type: 'text',
-              text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join('\n\n---\n\n')}`,
+              text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join('\n\n---\n\n')}${parallelTail}`,
             },
           ],
           details: makeDetails('parallel')(results),
+          ...(successCount < results.length ? { isError: true as const } : {}),
         }
       }
 
@@ -821,18 +1096,26 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
           'single',
           runId,
           runId,
+          undefined,
+          params.goal,
         )
         const isError = isFailedResult(result)
         if (isError) {
           return {
-            content: [{ type: 'text', text: `Agent ${result.stopReason || 'failed'}: ${getResultOutput(result)}` }],
+            content: [
+              {
+                type: 'text',
+                text: `Agent ${result.stopReason || 'failed'}: ${getResultOutput(result)}\n\n${FAILED_RESULT_NOTE}`,
+              },
+            ],
             details: makeDetails('single')([result]),
             isError: true,
           }
         }
         return {
-          content: [{ type: 'text', text: getResultOutput(result) }],
+          content: [{ type: 'text', text: withTruncationNote(result, getResultOutput(result)) }],
           details: makeDetails('single')([result]),
+          ...(isTruncatedResult(result) ? { isError: true as const } : {}),
         }
       }
 

@@ -183,13 +183,13 @@ function normalizePiCwd(p: string): string {
   return path.resolve(p.trim()).replace(/\\/g, '/').toLowerCase()
 }
 
-/** True when `repoRoot` looks like the pi-sylo monorepo (trackers + host app). */
+/** True when `repoRoot` looks like the pi-sylo monorepo (dev workflow doc + host app). */
 export function isSyloDevRepoRoot(repoRoot: string): boolean {
   if (typeof repoRoot !== 'string' || !repoRoot.trim()) return false
   const root = path.resolve(repoRoot.trim())
   if (!fs.existsSync(root)) return false
   return (
-    fs.existsSync(path.join(root, 'features_tracker')) && fs.existsSync(path.join(root, 'apps', 'host'))
+    fs.existsSync(path.join(root, 'docs', 'WORKFLOW.md')) && fs.existsSync(path.join(root, 'apps', 'host'))
   )
 }
 

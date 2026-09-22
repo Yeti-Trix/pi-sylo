@@ -10,6 +10,7 @@ import {
   collapseConsecutiveTimelineEvents,
   collapsedAssistantAnswerText,
   formatCollapsedTimelineLine,
+  formatDurationMs,
   gapsForOrderedChatSegments,
   liveOpenChatGap,
 } from '../../out/test/workflowTimeline.mjs'
@@ -199,6 +200,26 @@ describe('collapseConsecutiveTimelineEvents', () => {
     const line = formatCollapsedTimelineLine(collapsed[0], 0, null)
     assert.match(line, /thinking delta \(2×/)
     assert.match(line, /500 ms span/)
+  })
+})
+
+describe('formatDurationMs', () => {
+  test('uses whole seconds under one minute', () => {
+    assert.equal(formatDurationMs(500), '500 ms')
+    assert.equal(formatDurationMs(1_000), '1 s')
+    assert.equal(formatDurationMs(5_400), '5 s')
+    assert.equal(formatDurationMs(59_999), '59 s')
+  })
+
+  test('switches to tenths of a minute at 60 seconds', () => {
+    assert.equal(formatDurationMs(60_000), '1.0 min')
+    assert.equal(formatDurationMs(90_000), '1.5 min')
+    assert.equal(formatDurationMs(3_594_000), '59.9 min')
+  })
+
+  test('switches to tenths of an hour at 60 minutes', () => {
+    assert.equal(formatDurationMs(3_600_000), '1.0 hr')
+    assert.equal(formatDurationMs(5_400_000), '1.5 hr')
   })
 })
 

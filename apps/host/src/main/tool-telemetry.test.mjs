@@ -124,6 +124,42 @@ describe('persistedToolEventsToJson', () => {
     assert.equal(parsed[parsed.length - 1].event.toolCallId, 't399')
   })
 
+  test('carries over the start row of a tool call that has not ended', () => {
+    // The operator is waiting on this subagent; without its start row the renderer
+    // has no live run to draw and the turn looks idle.
+    const entries = [
+      row(500, { type: 'tool_execution_start', toolCallId: 'live', toolName: 'subagent' }),
+    ]
+    for (let i = 0; i < 400; i++) {
+      entries.push(
+        row(1000 + i, { type: 'tool_execution_end', toolCallId: `t${i}`, blob: 'y'.repeat(20_000) }),
+      )
+    }
+    const parsed = JSON.parse(persistedToolEventsToJson(entries))
+    const live = parsed.find((e) => e.event.toolCallId === 'live')
+    assert.ok(live, 'start row for the in-flight call survived trimming')
+    assert.equal(live.event.type, 'tool_execution_start')
+    assert.ok(parsed[0].event.droppedEntries > 0, 'still reports what was dropped')
+  })
+
+  test('does not carry over a start whose call already ended', () => {
+    const entries = [
+      row(500, { type: 'tool_execution_start', toolCallId: 'done', toolName: 'subagent' }),
+      row(600, { type: 'tool_execution_end', toolCallId: 'done', toolName: 'subagent' }),
+    ]
+    for (let i = 0; i < 400; i++) {
+      entries.push(
+        row(1000 + i, { type: 'tool_execution_end', toolCallId: `t${i}`, blob: 'y'.repeat(20_000) }),
+      )
+    }
+    const parsed = JSON.parse(persistedToolEventsToJson(entries))
+    assert.equal(
+      parsed.filter((e) => e.event.type === 'tool_execution_start').length,
+      0,
+      'a finished call is ordinary history and can be trimmed',
+    )
+  })
+
   test('leaves a small blob untouched', () => {
     const entries = [row(100, { type: 'turn_start' })]
     assert.equal(persistedToolEventsToJson(entries), JSON.stringify(entries))

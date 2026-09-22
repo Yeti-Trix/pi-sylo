@@ -15,7 +15,7 @@ const execFileAsync = promisify(execFile)
 
 const hostMainDir = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(hostMainDir, '..', '..', '..', '..')
-const packageRoot = resolveToolsPackageDir(repoRoot, 'sylo-tools-controls', 'sylo-logicforge')
+const packageRoot = resolveToolsPackageDir(repoRoot, 'sylo-tools-controls', 'sylo-allen-bradley')
 const scriptsDir = join(packageRoot, 'scripts')
 const allowlistPath = join(packageRoot, 'assets', 'download-allowlist.json')
 
@@ -73,7 +73,7 @@ export function logicforgeDownloadAllowlistGet(): {
   const allowlist = readJsonFile(allowlistPath)
   if (allowlist == null) {
     throw new Error(
-      'download-allowlist.json missing — restore packages/sylo-logicforge/assets/download-allowlist.json',
+      'download-allowlist.json missing — restore packages/sylo-allen-bradley/assets/download-allowlist.json',
     )
   }
   return { ok: true, path: allowlistPath, allowlist }

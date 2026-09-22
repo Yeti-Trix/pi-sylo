@@ -19,8 +19,6 @@
 - **node_modules** – Node modules.
 - **packages** – Shared packages.
 - **scripts** – Scripts.
-- **features_tracker** – Feature tracking.
-- **issue_tracker** – Issue tracking.
 - **references** – Reference materials.
 
 *Generated on 2026-05-18.*

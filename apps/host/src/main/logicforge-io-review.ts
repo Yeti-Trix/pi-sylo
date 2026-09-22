@@ -6,8 +6,16 @@ import { resolveToolsPackageDir } from './tools-bundles.js'
 
 const hostMainDir = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(hostMainDir, '..', '..', '..', '..')
-const packageRoot = resolveToolsPackageDir(repoRoot, 'sylo-tools-controls', 'sylo-logicforge')
-const scriptsDir = join(packageRoot, 'scripts')
+// Review logic is part of the parse/template engine; applying an approved
+// scaffold writes an ACD and therefore remains in the SDK wrapper.
+const forgePackageRoot = resolveToolsPackageDir(repoRoot, 'sylo-tools-controls', 'sylo-forge')
+const forgeScriptsDir = join(forgePackageRoot, 'scripts')
+const allenBradleyPackageRoot = resolveToolsPackageDir(
+  repoRoot,
+  'sylo-tools-controls',
+  'sylo-allen-bradley',
+)
+const allenBradleyScriptsDir = join(allenBradleyPackageRoot, 'scripts')
 
 function resolvePythonInvocation(sdk = false): { command: string; prefixArgs: string[] } {
   if (sdk) {
@@ -22,14 +30,16 @@ function resolvePythonInvocation(sdk = false): { command: string; prefixArgs: st
 
 function runLogicForgeScript(
   scriptName: string,
-  args: string[],
+    args: string[],
   opts?: { stdin?: string; timeoutMs?: number; sdk?: boolean },
 ): Promise<unknown> {
+  const sdk = opts?.sdk ?? scriptName === 'io_scaffold_apply.py'
+  const packageRoot = sdk ? allenBradleyPackageRoot : forgePackageRoot
+  const scriptsDir = sdk ? allenBradleyScriptsDir : forgeScriptsDir
   const scriptPath = join(scriptsDir, scriptName)
   if (!existsSync(scriptPath)) {
     return Promise.reject(new Error(`missing script: ${scriptPath}`))
   }
-  const sdk = opts?.sdk ?? scriptName === 'io_scaffold_apply.py'
   const { command, prefixArgs } = resolvePythonInvocation(sdk)
   return new Promise((res, rej) => {
     const child = execFile(

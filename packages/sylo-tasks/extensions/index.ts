@@ -15,7 +15,8 @@
  * agent creates a `schedule_create` (sylo-scheduler) entry referencing the task
  * when an actual reminder is wanted (fires into a new chat — out-of-band).
  *
- * @see features_tracker/active/2026-07-25_12-11-42_live_canvas_sylo_tasks.md
+ * @see pi-sylo-dev git history (folder trackers retired 2026-09-11):
+ * features_tracker/active/2026-07-25_12-11-42_live_canvas_sylo_tasks.md
  */
 import type { AgentToolResult, ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'

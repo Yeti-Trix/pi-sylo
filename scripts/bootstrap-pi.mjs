@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const root = path.join(__dirname, '..')
-const agent = path.join(os.homedir(), '.pi', 'agent')
+// Installed builds run this script from the main process and pass the agent dir
+// the app actually resolved (the `sylo.pi_agent_dir` pref can move it).
+const agent = process.env.SYLO_PI_AGENT_DIR?.trim() || path.join(os.homedir(), '.pi', 'agent')
 
 function ensureCopy(srcRel, destAbs) {
   const src = path.join(root, srcRel)

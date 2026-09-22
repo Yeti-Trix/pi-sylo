@@ -544,6 +544,8 @@ declare global {
         abort: (
           conversationId: string,
         ) => Promise<{ ok: true } | { ok: false; error: string }>
+        /** Conversation ids the host still has a turn running for (survives a reload). */
+        activeTurns: () => Promise<string[]>
         steer: (
           conversationId: string,
           text: string,
@@ -949,6 +951,8 @@ declare global {
           modelId: string,
           visionCapable: boolean,
         ) => Promise<{ ok: true } | { ok: false; error: string }>
+        /** Providers with a working login — chat / subagent pickers hide the rest. */
+        configuredProviders: () => Promise<string[]>
       }
       /** Provider API keys — stored in Pi's `~/.pi/agent/auth.json` (masked reads). */
       piAuth: {
@@ -1065,13 +1069,14 @@ declare global {
             tab?: string
             action?: string
             sep?: boolean
+            pinned?: boolean
           }>
         }>) => Promise<{ ok: true; sections: number }>
         /** Main → renderer: the operator clicked an item in one of the synced
          *  skill-route menus. */
         onAction: (
           cb: (item: {
-            kind: 'route' | 'tab' | 'action'
+            kind: 'route' | 'tab' | 'action' | 'pin'
             title: string
             key?: string
             tab?: string
@@ -1459,6 +1464,32 @@ declare global {
           }>
         >
       }
+      customTools: {
+        list: () => Promise<
+          Array<{
+            id: string
+            name: string
+            version: string | null
+            description: string | null
+            dir: string
+          }>
+        >
+        exportPack: (ids?: string[]) => Promise<
+          | { ok: true; path: string; packages: Array<{ id: string; name: string }> }
+          | { ok: false; cancelled?: true; error?: string }
+        >
+        importPack: () => Promise<
+          | {
+              ok: true
+              imported: Array<{ id: string; name: string; dir: string }>
+              registered: string[]
+              npm: Array<{ id: string; ok: boolean; detail: string }>
+              skillsCopied: string[]
+            }
+          | { ok: false; cancelled?: true; error?: string }
+        >
+      }
+      relaunch: () => Promise<void>
       updates: {
         status: () => Promise<import('../shared/app-update-types.js').AppUpdateStatus>
         checkNow: () => Promise<import('../shared/app-update-types.js').AppUpdateStatus>
@@ -1683,6 +1714,21 @@ declare global {
           | { ok: false; error: string; detail?: string }
         >
       }
+      plan: {
+        todos: (conversationId: string) => Promise<{
+          conversationId: string
+          goal?: string
+          todos: {
+            id: string
+            text: string
+            done: boolean
+            state: 'open' | 'built' | 'passed'
+          }[]
+          status: 'active' | 'reviewed'
+        }>
+        onChanged: (cb: () => void) => () => void
+        clearForNewChat: (workspaceId: string) => Promise<{ ok: true }>
+      }
       tasks: {
         list: (conversationId: string) => Promise<
           {
@@ -1756,8 +1802,52 @@ declare global {
           extensionEnabled: boolean
         }>
         agents: () => Promise<
-          Array<{ name: string; description: string; source: 'builtin' | 'user' | 'project' }>
+          Array<{
+            name: string
+            description: string
+            source: 'builtin' | 'user' | 'project'
+            /** Frontmatter `tools:`; absent means unrestricted. */
+            tools?: string[]
+            /** Frontmatter `timeout_seconds`; absent means the default. */
+            timeoutSeconds?: number
+          }>
         >
+        /** Write a user-scope persona under `<pi agent dir>/agents`. */
+        createAgent: (input: {
+          name: string
+          description: string
+          prompt: string
+          /** Pi built-in tool ids. Omitted, or all of them, means unrestricted. */
+          tools?: string[]
+          /** Wall-clock kill for a run of this agent. Omitted keeps the default. */
+          timeoutSeconds?: number
+        }) => Promise<{ ok: true; name: string; filePath: string } | { ok: false; error: string }>
+        /** Read a user-scope persona back for editing. */
+        readAgent: (name: string) => Promise<
+          | {
+              ok: true
+              agent: {
+                name: string
+                description: string
+                prompt: string
+                tools?: string[]
+                timeoutSeconds?: number
+                filePath: string
+              }
+            }
+          | { ok: false; error: string }
+        >
+        /** Overwrite an existing user-scope persona. The name is not editable. */
+        updateAgent: (input: {
+          name: string
+          description: string
+          prompt: string
+          tools?: string[]
+          timeoutSeconds?: number
+        }) => Promise<{ ok: true; name: string; filePath: string } | { ok: false; error: string }>
+        deleteAgent: (
+          name: string,
+        ) => Promise<{ ok: true; filePath: string } | { ok: false; error: string }>
         onLifecycle: (cb: (payload: unknown) => void) => () => void
       }
       // ── Agent checkpoints (per-turn undo; storage in app data only) ──

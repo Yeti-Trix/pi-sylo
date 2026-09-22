@@ -6,6 +6,7 @@ export type SyloBuiltinExtensionKind =
   | 'scheduler'
   | 'ask-question'
   | 'tools-guard'
+  | 'compaction-anchor'
 
 export function normalizePathForBuiltinMatch(path: string): string {
   return path.replace(/\\/g, '/').toLowerCase()
@@ -41,6 +42,9 @@ export function classifySyloBuiltinExtension(path: string): SyloBuiltinExtension
   if (norm.includes('sylo-builtin-tools-guard')) {
     return 'tools-guard'
   }
+  if (norm.includes('sylo-compaction-anchor')) {
+    return 'compaction-anchor'
+  }
   return null
 }
 
@@ -74,6 +78,11 @@ export function syloBuiltinExtensionHint(kind: SyloBuiltinExtensionKind): string
       return (
         'Enforces Pi built-in tool toggles (section above) at execution time. ' +
         'You can disable it, but restrictions above will not be enforced while it is off.'
+      )
+    case 'compaction-anchor':
+      return (
+        'After context compaction, reminds the model that the summary is background and the latest user message is the live task. ' +
+        'Prevents the model from following the summary Next Steps instead of the request you just sent.'
       )
   }
 }

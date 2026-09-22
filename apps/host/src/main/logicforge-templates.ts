@@ -22,7 +22,7 @@ const execFileAsync = promisify(execFile)
 
 const hostMainDir = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(hostMainDir, '..', '..', '..', '..')
-const packageRoot = resolveToolsPackageDir(repoRoot, 'sylo-tools-controls', 'sylo-logicforge')
+const packageRoot = resolveToolsPackageDir(repoRoot, 'sylo-tools-controls', 'sylo-forge')
 const scriptsDir = join(packageRoot, 'scripts')
 const seedDir = join(packageRoot, 'assets', 'templates', 'Studio 5000 Templates')
 

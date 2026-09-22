@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { ChatConversationMessageRow, type ChatMessageRowModel } from './chat/ConversationMessage'
 import { ingestAskQuestionPayload } from './chat/askQuestionClient'
 import { ChatComposer, type ChatComposerHandle } from './chat/ChatComposer'
+import { ChatPlanGoalsBar } from './chat/ChatPlanGoalsBar'
 import { ChatModelBar } from './chat/ChatModelBar'
 import { LiveElapsedLabel } from './chat/LiveElapsedLabel'
 import {
@@ -114,6 +115,8 @@ import {
   sidebarWsSectionName,
   sidebarWsSectionActive,
   sidebarWsSectionDragging,
+  sidebarPinnedLabel,
+  sidebarPinnedSection,
   sidebarWsDropLine,
   chatPane,
   chatArea,
@@ -235,8 +238,13 @@ import {
 import {
   DEFAULT_SKILL_NAV_LAYOUT,
   ROUTE_NAV_SECTION_SEQUENCE,
+  isPinnedKey,
+  resolvePinnedNavEntries,
   skillRouteRowKey,
   sortedRoutesForNavSection,
+  tabNavKey,
+  togglePinnedKey,
+  type PinnedNavEntry,
   type SkillNavLayoutState,
   type SkillRouteNavSection,
 } from './skill-nav-layout'
@@ -315,6 +323,24 @@ function convActivityStatus(
   if (sending.has(convId)) return 'running'
   if (unread.has(convId)) return 'unread'
   return 'read'
+}
+
+function PinGlyph({ className }: { className?: string }): React.ReactElement {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className ?? 'h-3.5 w-3.5'}
+      aria-hidden="true"
+    >
+      <path d="M12 17v5" />
+      <path d="M9 10.8V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v6.8l1.6 2.4A1 1 0 0 1 15.8 15H8.2a1 1 0 0 1-.8-1.8Z" />
+    </svg>
+  )
 }
 
 function ConvStatusIndicator({ status }: { status: ConvActivityStatus }): React.ReactElement {
@@ -605,6 +631,8 @@ function isChatAreaNearBottom(el: HTMLElement, threshold = CHAT_AT_END_PX): bool
  * much frame budget (a 50 KB reply at 50 ms = 1 MB/s of markdown parsing). */
 const STREAM_FLUSH_MS_MIN = 50
 const STREAM_FLUSH_MS_MAX = 200
+/** How long a just-sent turn is trusted before the host's in-flight list wins. */
+const OPTIMISTIC_SEND_GRACE_MS = 15_000
 /** Bytes of streaming text per 1 ms of added flush delay (tuning knob). */
 const STREAM_FLUSH_BYTES_PER_MS = 2000
 
@@ -725,6 +753,12 @@ export function App(): React.ReactElement {
    *  skill-route prefill fired from within chat silently never lands. */
   const [composerPrefillTick, setComposerPrefillTick] = useState(0)
   const [sendingConvIds, setSendingConvIds] = useState<Set<string>>(() => new Set())
+  /**
+   * Sends this renderer just made, keyed by conversation id -> ts. A turn is not in
+   * `pendingTurns` on the host until the broker picks it up, so a reconcile that
+   * lands in that window must not erase it.
+   */
+  const optimisticSendingRef = useRef<Map<string, number>>(new Map())
   /** Conversations with a completed turn the operator has not opened since. */
   const [unreadConvIds, setUnreadConvIds] = useState<Set<string>>(() => new Set())
   /** True when the active conversation has an in-flight agent turn. */
@@ -737,6 +771,52 @@ export function App(): React.ReactElement {
     }
     return null
   }, [activeSending, messages])
+
+  const markOptimisticSending = useCallback((conversationId: string) => {
+    optimisticSendingRef.current.set(conversationId, Date.now())
+    setSendingConvIds((prev) => {
+      if (prev.has(conversationId)) return prev
+      const next = new Set(prev)
+      next.add(conversationId)
+      return next
+    })
+  }, [])
+
+  /**
+   * Re-read the host's in-flight turns. The renderer's own set lives in memory, so
+   * after a reload it is empty even while the agent is mid-turn — which offered
+   * "Send" (starting a second turn) and hid Stop. Also self-heals a set left stale
+   * by a missed `turnFinished`.
+   */
+  const syncActiveTurns = useCallback(async () => {
+    let hostIds: string[]
+    try {
+      hostIds = await window.sylo.chat.activeTurns()
+    } catch {
+      return
+    }
+    const now = Date.now()
+    setSendingConvIds((prev) => {
+      const next = new Set(hostIds)
+      for (const [id, ts] of optimisticSendingRef.current) {
+        if (now - ts < OPTIMISTIC_SEND_GRACE_MS) next.add(id)
+        else optimisticSendingRef.current.delete(id)
+      }
+      if (next.size === prev.size && [...next].every((id) => prev.has(id))) return prev
+      return next
+    })
+  }, [])
+
+  useEffect(() => {
+    void syncActiveTurns()
+  }, [syncActiveTurns, activeId])
+
+  useEffect(() => {
+    const onFocus = () => void syncActiveTurns()
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [syncActiveTurns])
+
     const [brokerHint, setBrokerHint] = useState('')
   const [liveDelta, setLiveDelta] = useState<Record<string, string>>({})
   /**
@@ -1002,6 +1082,12 @@ export function App(): React.ReactElement {
   const [navLayout, setNavLayout] = useState<SkillNavLayoutState>(DEFAULT_SKILL_NAV_LAYOUT)
   const [convContextMenu, setConvContextMenu] = useState<{
     id: string
+    title: string
+    clientX: number
+    clientY: number
+  } | null>(null)
+  const [pinContextMenu, setPinContextMenu] = useState<{
+    key: string
     title: string
     clientX: number
     clientY: number
@@ -1640,6 +1726,37 @@ export function App(): React.ReactElement {
     }
   }, [])
 
+  const toggleNavPin = useCallback(
+    (key: string) => {
+      setNavLayout((prev) => {
+        const next = togglePinnedKey(prev, key)
+        void window.sylo.prefs.set('sylo.nav.layout', next)
+        return next
+      })
+    },
+    [],
+  )
+
+  const pinnedNavEntries = useMemo(
+    () => resolvePinnedNavEntries(navLayout.pinned, skillRoutes),
+    [navLayout.pinned, skillRoutes],
+  )
+
+  const openPinnedNav = useCallback(
+    (entry: PinnedNavEntry) => {
+      if (entry.kind === 'route') {
+        const hit = skillRoutes.find((r) => skillRouteRowKey(r) === entry.key)
+        if (hit) {
+          setActiveSkillRoute(hit)
+          setTab('skill-route')
+        }
+        return
+      }
+      setTab(entry.tab as Tab)
+    },
+    [skillRoutes],
+  )
+
   const notifyPathPrefsSaved = useCallback(async () => {
     await refreshPrefsDiag()
     const savedCanvasOpen = (await window.sylo.prefs.get('sylo.canvas.open', false)) === true
@@ -1687,18 +1804,29 @@ export function App(): React.ReactElement {
     if (canvasPopoutKey !== null || routePopoutKey !== null) return
     const routes = SYLO_SKILL_SURFACE_CAPABILITY_DESCRIPTOR.supports_route ? skillRoutes : []
     const routeItems = (section: SkillRouteNavSection) =>
-      sortedRoutesForNavSection(section, routes, navLayout).map((r) => ({
-        kind: 'route' as const,
-        key: skillRouteRowKey(r),
-        title: r.title,
-      }))
+      sortedRoutesForNavSection(section, routes, navLayout).map((r) => {
+        const key = skillRouteRowKey(r)
+        return {
+          kind: 'route' as const,
+          key,
+          title: r.title,
+          pinned: isPinnedKey(navLayout, key),
+        }
+      })
+    const tabItem = (tab: string, title: string, sep?: boolean) => ({
+      kind: 'tab' as const,
+      tab,
+      title,
+      pinned: isPinnedKey(navLayout, tabNavKey(tab)),
+      ...(sep ? { sep: true } : {}),
+    })
     void window.sylo.menu.setSections([
       { id: 'domain', label: 'Dashboards', items: routeItems('domain') },
       {
         id: 'tools',
         label: 'Tools',
         items: [
-          { kind: 'tab' as const, tab: 'schedules', title: 'Schedules' },
+          tabItem('schedules', 'Schedules'),
           ...routeItems('tools'),
           ...routeItems('library').map((it, i) => ({ ...it, sep: i === 0 })),
         ],
@@ -1708,10 +1836,10 @@ export function App(): React.ReactElement {
         label: 'Developer',
         items: [
           ...routeItems('dev'),
-          { kind: 'tab' as const, tab: 'proposals', title: 'Proposals', sep: true },
-          { kind: 'tab' as const, tab: 'evals', title: 'Testing' },
-          { kind: 'tab' as const, tab: 'skills', title: 'Capability manager' },
-          { kind: 'tab' as const, tab: 'settings', title: 'Settings' },
+          tabItem('proposals', 'Proposals', true),
+          tabItem('evals', 'Testing'),
+          tabItem('skills', 'Capability manager'),
+          tabItem('settings', 'Settings'),
           { kind: 'action' as const, action: 'restart-broker', title: 'Restart broker', sep: true },
           ...(safeMode ?
             [{ kind: 'action' as const, action: 'clear-safe-mode', title: 'Clear safe mode' }]
@@ -1725,6 +1853,11 @@ export function App(): React.ReactElement {
   useEffect(() => {
     if (canvasPopoutKey !== null || routePopoutKey !== null) return
     return window.sylo.menu.onAction((item) => {
+      if (item.kind === 'pin') {
+        const key = item.key?.trim() || (item.tab ? tabNavKey(item.tab) : '')
+        if (key) toggleNavPin(key)
+        return
+      }
       if (item.kind === 'route' && item.key) {
         const hit = skillRoutes.find((r) => skillRouteRowKey(r) === item.key)
         if (hit) {
@@ -1755,7 +1888,7 @@ export function App(): React.ReactElement {
         }
       }
     })
-  }, [skillRoutes, refreshCapabilities, refreshBrokerFromMain, canvasPopoutKey, routePopoutKey])
+  }, [skillRoutes, refreshCapabilities, refreshBrokerFromMain, canvasPopoutKey, routePopoutKey, toggleNavPin])
 
   // Minute ticker so sidebar relative timestamps stay fresh.
   useEffect(() => {
@@ -2345,6 +2478,7 @@ export function App(): React.ReactElement {
         return
       }
       if (p.kind === 'turnFinished') {
+        optimisticSendingRef.current.delete(p.conversationId)
         setSendingConvIds((prev) => {
           if (!prev.has(p.conversationId)) return prev
           const next = new Set(prev)
@@ -2372,6 +2506,7 @@ export function App(): React.ReactElement {
           activeIdRef.current = undefined
           setActiveId(undefined)
         }
+        optimisticSendingRef.current.delete(p.conversationId)
         setUnreadConvIds((prev) => {
           if (!prev.has(p.conversationId)) return prev
           const next = new Set(prev)
@@ -2474,29 +2609,20 @@ export function App(): React.ReactElement {
       try {
         const r = await window.sylo.chat.deliverQueued(activeId, text, attachments)
         if (!r.ok) return false
-        setSendingConvIds((prev) => {
-          if (!activeId || prev.has(activeId)) return prev
-          const next = new Set(prev)
-          next.add(activeId)
-          return next
-        })
+        markOptimisticSending(activeId)
         void refreshMessages()
         return true
       } catch {
         return false
       }
     },
-    [activeId, safeMode, agentReady, refreshMessages],
+    [activeId, safeMode, agentReady, refreshMessages, markOptimisticSending],
   )
 
   const handleSendingStarted = useCallback(() => {
-    setSendingConvIds((prev) => {
-      if (!activeId || prev.has(activeId)) return prev
-      const next = new Set(prev)
-      next.add(activeId)
-      return next
-    })
-  }, [activeId])
+    if (!activeId) return
+    markOptimisticSending(activeId)
+  }, [activeId, markOptimisticSending])
 
   const handleSegmentToggle = useCallback((key: string, next: boolean) => {
     setSegmentOverrides((prev) => ({ ...prev, [key]: next }))
@@ -2958,6 +3084,7 @@ export function App(): React.ReactElement {
       pendingComposerPrefillRef.current = text
       const reuseId = await window.sylo.conversations.findLatestEmpty(wid)
       if (reuseId) {
+        await window.sylo.plan.clearForNewChat(wid)
         await refreshConversations()
         setActiveId(reuseId)
       } else {
@@ -2988,6 +3115,7 @@ export function App(): React.ReactElement {
     if (!id) return
     const reuseId = await window.sylo.conversations.findLatestEmpty(id)
     if (reuseId) {
+      await window.sylo.plan.clearForNewChat(id)
       await refreshConversations()
       setActiveId(reuseId)
       setTab('chat')
@@ -3839,6 +3967,62 @@ export function App(): React.ReactElement {
           + New chat
         </button>
 
+        {pinnedNavEntries.length > 0 ?
+          <div className={sidebarPinnedSection}>
+            <div className={sidebarPinnedLabel}>Pinned</div>
+            {pinnedNavEntries.map((entry) => {
+              const selected =
+                entry.kind === 'route'
+                  ? tab === 'skill-route' &&
+                    activeSkillRoute !== null &&
+                    skillRouteRowKey(activeSkillRoute) === entry.key
+                  : tab === entry.tab
+              return (
+                <div
+                  key={entry.key}
+                  className={cn(convRow, selected ? convRowSelected : 'hover:bg-bg-tertiary')}
+                  role="presentation"
+                >
+                  <div className={convRowMain}>
+                    <button
+                      type="button"
+                      className={cn(convRowSelect, selected && convRowSelectActive)}
+                      title={entry.title}
+                      onClick={() => openPinnedNav(entry)}
+                      onContextMenu={(e) => {
+                        e.preventDefault()
+                        setPinContextMenu({
+                          key: entry.key,
+                          title: entry.title,
+                          clientX: e.clientX,
+                          clientY: e.clientY,
+                        })
+                      }}
+                    >
+                      <PinGlyph className="h-3.5 w-3.5 shrink-0 text-text-muted" />
+                      <span className={convRowSelectLabel}>{entry.title}</span>
+                    </button>
+                    <div className={convRowActions}>
+                      <button
+                        type="button"
+                        className={convActionBtn}
+                        aria-label={`Unpin ${entry.title}`}
+                        title="Unpin"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          toggleNavPin(entry.key)
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        : null}
+
         <div
           className={sidebarConvList}
           onDragOver={(e) => {
@@ -4347,7 +4531,25 @@ export function App(): React.ReactElement {
         {updateStatus?.isUpdateAvailable && updateStatus.latestVersion && dismissedUpdateVersion !== updateStatus.latestVersion && (
           <div className={banner}>
             <strong>Sylo {updateStatus.latestVersion}</strong> is available — you have{' '}
-            {updateStatus.currentVersion}. Update: <code>git pull</code> + <code>npm install</code> + restart Sylo.{' '}
+            {updateStatus.currentVersion}.{' '}
+            {updateStatus.isInstalledBuild ? (
+              <>
+                Update: download the new installer and run it — your chats and settings are
+                kept.{' '}
+                <a
+                  href="https://github.com/Yeti-Trix/pi-sylo/releases/latest"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Download
+                </a>
+                {' · '}
+              </>
+            ) : (
+              <>
+                Update: <code>git pull</code> + <code>npm install</code> + restart Sylo.{' '}
+              </>
+            )}
             <a
               href="https://github.com/Yeti-Trix/pi-sylo/blob/main/CHANGELOG.md"
               target="_blank"
@@ -4781,6 +4983,7 @@ export function App(): React.ReactElement {
               </div>
             )
             }
+            <ChatPlanGoalsBar conversationId={activeId} />
             <ChatComposer
               ref={composerRef}
               activeId={activeId}
@@ -6145,6 +6348,43 @@ export function App(): React.ReactElement {
           </div>
         </div>
       )}
+
+      {pinContextMenu ?
+        createPortal(
+          <>
+            <div
+              role="presentation"
+              aria-hidden="true"
+              className={ctxMenuBackdrop}
+              onMouseDown={() => setPinContextMenu(null)}
+              onWheel={() => setPinContextMenu(null)}
+            />
+            <div
+              className={ctxMenuShell}
+              style={{
+                left: pinContextMenu.clientX,
+                top: pinContextMenu.clientY,
+              }}
+              role="menu"
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <button
+                type="button"
+                className={routeCtxItem}
+                role="menuitem"
+                onClick={() => {
+                  const { key } = pinContextMenu
+                  setPinContextMenu(null)
+                  toggleNavPin(key)
+                }}
+              >
+                Unpin
+              </button>
+            </div>
+          </>,
+          document.body,
+        )
+      : null}
 
       {convContextMenu ?
         createPortal(

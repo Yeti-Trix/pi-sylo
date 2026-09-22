@@ -13,6 +13,37 @@ export const PI_BUILTIN_TOOL_LABELS: Record<PiBuiltinToolId, string> = {
   ls: 'List directories',
 }
 
+/**
+ * The built-ins grouped the way operators reason about them ("can it write?"),
+ * used by the per-subagent access controls in Settings. Covers every id in
+ * `PI_BUILTIN_TOOL_IDS`, so a group-by-group UI cannot silently omit a tool.
+ */
+export const PI_TOOL_ACCESS_GROUPS: readonly {
+  id: 'read' | 'write' | 'shell'
+  label: string
+  hint: string
+  tools: readonly PiBuiltinToolId[]
+}[] = [
+  {
+    id: 'read',
+    label: 'Read access',
+    hint: 'Open files, list directories, and search the project.',
+    tools: ['read', 'ls', 'find', 'grep'],
+  },
+  {
+    id: 'write',
+    label: 'Write access',
+    hint: 'Create files and edit them in place.',
+    tools: ['write', 'edit'],
+  },
+  {
+    id: 'shell',
+    label: 'Shell access',
+    hint: 'Run commands — builds, tests, git. Implies it can change things read/write toggles do not cover.',
+    tools: ['bash'],
+  },
+]
+
 /** Sylo pref `sylo.pi_builtin_tools` — master switch + per-tool toggles when master is on. */
 export type PiBuiltinToolsPref = {
   enabled: boolean

@@ -3,6 +3,7 @@ import { basename, join } from 'node:path'
 import { parseFrontmatter } from '@earendil-works/pi-coding-agent'
 import { normalizeSkillCapabilityPath } from '../shared/sylo-capability-paths.js'
 import { isSkillVisibleForOptionalPackages } from '../shared/sylo-optional-packages.js'
+import { listLocalPackageSkillDirs } from './local-package-skills.js'
 
 /** Host sidebar grouping; unknown frontmatter → `domain` (ADR-35). */
 export type SkillRouteNavSection = 'domain' | 'tools' | 'library' | 'dev'
@@ -46,14 +47,31 @@ function fixturePathForRoute(skillFolderName: string, entry: string): string {
   return `/skill-surface/routes/${skillFolderName}/${normalized}`
 }
 
-export function discoverSkillRoutes(agentDir: string): DiscoveredSkillRoute[] {
+function collectSkillDirs(agentDir: string): string[] {
+  const out: string[] = []
+  const seenFolders = new Set<string>()
+  const add = (skillDir: string): void => {
+    const folder = basename(skillDir).trim().toLowerCase()
+    if (!folder || seenFolders.has(folder)) return
+    if (!existsSync(join(skillDir, 'SKILL.md'))) return
+    seenFolders.add(folder)
+    out.push(skillDir)
+  }
   const skillsRoot = join(agentDir, 'skills')
-  const out: DiscoveredSkillRoute[] = []
-  if (!existsSync(skillsRoot)) return out
+  if (existsSync(skillsRoot)) {
+    for (const ent of readdirSync(skillsRoot, { withFileTypes: true })) {
+      if (ent.isDirectory()) add(join(skillsRoot, ent.name))
+    }
+  }
+  // Local-path packages (Custom/ import) — agent/skills wins when both exist.
+  for (const dir of listLocalPackageSkillDirs(agentDir)) add(dir)
+  return out
+}
 
-  for (const ent of readdirSync(skillsRoot, { withFileTypes: true })) {
-    if (!ent.isDirectory()) continue
-    const skillDir = join(skillsRoot, ent.name)
+export function discoverSkillRoutes(agentDir: string): DiscoveredSkillRoute[] {
+  const out: DiscoveredSkillRoute[] = []
+
+  for (const skillDir of collectSkillDirs(agentDir)) {
     const md = join(skillDir, 'SKILL.md')
     if (!existsSync(md)) continue
     let text: string

@@ -54,10 +54,28 @@ import { BUILD_INFO } from '../generated/build-info.js'
 import { DefaultPackageManager, SettingsManager } from '@earendil-works/pi-coding-agent'
 import { SYLO_MODEL_PROVIDERS, CHATGPT_CODEX_MODELS } from '../shared/chatgpt-codex.js'
 import {
+  API_PROVIDER_ENV_VARS,
+  listConfiguredModelProviders,
+  providerHasStoredCredential,
+} from '../shared/configured-providers.js'
+import {
   mergeSubagentPins,
   parseSubagentPins,
   serializeSubagentPins,
 } from '../shared/subagent-model-pin.js'
+import {
+  composeForcedSubagentPrompt,
+  formatForcedSubagentNotice,
+  mightCarryMention,
+  parseSubagentMentionsInBody,
+  type SubagentRunOutcome,
+} from '../shared/subagent-mentions.js'
+import {
+  composeOrchestratorResumePrompt,
+  composePlanScopeNote,
+  isPlanRestoreRequest,
+  shouldInjectOrchestratorResume,
+} from '../shared/orchestrator-resume.js'
 import {
   SYLO_SURFACE_SCHEME,
   syloSurfaceRelativePath,
@@ -108,6 +126,7 @@ import {
 } from './tasks-live.js'
 import { readSkillMd, writeSkillMd } from './skill-md-io.js'
 import { installCrashHandlers } from './crash-log.js'
+import { pinSyloUserDataDir, syncBundledSkills } from './packaged-runtime.js'
 import {
   appendPersistedToolEvents,
   persistedToolEventsToJson,
@@ -177,10 +196,10 @@ import {
   type ImageDeliverySummary,
 } from '../shared/chat-image-delivery.js'
 import {
-  DEFAULT_MODEL_MAX_TOKENS,
   readModelContextWindow,
   readModelInputConfig,
   readModelMaxTokens,
+  resolveLocalModelMaxTokens,
   resolveModelInputTypes,
   writeModelContextWindow,
   writeModelInputTypes,
@@ -255,7 +274,13 @@ import { discoverSkillRoutes, filterSkillRoutesForSidebar } from './skill-routes
 import { readSkillDataJson, writeSkillDataJson, SKILL_DATA_QUOTA_BYTES } from './skill-data-store.js'
 import { lintSkillSurfacesBatch } from './skill-surface-lint.js'
 import { removeStandaloneSkillFolder } from './standalone-skill-removal.js'
-import { listSubagentAgents } from './subagent-agents.js'
+import {
+  deleteCustomSubagent,
+  listSubagentAgents,
+  readCustomSubagent,
+  updateCustomSubagent,
+  writeCustomSubagent,
+} from './subagent-agents.js'
 import {
   handleSubagentHostEvent,
   initSubagentTaskHostSession,
@@ -263,6 +288,12 @@ import {
   shutdownSubagentTaskHostSession,
   subagentTaskStore,
 } from './subagent-tasks-service.js'
+import {
+  clearPlanForNewChat,
+  isolatePlanForConversation,
+  readPlanTodos,
+  setPlanTodosListener,
+} from './plan-todos-host.js'
 import type { SyloSubagentHostEvent } from '../shared/subagent-tasks-types.js'
 import type { SyloWebAccessEvent } from '../shared/web-access-events.js'
 import {
@@ -341,6 +372,14 @@ import {
 } from './tts-config.js'
 import { generateTtsWav, listTtsVoices, synthOptionsFromRecords } from './tts-engine.js'
 import { readUserPackages } from './user-packages.js'
+import {
+  ensureLocalPackageSkillsInstalled,
+  ensureLocalPackageSkillSurfaces,
+  importCustomToolsFromZip,
+  listCustomToolPackages,
+  suggestedExportFileName,
+  writeCustomToolsZip,
+} from './custom-tools-pack.js'
 import { loadEvalDashboard, runEvalBaseline } from './eval-dashboard.js'
 import {
   ensureWebAccessConfigSchema,
@@ -425,6 +464,13 @@ if (process.platform === 'win32' && process.env.ELECTRON_RENDERER_URL) {
   app.disableHardwareAcceleration()
 }
 
+// Before anything can read userData: the installed build's app manifest is
+// named differently than the dev clone's, and Electron derives userData from
+// the app name. Pinning it keeps chats, credentials, and prefs in the same
+// directory across both. Nothing in this file's imports resolves a userData
+// path at module scope, so here is early enough.
+pinSyloUserDataDir()
+
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const WORKSPACE_NODE_MODULES = join(__dirname, '../../../..', 'node_modules')
 const SYLO_REPO_ROOT = join(__dirname, '../../../..')
@@ -441,6 +487,10 @@ const SYLO_IMAGE_FALLBACK_EXTENSION = join(
   'apps/host/src/broker/sylo-image-fallback.ts',
 )
 const SYLO_CANVAS_SKETCH_EXTENSION = join(SYLO_REPO_ROOT, 'apps/host/src/broker/sylo-canvas-sketch.ts')
+const SYLO_COMPACTION_ANCHOR_EXTENSION = join(
+  SYLO_REPO_ROOT,
+  'apps/host/src/broker/sylo-compaction-anchor.ts',
+)
 
 /** Mirrored freehand-canvas sketch PNG (userData). The renderer keeps it fresh
  *  via `canvas:set-sketch-image`; the broker's `canvas_sketch` tool reads it. */
@@ -989,6 +1039,14 @@ function discoverFilesystemCapabilities(
       ),
     )
   }
+  if (existsSync(SYLO_COMPACTION_ANCHOR_EXTENSION)) {
+    extBuckets.push(
+      ...tagExtensions(
+        [{ name: 'sylo-compaction-anchor', path: SYLO_COMPACTION_ANCHOR_EXTENSION }],
+        'sylo-builtin',
+      ),
+    )
+  }
   const extensions = mergeByPath(extBuckets).sort((a, b) => a.name.localeCompare(b.name))
   return { skills, extensions }
 }
@@ -1257,11 +1315,14 @@ let canvasOpenState = false
  *  `skill-nav-layout.ts`), computes the final per-section rows for the active
  *  workspace, and pushes them here via `menu:set-sections`. The main process
  *  only renders this list into native top-level menus (Dashboards / Tools /
- *  Developer) and forwards clicks back to the main window. */
+ *  Developer) and forwards clicks back to the main window. Dashboards/Tools
+ *  route/tab rows also get a Pin/Unpin submenu so they can be parked in the
+ *  sidebar; Developer items stay click-only. */
 type MenuActionItem =
-  | { kind: 'route'; key: string; title: string; sep?: boolean }
-  | { kind: 'tab'; tab: string; title: string; sep?: boolean }
+  | { kind: 'route'; key: string; title: string; sep?: boolean; pinned?: boolean }
+  | { kind: 'tab'; tab: string; title: string; sep?: boolean; pinned?: boolean }
   | { kind: 'action'; action: string; title: string; sep?: boolean }
+  | { kind: 'pin'; title: string; key?: string; tab?: string; sep?: boolean }
 
 type MenuSectionSync = { id: string; label: string; items: MenuActionItem[] }
 
@@ -1284,9 +1345,9 @@ function normalizeMenuSectionsSync(raw: unknown): MenuSectionSync[] {
       const sep = r.sep === true
       if (!title) continue
       if (r.kind === 'route' && typeof r.key === 'string' && r.key.trim()) {
-        items.push({ kind: 'route', key: r.key.trim(), title, sep })
+        items.push({ kind: 'route', key: r.key.trim(), title, sep, pinned: r.pinned === true })
       } else if (r.kind === 'tab' && typeof r.tab === 'string' && r.tab.trim()) {
-        items.push({ kind: 'tab', tab: r.tab.trim(), title, sep })
+        items.push({ kind: 'tab', tab: r.tab.trim(), title, sep, pinned: r.pinned === true })
       } else if (r.kind === 'action' && typeof r.action === 'string' && r.action.trim()) {
         items.push({ kind: 'action', action: r.action.trim(), title, sep })
       }
@@ -1294,6 +1355,43 @@ function normalizeMenuSectionsSync(raw: unknown): MenuSectionSync[] {
     out.push({ id, label, items })
   }
   return out
+}
+
+function sendMenuAction(item: MenuActionItem): void {
+  const mw = mainWindow
+  if (mw && !mw.isDestroyed()) mw.webContents.send('menu:action', item)
+}
+
+/** Dashboards/Tools route/tab rows keep a Pin submenu (native menus have no
+ *  item-level right-click). Clicking the parent still opens; the submenu is
+ *  the pin button the operator asked for. Developer items are click-only. */
+function buildSyncedMenuItem(
+  item: MenuActionItem,
+  opts: { pinnable?: boolean } = {},
+): MenuItemConstructorOptions {
+  if (item.kind === 'action' || item.kind === 'pin' || opts.pinnable === false) {
+    return {
+      label: item.title,
+      click: () => sendMenuAction(item),
+    }
+  }
+  const pinAction: MenuActionItem = {
+    kind: 'pin',
+    title: item.title,
+    key: item.kind === 'route' ? item.key : undefined,
+    tab: item.kind === 'tab' ? item.tab : undefined,
+  }
+  return {
+    label: item.title,
+    click: () => sendMenuAction(item),
+    submenu: [
+      { label: 'Open', click: () => sendMenuAction(item) },
+      {
+        label: item.pinned ? 'Unpin from sidebar' : 'Pin to sidebar',
+        click: () => sendMenuAction(pinAction),
+      },
+    ],
+  }
 }
 
 /** Build the application menu. Preserves Electron's default File/Edit/View
@@ -1356,13 +1454,7 @@ function buildAppMenu(): Menu {
       // label/click ignored — so the separator must be its own row, never
       // merged into the item it precedes.
       if (item.sep && submenu.length > 0) submenu.push({ type: 'separator' })
-      submenu.push({
-        label: item.title,
-        click: () => {
-          const mw = mainWindow
-          if (mw && !mw.isDestroyed()) mw.webContents.send('menu:action', item)
-        },
-      })
+      submenu.push(buildSyncedMenuItem(item, { pinnable: sec.id !== 'dev' }))
     }
     template.push({ label: sec.label, submenu })
   }
@@ -1414,6 +1506,39 @@ function extensionNotifyVisibleInChat(
   if (notifyType === 'warning' || notifyType === 'error') return true
   if (message.startsWith('Observational memory:')) return false
   return true
+}
+
+/**
+ * Explain a turn the provider truncated, so a stalled agent is never silent.
+ *
+ * Two different limits report the same `stopReason: 'length'` and the remedy differs.
+ * Hitting `maxTokens` truncates one oversized reply; filling the context window leaves
+ * the model no room to answer at all, which shows up as a handful of output tokens and
+ * looks exactly like the agent quitting mid-task. Local Ollama models reach the second
+ * case fastest, because a high thinking level adds thousands of tokens per turn to the
+ * history that Pi's own estimate does not fully account for.
+ */
+function describeTurnCutoff(
+  output: number,
+  total: number,
+  provider?: string,
+  modelId?: string,
+): string {
+  const fmt = (n: number) => n.toLocaleString('en-US')
+  const label = modelId?.trim() ? modelId.trim() : 'this model'
+  const canLookUp = Boolean(provider?.trim() && modelId?.trim())
+  const maxTokens = canLookUp ? readModelMaxTokens(hostAgentDir(), provider!, modelId!) : null
+  const contextWindow = canLookUp
+    ? readModelContextWindow(hostAgentDir(), provider!, modelId!)
+    : null
+
+  if (maxTokens != null && output >= maxTokens * 0.98) {
+    return `Response cut off — it hit the ${fmt(maxTokens)}-token per-reply cap for ${label}. Ask the agent to continue, or raise Max tokens in Settings. A high thinking level can spend this whole budget before any answer is written.`
+  }
+  if (contextWindow != null && total >= contextWindow * 0.97) {
+    return `Response cut off — this chat filled ${label}'s ${fmt(contextWindow)}-token context window (${fmt(total)} used), leaving no room to reply. Compact the chat or start a new one. If it happens again right away, lower the thinking level so each turn adds less history.`
+  }
+  return `Response cut off — ${label} stopped at a token limit after ${fmt(output)} output tokens (${fmt(total)} in context) instead of finishing. Ask it to continue, or start a new chat if it repeats.`
 }
 
 function appendExtensionCommandOutput(
@@ -1686,9 +1811,40 @@ type PreparedUserMessage = {
   images: BrokerImageContent[]
 }
 
+/** Agents an `@mention` forces, and the request left after stripping it. */
+type ForcedSubagentRequest = { agents: string[]; task: string }
+
+type ForcedChainResult =
+  | { ok: true; promptText: string }
+  | { ok: false; status: 'failed' | 'cancelled'; message: string }
+
+/** Options shared by the new-turn and follow-up paths of a send. */
+type ChatTurnOptions = {
+  skipUserInsert?: boolean
+  prepared?: PreparedUserMessage
+  /** Transcript row between the user message and the reply (forced-run notice). */
+  noticeAfterUser?: string
+  /** Auto-title source when the raw body is a poor label (e.g. an `@agent` prefix). */
+  titleText?: string
+  /**
+   * Run these agents after the turn owns a broker slot and its session is
+   * bound, then fold their output into the prompt.
+   *
+   * Declarative rather than a closure so a turn deferred for a busy broker can
+   * round-trip it. Running the chain *inside* turn accounting is what makes
+   * Stop, deferral, and event attribution work — outside it there was no
+   * `pendingTurns` row, so the UI showed nothing running and lifecycle events
+   * could be credited to whichever turn started next.
+   */
+  forced?: ForcedSubagentRequest
+}
+
 type DeferredChatTurn = {
   conversationId: string
   prepared: PreparedUserMessage
+  /** Rebuilt on flush so a deferred `@mention` still forces its run. */
+  forced?: { agents: string[]; task: string }
+  noticeAfterUser?: string
 }
 
 /** Turns waiting for a free broker slot while at max concurrency. */
@@ -1746,15 +1902,25 @@ function deferChatTurn(
   conversationId: string,
   text: string,
   attachments: readonly RawAttachment[] | undefined,
+  options?: Pick<ChatTurnOptions, 'prepared' | 'noticeAfterUser' | 'titleText'> & {
+    forced?: { agents: string[]; task: string }
+  },
 ): Promise<{ ok: true; assistantMessageId: string; deferred: true }> {
   return (async () => {
-    const prepared = await prepareUserMessageWithImages(text, attachments)
+    const prepared =
+      options?.prepared ?? (await prepareUserMessageWithImages(text, attachments))
     db.insertMessage(conversationId, 'user', prepared.text, 'complete')
-    maybeAutoTitleFromFirstUserMessage(conversationId, text)
+    maybeAutoTitleFromFirstUserMessage(conversationId, options?.titleText ?? text)
+    if (options?.noticeAfterUser) {
+      db.insertMessage(conversationId, 'system', options.noticeAfterUser, 'complete')
+    }
     emitChatRefresh(conversationId, 'messages')
         deferredChatTurns.push({
       conversationId,
       prepared,
+      forced: options?.forced,
+      // Already written above — kept only so a re-defer on flush does not
+      // insert a second notice.
     })
     // Deferred-turn safety snapshot (issue #8b): the user message exists but
     // the turn won't start until the other conversation's turn finishes —
@@ -1778,6 +1944,9 @@ async function flushDeferredTurns(): Promise<void> {
   const result = await startChatTurn(next.conversationId, '', undefined, {
     skipUserInsert: true,
     prepared: next.prepared,
+    // A deferred mention must still force its run, or identical text behaves
+    // differently purely because the broker happened to be busy.
+    forced: next.forced,
   })
   if (result.ok && result.deferred) {
     deferredChatTurns.unshift(next)
@@ -1838,7 +2007,7 @@ async function followUpActiveTurn(
   conversationId: string,
   text: string,
   attachments: readonly RawAttachment[] | undefined,
-  options?: { steer?: boolean; skipUserInsert?: boolean },
+  options?: ChatTurnOptions & { steer?: boolean },
 ): Promise<
   | { ok: true; assistantMessageId: string }
   | { ok: false; error: string }
@@ -1850,10 +2019,17 @@ async function followUpActiveTurn(
   const assigned = turnBrokerPool.supervisorForTurn(turnId) ?? broker
   if (!assigned) return { ok: false, error: 'broker_not_ready' }
 
-  const prepared = await prepareUserMessageWithImages(text, attachments)
+  // Honor a caller-supplied prepared message: re-deriving it here silently
+  // dropped the composed subagent output on any conversation that already had
+  // a turn in flight.
+  const prepared =
+    options?.prepared ?? (await prepareUserMessageWithImages(text, attachments))
   if (!options?.skipUserInsert) {
     db.insertMessage(conversationId, 'user', prepared.text, 'complete')
-    maybeAutoTitleFromFirstUserMessage(conversationId, text)
+    maybeAutoTitleFromFirstUserMessage(conversationId, options?.titleText ?? text)
+  }
+  if (options?.noticeAfterUser) {
+    db.insertMessage(conversationId, 'system', options.noticeAfterUser, 'complete')
   }
   splitPendingTurnAfterUserInterrupt(conversationId, pending)
   emitChatRefresh(conversationId, 'messages')
@@ -1862,11 +2038,26 @@ async function followUpActiveTurn(
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
   }
+  let promptText = prepared.promptText
+  if (options?.forced) {
+    const hooked = await runForcedSubagentChainForTurn(
+      conversationId,
+      turnId,
+      options.forced,
+      promptText,
+    )
+    if (!hooked.ok) {
+      db.updateMessageContent(pending.assistantId, hooked.message, hooked.status)
+      emitChatRefresh(conversationId, 'turnFinished')
+      return { ok: false, error: `forced_${hooked.status}` }
+    }
+    promptText = hooked.promptText
+  }
   const images = prepared.images
   if (options?.steer) {
-    assigned.sendSteer(prepared.promptText, images.length > 0 ? images : undefined)
+    assigned.sendSteer(promptText, images.length > 0 ? images : undefined)
   } else {
-    assigned.sendFollowUp(prepared.promptText, images.length > 0 ? images : undefined)
+    assigned.sendFollowUp(promptText, images.length > 0 ? images : undefined)
   }
   return { ok: true, assistantMessageId: pending.assistantId }
 }
@@ -2403,6 +2594,7 @@ async function ensureBrokerSessionForConversation(
   // decides whether a switchSession can be skipped.
   const dfp = `${disabledFingerprint(mergedDisabled)}\0${alwaysApplySkillPaths.join('\0')}`
   const eff = effectiveModelForConversation(convId)
+  ensureOllamaMaxTokensOnce(eff.provider, eff.modelId)
   const mfp = modelFingerprint(eff)
   if (
     supervisor === broker &&
@@ -2535,11 +2727,189 @@ async function prepareUserMessageWithImages(
   }
 }
 
+/**
+ * Whether the `sylo-subagents` extension is actually live.
+ *
+ * Forcing must honor the same switches the `subagent` tool does, so this is the
+ * single condition both `tasks:diagnostics` and the `@mention` path consult.
+ */
+function subagentExtensionEnabled(): boolean {
+  const key = normalizeSyloCapabilityPath(SYLO_SUBAGENTS_EXTENSION)
+  return (
+    Boolean(key) &&
+    existsSync(SYLO_SUBAGENTS_EXTENSION) &&
+    !readSyloDisabledCapabilities().extensionPaths.includes(key)
+  )
+}
+
+/** Chat-only takes every tool away from the agent — forced runs included. */
+function brokerChatOnlyPref(): boolean {
+  return db.getPref('sylo.chat_only', false) as boolean
+}
+
+/** Personas the extension would discover for the active workspace + agent scope. */
+function listSubagentAgentsForActiveScope(): ReturnType<typeof listSubagentAgents> {
+  const scope = String(db.getPref('sylo.subagents.agent_scope', 'user') || 'user').trim()
+  return listSubagentAgents({
+    bundledDir: join(SYLO_REPO_ROOT, 'packages/sylo-subagents/agents'),
+    userAgentsDir: join(hostAgentDir(), 'agents'),
+    projectCwd: effectivePiCwdForWorkspace(activeWorkspaceId()),
+    scope: scope === 'both' || scope === 'project' ? scope : 'user',
+  })
+}
+
+/**
+ * Conversation for an in-flight operator-forced run, keyed by its synthetic turn
+ * id. Forced runs precede the Pi turn, so `pendingTurns` cannot resolve them.
+ */
+const forcedSubagentTurnConvIds = new Map<string, string>()
+
+/** Prior assistant row, skipping the empty streaming row we just inserted. */
+function lastAssistantForResume(
+  conversationId: string,
+  exceptId?: string,
+): { content: string; status: string } | null {
+  const rows = db.listMessages(conversationId)
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i]!
+    if (row.role !== 'assistant') continue
+    if (exceptId && row.id === exceptId) continue
+    return { content: row.content, status: row.status }
+  }
+  return null
+}
+
+function conversationUsedSubagents(conversationId: string): boolean {
+  try {
+    return subagentTaskStore.listAgentTasksForConversation(conversationId).length > 0
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Resolve leading `@agent` mentions in a send, or null for an ordinary send.
+ *
+ * This is the forcing half of subagent invocation. The `subagent` tool still
+ * lets the model delegate on its own judgment; a mention takes that judgment
+ * away, because a chat model asked to "use the planner" will often just plan
+ * itself and never call the tool.
+ */
+function forcedMentionRequest(body: string): ForcedSubagentRequest | null {
+  // Listing personas touches the filesystem, so only pay for it when the
+  // message could actually carry a mention.
+  if (!mightCarryMention(body)) return null
+  // Forcing must respect the same switches the `subagent` tool does, or
+  // Settings can report the extension disabled while `@planner` still spawns
+  // children.
+  if (!subagentExtensionEnabled() || brokerChatOnlyPref()) return null
+  const mentioned = parseSubagentMentionsInBody(
+    body,
+    listSubagentAgentsForActiveScope().map((a) => a.name),
+  )
+  // A mention with no request after it is the operator talking *about* an
+  // agent, not invoking one.
+  if (mentioned.agents.length === 0 || !mentioned.task) return null
+  return { agents: mentioned.agents, task: mentioned.task }
+}
+
+/**
+ * Send a chat message, honoring leading `@agent` mentions as a forced run.
+ *
+ * Used by every real "send" surface (composer, queue, phone companion) so a
+ * mention means the same thing everywhere. Steer paths deliberately skip this:
+ * they interrupt a turn that is already running.
+ */
+async function startChatTurnHonoringMentions(
+  conversationId: string,
+  body: string,
+  attachments: readonly RawAttachment[] | undefined,
+): Promise<
+  | { ok: true; assistantMessageId: string; deferred?: false }
+  | { ok: true; assistantMessageId: string; deferred: true }
+  | { ok: false; assistantMessageId: string; error: string }
+> {
+  const forced = forcedMentionRequest(body)
+  if (!forced) return await startChatTurn(conversationId, body, attachments)
+  return await startChatTurn(conversationId, body, attachments, {
+    noticeAfterUser: formatForcedSubagentNotice(forced.agents),
+    // Title from the request, not the `@agent` prefix, or every forced chat is
+    // labelled with the persona instead of the work.
+    titleText: forced.task,
+    forced,
+  })
+}
+
+/**
+ * Run the operator's `@mentioned` agents and fold their output into the prompt.
+ *
+ * Runs on the turn's own id, so `sylo_subagent` lifecycle events land in this
+ * conversation even if another conversation starts a turn while the chain works.
+ */
+async function runForcedSubagentChainForTurn(
+  conversationId: string,
+  turnId: string,
+  forced: ForcedSubagentRequest,
+  promptText: string,
+): Promise<ForcedChainResult> {
+  const supervisor = turnBrokerPool.supervisorForTurn(turnId) ?? broker
+  if (!supervisor) {
+    return {
+      ok: false,
+      status: 'failed',
+      message: '(error) Agent is not connected, so the forced subagent run did not start.',
+    }
+  }
+
+  forcedSubagentTurnConvIds.set(turnId, conversationId)
+  let outcomes: SubagentRunOutcome[]
+  try {
+    outcomes = await supervisor.runForcedSubagents({
+      turnId,
+      agents: forced.agents,
+      task: forced.task,
+    })
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e)
+    return {
+      ok: false,
+      status: 'failed',
+      message: `Forced subagent run failed before any agent produced output: ${detail}`,
+    }
+  } finally {
+    forcedSubagentTurnConvIds.delete(turnId)
+  }
+
+  if (outcomes.length === 0) {
+    return {
+      ok: false,
+      status: 'failed',
+      message: 'Forced subagent run produced no result. Check Settings → Subagents diagnostics.',
+    }
+  }
+
+  // Stopping the run is the operator saying "not this" — spending a chat turn on
+  // the partial output would be the opposite of what they asked for.
+  const cancelled = outcomes.find((o) => o.status === 'cancelled')
+  if (cancelled) {
+    return {
+      ok: false,
+      status: 'cancelled',
+      message: `Stopped the forced \`@${cancelled.agent}\` run. Nothing was sent to the chat model.`,
+    }
+  }
+
+  return {
+    ok: true,
+    promptText: composeForcedSubagentPrompt({ userText: promptText, outcomes }),
+  }
+}
+
 async function startChatTurn(
   conversationId: string,
   text: string,
   attachments?: readonly RawAttachment[],
-  options?: { skipUserInsert?: boolean; prepared?: PreparedUserMessage },
+  options?: ChatTurnOptions,
 ): Promise<
   | { ok: true; assistantMessageId: string; deferred?: false }
   | { ok: true; assistantMessageId: string; deferred: true }
@@ -2548,7 +2918,7 @@ async function startChatTurn(
   if (!brokerAgentReady || !broker || db.getPref('sylo.safe_mode', false)) {
     if (!options?.skipUserInsert) {
       db.insertMessage(conversationId, 'user', text, 'complete')
-      maybeAutoTitleFromFirstUserMessage(conversationId, text)
+      maybeAutoTitleFromFirstUserMessage(conversationId, options?.titleText ?? text)
     }
     const msg =
       db.getPref('sylo.safe_mode', false) ?
@@ -2560,14 +2930,17 @@ async function startChatTurn(
   }
 
   if (!options?.skipUserInsert && shouldDeferCrossConversationTurn(conversationId)) {
-    return await deferChatTurn(conversationId, text, attachments)
+    return await deferChatTurn(conversationId, text, attachments, {
+      prepared: options?.prepared,
+      noticeAfterUser: options?.noticeAfterUser,
+      titleText: options?.titleText,
+      forced: options?.forced,
+    })
   }
 
   const existingActive = findPendingTurnForConversation(conversationId)
   if (existingActive) {
-    const followUp = await followUpActiveTurn(conversationId, text, attachments, {
-      skipUserInsert: options?.skipUserInsert,
-    })
+    const followUp = await followUpActiveTurn(conversationId, text, attachments, options)
     if (!followUp.ok) {
       return { ok: false, assistantMessageId: '', error: followUp.error }
     }
@@ -2579,7 +2952,10 @@ async function startChatTurn(
   const prepared = options?.prepared ?? (await prepareUserMessageWithImages(text, attachments))
   if (!options?.skipUserInsert) {
     db.insertMessage(conversationId, 'user', prepared.text, 'complete')
-    maybeAutoTitleFromFirstUserMessage(conversationId, text)
+    maybeAutoTitleFromFirstUserMessage(conversationId, options?.titleText ?? text)
+  }
+  if (options?.noticeAfterUser) {
+    db.insertMessage(conversationId, 'system', options.noticeAfterUser, 'complete')
   }
   const assistant = db.insertMessage(conversationId, 'assistant', '', 'streaming')
   const turnId = randomUUID()
@@ -2630,9 +3006,57 @@ async function startChatTurn(
     emitChatRefresh(conversationId, 'turnFinished')
     return { ok: false, assistantMessageId: assistant.id, error: 'broker_not_ready' }
   }
+  let promptText = prepared.promptText
+  if (subagentExtensionEnabled() && !brokerChatOnlyPref()) {
+    // "continue" / "finish it" after a crash, an End, or a restart puts the previous
+    // run's goals back on the bar instead of starting from an empty one.
+    const planScope = isolatePlanForConversation(conversationId, {
+      resume: isPlanRestoreRequest(prepared.text),
+    })
+    promptText = `${composePlanScopeNote(conversationId, planScope)}\n\n${promptText}`
+    if (!options?.forced) {
+      const prior = lastAssistantForResume(conversationId, assistant.id)
+      if (
+        shouldInjectOrchestratorResume({
+          userText: prepared.text,
+          lastAssistantStatus: prior?.status,
+          lastAssistantContent: prior?.content,
+          conversationUsedSubagents: conversationUsedSubagents(conversationId),
+          alreadyForcedMention: false,
+        })
+      ) {
+        promptText = composeOrchestratorResumePrompt(promptText, planScope)
+      }
+    }
+  }
+  if (options?.forced) {
+    // Announce the turn before a chain that can run for minutes, so the Stop
+    // button and elapsed timer are live while it works.
+    emitChatRefresh(conversationId, 'turnStarted')
+    const hooked = await runForcedSubagentChainForTurn(
+      conversationId,
+      turnId,
+      options.forced,
+      promptText,
+    )
+    if (!pendingTurns.has(turnId)) {
+      // Stopped mid-chain; abort already finalized the row and released the slot.
+      return { ok: false, assistantMessageId: assistant.id, error: 'forced_cancelled' }
+    }
+    if (!hooked.ok) {
+      flushPendingTurnBuffers(pendingTurns.get(turnId)!)
+      dropPendingTurn(turnId)
+      turnBrokerPool.releaseTurn(turnId, assignedBroker)
+      db.updateMessageContent(assistant.id, hooked.message, hooked.status)
+      emitChatRefresh(conversationId, 'turnFinished')
+      void flushDeferredTurns()
+      return { ok: false, assistantMessageId: assistant.id, error: `forced_${hooked.status}` }
+    }
+    promptText = hooked.promptText
+  }
   const images = prepared.images
   emitChatRefresh(conversationId, 'turnStarted')
-  assignedBroker.sendPrompt(turnId, prepared.promptText, images.length > 0 ? images : undefined)
+  assignedBroker.sendPrompt(turnId, promptText, images.length > 0 ? images : undefined)
   return { ok: true, assistantMessageId: assistant.id }
 }
 
@@ -2646,14 +3070,9 @@ async function deliverQueuedMessage(
     return { ok: false, error: 'broker_not_ready' }
   }
 
-  const active = findPendingTurnForConversation(conversationId)
-  if (active) {
-    const followUp = await followUpActiveTurn(conversationId, text, attachments)
-    return followUp.ok ? { ok: true } : { ok: false, error: followUp.error }
-  }
-
-  finalizeOrphanStreamingAssistants(conversationId)
-  const started = await startChatTurn(conversationId, text, attachments)
+  // Routed through the mention path so identical text behaves the same whether
+  // the operator hit Enter on an idle agent or queued it behind a running turn.
+  const started = await startChatTurnHonoringMentions(conversationId, text, attachments)
   if (!started.ok) return { ok: false, error: started.error }
   return { ok: true }
 }
@@ -2788,7 +3207,10 @@ function inferOllamaBaseOriginFromModelsJson(agentDir: string): string | null {
   }
 }
 
-async function fetchOllamaTagNames(baseOrigin: string): Promise<{ ok: true; models: string[] } | { ok: false; error: string }> {
+async function fetchOllamaTagNames(
+  baseOrigin: string,
+  timeoutMs = 10_000,
+): Promise<{ ok: true; models: string[] } | { ok: false; error: string }> {
   let tagsUrl: URL
   try {
     tagsUrl = new URL('/api/tags', `${normalizeOllamaOrigin(baseOrigin)}/`)
@@ -2799,7 +3221,7 @@ async function fetchOllamaTagNames(baseOrigin: string): Promise<{ ok: true; mode
     return { ok: false, error: 'Only http(s) URLs are allowed' }
   }
   const ac = new AbortController()
-  const t = setTimeout(() => ac.abort(), 10_000)
+  const t = setTimeout(() => ac.abort(), timeoutMs)
   try {
     const res = await fetch(tagsUrl, { signal: ac.signal })
     if (!res.ok) {
@@ -2955,18 +3377,46 @@ async function syncOllamaContextWindow(baseOrigin: string, modelId: string): Pro
 }
 
 /**
- * Give an Ollama model an output cap if it has none.
+ * Give an Ollama model a per-reply output ceiling.
  *
  * Ollama's default `num_predict` is unlimited, so a model that never emits a stop token
  * generates until the context window fills. Only an explicit `max_tokens` stops it, and Pi
- * sends one only for models it composed from `models.json`. An existing value is left alone
- * — this establishes a ceiling, it does not retune a deliberate one.
+ * sends one only for models it composed from `models.json`.
+ *
+ * Local tokens are free, so this is a runaway guard, not a budget: it is set to three
+ * quarters of the context window. A small inherited value (Pi's catalog ships 8,192 for
+ * some models) truncates a reasoning model mid-reply, so a too-low cap is raised as well.
+ * Only ever raises — a deliberately higher value is left alone, and no write happens when
+ * the stored value is already generous.
  */
 function ensureOllamaMaxTokens(modelId: string): void {
   const id = modelId.trim()
   if (!id) return
-  if (readModelMaxTokens(hostAgentDir(), 'ollama', id) != null) return
-  writeModelMaxTokens(hostAgentDir(), 'ollama', id, DEFAULT_MODEL_MAX_TOKENS)
+  const dir = hostAgentDir()
+  const target = resolveLocalModelMaxTokens(readModelContextWindow(dir, 'ollama', id))
+  const current = readModelMaxTokens(dir, 'ollama', id)
+  if (current != null && current >= target) return
+  writeModelMaxTokens(dir, 'ollama', id, target)
+}
+
+/** Ids already reconciled this run — keeps the check off the per-turn write path. */
+const ollamaMaxTokensChecked = new Set<string>()
+
+/**
+ * Raise the cap for the model a turn is about to use. Saving Settings is not enough: a
+ * chat can select an Ollama model that was never re-saved, and the operator should not
+ * have to know that re-saving Settings is what unlocks a full-length reply.
+ */
+function ensureOllamaMaxTokensOnce(provider: string, modelId: string): void {
+  if (provider.trim() !== 'ollama') return
+  const id = modelId.trim()
+  if (!id || ollamaMaxTokensChecked.has(id)) return
+  ollamaMaxTokensChecked.add(id)
+  try {
+    ensureOllamaMaxTokens(id)
+  } catch {
+    /* a models.json write failure must not block the turn */
+  }
 }
 
 /** Read a provider's saved API key status from `~/.pi/agent/auth.json` (mask only — never return the raw key). */
@@ -2989,6 +3439,50 @@ function readProviderAuthInfo(
   const trimmed = key.trim()
   const tail = trimmed.length > 12 ? '…' + trimmed.slice(-8) : '…' + trimmed.slice(-4)
   return { ok: true, hasKey: true, keyPreview: tail }
+}
+
+function readAuthJsonRoot(agentDir: string): Record<string, unknown> {
+  const authPath = join(agentDir, 'auth.json')
+  if (!existsSync(authPath)) return {}
+  try {
+    const root = JSON.parse(readFileSync(authPath, 'utf8')) as unknown
+    if (!root || typeof root !== 'object' || Array.isArray(root)) return {}
+    return root as Record<string, unknown>
+  } catch {
+    return {}
+  }
+}
+
+function envHasProviderKey(provider: string): boolean {
+  const envName = API_PROVIDER_ENV_VARS[provider as keyof typeof API_PROVIDER_ENV_VARS]
+  if (!envName) return false
+  const v = process.env[envName]
+  return typeof v === 'string' && v.trim() !== ''
+}
+
+/** Providers the chat / companion / subagent pickers may offer right now. */
+function resolveConfiguredModelProviders(ollamaReachable: boolean): string[] {
+  const agentDir = hostAgentDir()
+  const storedProvider = (db.getPref('sylo.model_provider', '') as string).trim()
+  const auth = readAuthJsonRoot(agentDir)
+  const chatgpt = chatgptAuthStatus(agentDir)
+  const hasCredential: Record<string, boolean> = {}
+  for (const p of SYLO_MODEL_PROVIDERS) {
+    if (p === 'ollama' || p === 'openai-codex') continue
+    hasCredential[p] = providerHasStoredCredential(auth[p]) || envHasProviderKey(p)
+  }
+  return listConfiguredModelProviders({
+    ollamaReachable,
+    chatgptConnected: chatgpt.connected,
+    hasCredential,
+    alwaysInclude: [storedProvider],
+  })
+}
+
+async function listConfiguredModelProvidersForHost(timeoutMs = 1200): Promise<string[]> {
+  const origin = resolveOllamaBaseOriginForPrefs()
+  const tags = await fetchOllamaTagNames(origin, timeoutMs)
+  return resolveConfiguredModelProviders(tags.ok)
 }
 
 /**
@@ -3221,7 +3715,13 @@ function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext
     return
   }
   if (msg.type === 'sylo_subagent') {
-    const convId = msg.turnId ? pendingTurns.get(msg.turnId)?.convId : undefined
+    // Operator-forced runs happen before the Pi turn exists, so their turn id is
+    // not in `pendingTurns` yet — fall back to the forced-run map or the run
+    // loses its conversation (no Tasks row, no per-run cancel).
+    const convId =
+      msg.turnId ?
+        (pendingTurns.get(msg.turnId)?.convId ?? forcedSubagentTurnConvIds.get(msg.turnId))
+      : undefined
     if (convId) {
       handleSubagentHostEvent(convId, msg.event as SyloSubagentHostEvent)
     }
@@ -3503,6 +4003,19 @@ function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext
     }
     return
   }
+  if (msg.type === 'turn_cutoff') {
+    const pending = pendingTurns.get(msg.turnId)
+    if (pending && !pending.aborted) {
+      appendExtensionCommandOutput(
+        pending,
+        formatExtensionCommandLine(
+          describeTurnCutoff(msg.output, msg.total, msg.provider, msg.modelId),
+          'warning',
+        ),
+      )
+    }
+    return
+  }
   if (msg.type === 'error') {
     mainWindow?.webContents.send('broker:error', msg)
     emitCompanionBrokerError({ ...msg })
@@ -3672,6 +4185,8 @@ function buildBrokerSupervisorOptions(
       existsSync(SYLO_IMAGE_FALLBACK_EXTENSION) ? SYLO_IMAGE_FALLBACK_EXTENSION : undefined,
     canvasSketchExtension:
       existsSync(SYLO_CANVAS_SKETCH_EXTENSION) ? SYLO_CANVAS_SKETCH_EXTENSION : undefined,
+    compactionAnchorExtension:
+      existsSync(SYLO_COMPACTION_ANCHOR_EXTENSION) ? SYLO_COMPACTION_ANCHOR_EXTENSION : undefined,
     canvasSketchPath: canvasSketchImagePath(),
     skillSurfaceExtension: existsSync(SYLO_SKILL_SURFACE_EXTENSION) ? SYLO_SKILL_SURFACE_EXTENSION : undefined,
     subagentsExtension: existsSync(SYLO_SUBAGENTS_EXTENSION) ? SYLO_SUBAGENTS_EXTENSION : undefined,
@@ -3914,7 +4429,9 @@ async function fireScheduledPromptFromHost(
     if (started.ok) markNotify()
     return { conversationId: conv.id, status: 'broker_unavailable' }
   }
-  const started = await startChatTurn(conv.id, schedule.prompt_text)
+  // An `@agent` the operator wrote into a schedule means the same thing it does
+  // in the composer.
+  const started = await startChatTurnHonoringMentions(conv.id, schedule.prompt_text, undefined)
   if (started.ok) markNotify()
   return {
     conversationId: conv.id,
@@ -4031,7 +4548,7 @@ function registerIpc(): void {
           imageModelProvider: (db.getPref('sylo.image_model_provider', 'ollama') as string).trim(),
         },
         ollamaOrigin: origin,
-        providers: [...SYLO_MODEL_PROVIDERS],
+        providers: resolveConfiguredModelProviders(tags.ok),
         ollamaModels,
         chatgptModels: CHATGPT_CODEX_MODELS.map((m) => ({ id: m.id, name: m.name, visionCapable: m.vision })),
       }
@@ -4066,7 +4583,11 @@ function registerIpc(): void {
       if (!id) return { assistantMessageId: '', error: 'missing_conversation_id' }
       if (!body && norm.length === 0) return { assistantMessageId: '', error: 'empty_message' }
       return chainConversationChatOp(id, async () => {
-        const started = await startChatTurn(id, body, norm.length > 0 ? norm : undefined)
+        const started = await startChatTurnHonoringMentions(
+          id,
+          body,
+          norm.length > 0 ? norm : undefined,
+        )
         if (!started.ok) {
           return { assistantMessageId: started.assistantMessageId, error: started.error }
         }
@@ -4103,7 +4624,9 @@ function registerIpc(): void {
         const active = findPendingTurnForConversation(id)
         if (!active) {
           finalizeOrphanStreamingAssistants(id)
-          const started = await startChatTurn(id, body, normAttachments)
+          // With nothing to interrupt this is an ordinary send, so it honors
+          // mentions like one; only a real steer skips them.
+          const started = await startChatTurnHonoringMentions(id, body, normAttachments)
           return started.ok ? { ok: true } : { ok: false, error: started.error }
         }
         const followUp = await followUpActiveTurn(id, body, normAttachments, { steer: true })
@@ -4146,9 +4669,12 @@ function registerIpc(): void {
     (_e, workspaceId?: string) =>
       workspaceId === undefined ? db.listConversations() : db.listConversations(workspaceId),
   )
-  ipcMain.handle('conversations:create', (_e, title?: string, workspaceId?: string) =>
-    db.createConversation(title ?? '', workspaceId),
-  )
+  ipcMain.handle('conversations:create', (_e, title?: string, workspaceId?: string) => {
+    const created = db.createConversation(title ?? '', workspaceId)
+    const wid = created.workspace_id ?? (typeof workspaceId === 'string' ? workspaceId : '')
+    if (wid) clearPlanForNewChat(wid)
+    return created
+  })
   ipcMain.handle('conversations:findLatestEmpty', (_e, workspaceId: unknown) => {
     const wid = typeof workspaceId === 'string' ? workspaceId : ''
     const id = db.findLatestEmptyConversationId(wid)
@@ -5235,6 +5761,20 @@ function registerIpc(): void {
     writeSkillDataJson(app.getPath('userData'), skillKey, key, value, SKILL_DATA_QUOTA_BYTES),
   )
 
+  setPlanTodosListener(() => {
+    mainWindow?.webContents.send('plan:changed')
+  })
+  ipcMain.handle('plan:todos', (_e, conversationId: unknown) => {
+    const id = typeof conversationId === 'string' ? conversationId.trim() : ''
+    if (!id) return { conversationId: '', todos: [], status: 'active' as const }
+    return readPlanTodos(id)
+  })
+  ipcMain.handle('plan:clearForNewChat', (_e, workspaceId: unknown) => {
+    const wid = typeof workspaceId === 'string' ? workspaceId.trim() : ''
+    if (wid) clearPlanForNewChat(wid)
+    return { ok: true as const }
+  })
+
   ipcMain.handle('tasks:list', (_e, conversationId: unknown) => {
     const id = typeof conversationId === 'string' ? conversationId.trim() : ''
     if (!id) return []
@@ -5294,27 +5834,79 @@ function registerIpc(): void {
     ok: true as const,
     deleted: subagentTaskStore.deleteOrphanedAgentTasks(),
   }))
-  ipcMain.handle('tasks:diagnostics', () => {
-    const subagentsKey = normalizeSyloCapabilityPath(SYLO_SUBAGENTS_EXTENSION)
-    const disabled = readSyloDisabledCapabilities()
-    const extensionEnabled =
-      Boolean(subagentsKey) &&
-      existsSync(SYLO_SUBAGENTS_EXTENSION) &&
-      !disabled.extensionPaths.includes(subagentsKey)
-    return {
-      runningCount: subagentTaskStore.countRunningAgentTasks(),
-      orphanedCount: subagentTaskStore.countOrphanedAgentTasks(),
-      extensionEnabled,
+  ipcMain.handle('tasks:diagnostics', () => ({
+    runningCount: subagentTaskStore.countRunningAgentTasks(),
+    orphanedCount: subagentTaskStore.countOrphanedAgentTasks(),
+    extensionEnabled: subagentExtensionEnabled(),
+  }))
+  ipcMain.handle('tasks:agents', () => listSubagentAgentsForActiveScope())
+  ipcMain.handle('subagents:createAgent', (_e, input: unknown) => {
+    const raw = (input ?? {}) as {
+      name?: unknown
+      description?: unknown
+      prompt?: unknown
+      tools?: unknown
+      timeoutSeconds?: unknown
     }
-  })
-  ipcMain.handle('tasks:agents', () => {
-    const scope = String(db.getPref('sylo.subagents.agent_scope', 'user') || 'user').trim()
-    return listSubagentAgents({
-      bundledDir: join(SYLO_REPO_ROOT, 'packages/sylo-subagents/agents'),
+    const result = writeCustomSubagent({
       userAgentsDir: join(hostAgentDir(), 'agents'),
-      projectCwd: effectivePiCwdForWorkspace(activeWorkspaceId()),
-      scope: scope === 'both' || scope === 'project' ? scope : 'user',
+      existingNames: listSubagentAgentsForActiveScope().map((a) => a.name),
+      input: {
+        name: typeof raw.name === 'string' ? raw.name : '',
+        description: typeof raw.description === 'string' ? raw.description : '',
+        prompt: typeof raw.prompt === 'string' ? raw.prompt : '',
+        // Absent stays absent: the writer treats an omitted list as "unrestricted"
+        // and an explicitly empty one as an error, which an [] here would trigger.
+        ...(Array.isArray(raw.tools)
+          ? { tools: raw.tools.filter((t): t is string => typeof t === 'string') }
+          : {}),
+        ...(typeof raw.timeoutSeconds === 'number' ? { timeoutSeconds: raw.timeoutSeconds } : {}),
+      },
     })
+    return result
+  })
+  ipcMain.handle('subagents:readAgent', (_e, name: unknown) => {
+    const agentName = typeof name === 'string' ? name.trim() : ''
+    if (!agentName) return { ok: false as const, error: 'missing_name' }
+    return readCustomSubagent({ userAgentsDir: join(hostAgentDir(), 'agents'), name: agentName })
+  })
+  ipcMain.handle('subagents:updateAgent', (_e, input: unknown) => {
+    const raw = (input ?? {}) as {
+      name?: unknown
+      description?: unknown
+      prompt?: unknown
+      tools?: unknown
+      timeoutSeconds?: unknown
+    }
+    return updateCustomSubagent({
+      userAgentsDir: join(hostAgentDir(), 'agents'),
+      input: {
+        name: typeof raw.name === 'string' ? raw.name : '',
+        description: typeof raw.description === 'string' ? raw.description : '',
+        prompt: typeof raw.prompt === 'string' ? raw.prompt : '',
+        ...(Array.isArray(raw.tools)
+          ? { tools: raw.tools.filter((t): t is string => typeof t === 'string') }
+          : {}),
+        ...(typeof raw.timeoutSeconds === 'number' ? { timeoutSeconds: raw.timeoutSeconds } : {}),
+      },
+    })
+  })
+  ipcMain.handle('subagents:deleteAgent', (_e, name: unknown) => {
+    const agentName = typeof name === 'string' ? name.trim() : ''
+    if (!agentName) return { ok: false as const, error: 'missing_name' }
+    const result = deleteCustomSubagent({
+      userAgentsDir: join(hostAgentDir(), 'agents'),
+      name: agentName,
+    })
+    if (!result.ok) return result
+    // A pin for a persona that no longer exists would keep shipping a dead
+    // entry in SYLO_SUBAGENTS_MODEL_BY_AGENT on every broker fork.
+    const pins = parseSubagentPins(db.getPref('sylo.subagents.model_by_agent', ''))
+    if (pins[agentName]) {
+      delete pins[agentName]
+      db.setPref('sylo.subagents.model_by_agent', serializeSubagentPins(pins))
+    }
+    return result
   })
 
   ipcMain.handle('schedules:list', (_e, workspaceId: unknown) => {
@@ -5558,6 +6150,65 @@ function registerIpc(): void {
   // Capability-manager card surface. Host owns no names; anything installed via
   // `pi install` shows here as always-on.
   ipcMain.handle('user-packages:list', () => readUserPackages(hostAgentDir()))
+
+  ipcMain.handle('custom-tools:list', () => listCustomToolPackages(SYLO_REPO_ROOT))
+
+  ipcMain.handle('custom-tools:export', async (_e, idsArg?: unknown) => {
+    if (!mainWindow) return { ok: false as const, error: 'no_window' }
+    const ids = Array.isArray(idsArg)
+      ? idsArg.filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim())
+      : []
+    const listed = listCustomToolPackages(SYLO_REPO_ROOT)
+    const selected = ids.length > 0 ? listed.filter((p) => ids.includes(p.id)) : listed
+    if (selected.length === 0) return { ok: false as const, error: 'No custom tools to export' }
+    const r = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export custom tools',
+      defaultPath: suggestedExportFileName(selected.map((p) => p.id)),
+      filters: [{ name: 'Sylo custom tools', extensions: ['zip'] }],
+    })
+    if (r.canceled || !r.filePath) return { ok: false as const, cancelled: true as const }
+    const dest = r.filePath.toLowerCase().endsWith('.zip') ? r.filePath : `${r.filePath}.zip`
+    const written = writeCustomToolsZip({
+      repoRoot: SYLO_REPO_ROOT,
+      destZip: dest,
+      ids: selected.map((p) => p.id),
+    })
+    if (!written.ok) return { ok: false as const, error: written.error }
+    return {
+      ok: true as const,
+      path: written.path,
+      packages: written.packages.map((p) => ({ id: p.id, name: p.name })),
+    }
+  })
+
+  ipcMain.handle('custom-tools:import', async () => {
+    if (!mainWindow) return { ok: false as const, error: 'no_window' }
+    const picked = await dialog.showOpenDialog(mainWindow, {
+      title: 'Import custom tools',
+      properties: ['openFile'],
+      filters: [{ name: 'Sylo custom tools', extensions: ['zip'] }],
+    })
+    const zipPath = picked.filePaths[0]
+    if (picked.canceled || !zipPath) return { ok: false as const, cancelled: true as const }
+    const stagingDir = join(app.getPath('temp'), `sylo-custom-tools-${Date.now()}`)
+    const rendererSurface = join(__dirname, '../renderer/skill-surface')
+    return importCustomToolsFromZip({
+      repoRoot: SYLO_REPO_ROOT,
+      agentDir: hostAgentDir(),
+      zipPath,
+      stagingDir,
+      installDeps: true,
+      surfaceDests: [
+        join(SYLO_REPO_ROOT, 'apps/host/test-fixtures/skill-surface'),
+        ...(existsSync(dirname(rendererSurface)) ? [rendererSurface] : []),
+      ],
+    })
+  })
+
+  ipcMain.handle('app:relaunch', () => {
+    app.relaunch()
+    app.exit(0)
+  })
 
   // ── sylo-tasks sidebar dashboard (Phase 3) ────────────────────────────
   // The dashboard iframe talks to the host via the skill-route bridge; the
@@ -6333,6 +6984,8 @@ function registerIpc(): void {
     return writeModelInputTypes(agentDir, provider, modelId.trim(), visionCapable)
   })
 
+  ipcMain.handle('models:configuredProviders', () => listConfiguredModelProvidersForHost())
+
   ipcMain.handle('ollama:inferBaseUrl', () => {
     const pref = (db.getPref('sylo.ollama_base_url', '') as string).trim()
     if (pref) return normalizeOllamaOrigin(pref)
@@ -6891,7 +7544,11 @@ function registerIpc(): void {
         if (db.getConversation(id)?.archived_at != null) {
           db.setConversationArchived(id, false)
         }
-        const started = await startChatTurn(id, body, normalizeAttachments(attachments))
+        const started = await startChatTurnHonoringMentions(
+          id,
+          body,
+          normalizeAttachments(attachments),
+        )
         if (!started.ok) {
           return { assistantMessageId: started.assistantMessageId, error: 'broker_not_ready' as const }
         }
@@ -6934,6 +7591,18 @@ function registerIpc(): void {
       })
     },
   )
+
+  /**
+   * Conversations with a turn the host is still working on. The renderer holds its
+   * in-flight set in memory, so a reload (or a second window) has to ask — otherwise
+   * the composer offers "Send" on a live turn and the Stop button disappears.
+   */
+  ipcMain.handle('chat:activeTurns', (): string[] => {
+    const ids = new Set<string>()
+    for (const pending of pendingTurns.values()) ids.add(pending.convId)
+    for (const deferred of deferredChatTurns) ids.add(deferred.conversationId)
+    return [...ids]
+  })
 
   ipcMain.handle(
     'chat:abort',
@@ -6980,7 +7649,9 @@ function registerIpc(): void {
         const active = findPendingTurnForConversation(id)
         if (!active) {
           finalizeOrphanStreamingAssistants(id)
-          const started = await startChatTurn(id, body, normAttachments)
+          // With nothing to interrupt this is an ordinary send, so it honors
+          // mentions like one; only a real steer skips them.
+          const started = await startChatTurnHonoringMentions(id, body, normAttachments)
           return started.ok ? { ok: true as const } : { ok: false as const, error: started.error }
         }
         const followUp = await followUpActiveTurn(id, body, normAttachments, { steer: true })
@@ -7170,6 +7841,9 @@ async function detectUnpushedGithubWorkspaces(): Promise<string[]> {
  * deep fallback and notifies the operator to RDP.
  */
 function markLastGoodCommit(): void {
+  // Installed builds are not git checkouts and have no supervisor to revert
+  // them, so there is nothing to mark.
+  if (app.isPackaged) return
   try {
     execFile('git', ['-C', SYLO_REPO_ROOT, 'rev-parse', 'HEAD'], (err, stdout) => {
       if (err) return
@@ -7356,6 +8030,19 @@ app.whenReady().then(() => {
     get: (key, fallback) => db.getPref(key, fallback),
     set: (key, value) => db.setPref(key, value),
   })
+  // Installed builds have no `npm run prepare:dev` to install the bundled
+  // skills into the Pi agent dir, so do it here — once per app version, before
+  // the broker starts and enumerates skills.
+  syncBundledSkills(SYLO_REPO_ROOT, hostAgentDir(), {
+    getPref: (key, fallback) => db.getPref(key, fallback),
+    setPref: (key, value) => db.setPref(key, value),
+  })
+  const customSurfaceDests = [
+    join(SYLO_REPO_ROOT, 'apps/host/test-fixtures/skill-surface'),
+    join(__dirname, '../renderer/skill-surface'),
+  ]
+  ensureLocalPackageSkillsInstalled(hostAgentDir())
+  ensureLocalPackageSkillSurfaces(hostAgentDir(), customSurfaceDests)
   ensureDefaultCloneDir()
   // Missing user-data workspace? When the folder the primary (universal)
   // workspace row points at does not exist on disk — deleted externally, a new

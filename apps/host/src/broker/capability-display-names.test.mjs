@@ -43,5 +43,9 @@ describe('deriveExtensionDisplayName', () => {
       deriveExtensionDisplayName('C:/repo/packages/sylo-ask-question/extensions/index.ts'),
       'sylo-ask-question',
     )
+    assert.equal(
+      deriveExtensionDisplayName('C:/repo/apps/host/src/broker/sylo-compaction-anchor.ts'),
+      'sylo-compaction-anchor',
+    )
   })
 })

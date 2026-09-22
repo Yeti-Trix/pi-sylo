@@ -12,10 +12,11 @@
     "start": "npm run start -w apps/host",
     "build": "npm run build -w apps/host",
     "bootstrap-pi": "node ./scripts/bootstrap-pi.mjs",
+    "stage:installer": "node ./scripts/stage-package.mjs",
+    "dist:win": "node ./scripts/make-installer.mjs",
     "sync-skill-surfaces": "node ./scripts/sync-smoke-skills.mjs",
     "boostrap-pi": "npm run bootstrap-pi",
     "rebuild:native": "npm run rebuild:native -w apps/host",
-    "trackers:audit": "node ./scripts/tracker-audit.mjs",
     "changelog:release": "node ./scripts/changelog-release.mjs",
     "changelog:release:dry-run": "node ./scripts/changelog-release.mjs --dry-run",
     "publish:verify": "node ./scripts/publish-verify.mjs",
@@ -44,6 +45,7 @@
   },
   "devDependencies": {
     "electron": "^41.10.5",
+    "electron-builder": "^26.15.3",
     "patch-package": "^8.0.1"
   }
 }

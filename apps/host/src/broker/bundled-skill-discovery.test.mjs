@@ -111,4 +111,22 @@ describe('discoverBundledSkillPathsFromPiPackages', () => {
       rmSync(base, { recursive: true, force: true })
     }
   })
+
+  test('reads local-path package skills from settings.json', () => {
+    const base = mkdtempSync(join(tmpdir(), 'sylo-pi-local-'))
+    const agentDir = join(base, 'agent')
+    const pkg = join(base, 'Custom', 'sylo-tools-demo')
+    try {
+      mkdirSync(join(pkg, 'skills', 'demo'), { recursive: true })
+      writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: 'sylo-tools-demo' }))
+      writeFileSync(join(pkg, 'skills', 'demo', 'SKILL.md'), '---\nname: demo\n---\n')
+      mkdirSync(agentDir, { recursive: true })
+      writeFileSync(join(agentDir, 'settings.json'), JSON.stringify({ packages: [pkg] }))
+      const found = discoverBundledSkillPathsFromPiPackages(agentDir, join(base, 'project'))
+      assert.equal(found.length, 1)
+      assert.ok(found[0].includes('demo'))
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
 })

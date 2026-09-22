@@ -11,7 +11,7 @@ Coding-quality package for Pi/Sylo. Closes the loop gap between Sylo (Pi + a cod
 | `semantic_search` + indexer | Phase 2 — planned | Local Ollama embeddings, SQLite store, gitignore-aware incremental index, `semantic_search(query)` tool. |
 | Subagent chain | Phase 3 — planned | Chain wrapper documented in the skill today; extension wiring in Phase 3. |
 
-See `features_tracker/active/2026-07-21_14-30-00_sylo_coder_package.md` for the full plan.
+Full plan: pi-sylo-dev git history, `features_tracker/active/2026-07-21_14-30-00_sylo_coder_package.md` (folder trackers retired 2026-09-11).
 
 ## Validate
 

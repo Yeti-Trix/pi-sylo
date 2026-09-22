@@ -328,6 +328,8 @@ contextBridge.exposeInMainWorld('sylo', {
       ipcRenderer.invoke('chat:abort', conversationId) as Promise<
         { ok: true } | { ok: false; error: string }
       >,
+    /** Conversation ids the host still has a turn running for (survives a reload). */
+    activeTurns: () => ipcRenderer.invoke('chat:activeTurns') as Promise<string[]>,
     steer: (
       conversationId: string,
       text: string,
@@ -704,6 +706,9 @@ contextBridge.exposeInMainWorld('sylo', {
       ipcRenderer.invoke('models:setVision', provider, modelId, visionCapable) as Promise<
         { ok: true } | { ok: false; error: string }
       >,
+    /** Providers with a working login — chat / subagent pickers hide the rest. */
+    configuredProviders: () =>
+      ipcRenderer.invoke('models:configuredProviders') as Promise<string[]>,
   },
   /** Provider API keys — stored in Pi's `~/.pi/agent/auth.json` (masked reads). */
   piAuth: {
@@ -1127,14 +1132,22 @@ contextBridge.exposeInMainWorld('sylo', {
     setSections: (sections: Array<{
       id: string
       label: string
-      items: Array<{ kind: 'route' | 'tab' | 'action'; title: string; key?: string; tab?: string; action?: string; sep?: boolean }>
+      items: Array<{
+        kind: 'route' | 'tab' | 'action'
+        title: string
+        key?: string
+        tab?: string
+        action?: string
+        sep?: boolean
+        pinned?: boolean
+      }>
     }>) => ipcRenderer.invoke('menu:set-sections', sections) as Promise<{ ok: true; sections: number }>,
     /** Main → renderer: the operator clicked an item in one of the synced
      *  skill-route menus. The renderer resolves it to a route tab / builtin
      *  tab / broker action. */
     onAction: (
       cb: (item: {
-        kind: 'route' | 'tab' | 'action'
+        kind: 'route' | 'tab' | 'action' | 'pin'
         title: string
         key?: string
         tab?: string
@@ -1200,6 +1213,29 @@ contextBridge.exposeInMainWorld('sylo', {
   userPackages: {
     list: () => ipcRenderer.invoke('user-packages:list') as Promise<unknown>,
   },
+  customTools: {
+    list: () =>
+      ipcRenderer.invoke('custom-tools:list') as Promise<
+        { id: string; name: string; version: string | null; description: string | null; dir: string }[]
+      >,
+    exportPack: (ids?: string[]) =>
+      ipcRenderer.invoke('custom-tools:export', ids) as Promise<
+        | { ok: true; path: string; packages: { id: string; name: string }[] }
+        | { ok: false; cancelled?: true; error?: string }
+      >,
+    importPack: () =>
+      ipcRenderer.invoke('custom-tools:import') as Promise<
+        | {
+            ok: true
+            imported: { id: string; name: string; dir: string }[]
+            registered: string[]
+            npm: { id: string; ok: boolean; detail: string }[]
+            skillsCopied: string[]
+          }
+        | { ok: false; cancelled?: true; error?: string }
+      >,
+  },
+  relaunch: () => ipcRenderer.invoke('app:relaunch') as Promise<void>,
   tasksDb: {
     snapshotGet: (workspaceCwd: string) =>
       ipcRenderer.invoke('tasks:db-snapshot-get', workspaceCwd),
@@ -1365,6 +1401,27 @@ contextBridge.exposeInMainWorld('sylo', {
         | { ok: false; error: string; detail?: string }
       >,
   },
+  plan: {
+    todos: (conversationId: string) =>
+      ipcRenderer.invoke('plan:todos', conversationId) as Promise<{
+        conversationId: string
+        goal?: string
+        todos: {
+          id: string
+          text: string
+          done: boolean
+          state: 'open' | 'built' | 'passed'
+        }[]
+        status: 'active' | 'reviewed'
+      }>,
+    onChanged: (cb: () => void) => {
+      const ch = () => cb()
+      ipcRenderer.on('plan:changed', ch)
+      return () => ipcRenderer.removeListener('plan:changed', ch)
+    },
+    clearForNewChat: (workspaceId: string) =>
+      ipcRenderer.invoke('plan:clearForNewChat', workspaceId) as Promise<{ ok: true }>,
+  },
   tasks: {
     list: (conversationId: string) => ipcRenderer.invoke('tasks:list', conversationId),
     get: (taskId: string) => ipcRenderer.invoke('tasks:get', taskId),
@@ -1384,7 +1441,55 @@ contextBridge.exposeInMainWorld('sylo', {
       }>,
     agents: () =>
       ipcRenderer.invoke('tasks:agents') as Promise<
-        Array<{ name: string; description: string; source: 'builtin' | 'user' | 'project' }>
+        Array<{
+          name: string
+          description: string
+          source: 'builtin' | 'user' | 'project'
+          tools?: string[]
+          timeoutSeconds?: number
+        }>
+      >,
+    /** Write a user-scope persona under `<pi agent dir>/agents`. */
+    createAgent: (input: {
+      name: string
+      description: string
+      prompt: string
+      tools?: string[]
+      timeoutSeconds?: number
+    }) =>
+      ipcRenderer.invoke('subagents:createAgent', input) as Promise<
+        { ok: true; name: string; filePath: string } | { ok: false; error: string }
+      >,
+    /** Read a user-scope persona back for editing. */
+    readAgent: (name: string) =>
+      ipcRenderer.invoke('subagents:readAgent', name) as Promise<
+        | {
+            ok: true
+            agent: {
+              name: string
+              description: string
+              prompt: string
+              tools?: string[]
+              timeoutSeconds?: number
+              filePath: string
+            }
+          }
+        | { ok: false; error: string }
+      >,
+    /** Overwrite an existing user-scope persona. The name is not editable. */
+    updateAgent: (input: {
+      name: string
+      description: string
+      prompt: string
+      tools?: string[]
+      timeoutSeconds?: number
+    }) =>
+      ipcRenderer.invoke('subagents:updateAgent', input) as Promise<
+        { ok: true; name: string; filePath: string } | { ok: false; error: string }
+      >,
+    deleteAgent: (name: string) =>
+      ipcRenderer.invoke('subagents:deleteAgent', name) as Promise<
+        { ok: true; filePath: string } | { ok: false; error: string }
       >,
     onLifecycle: (cb: (payload: unknown) => void) => {
       const ch = (_e: unknown, payload: unknown) => cb(payload)

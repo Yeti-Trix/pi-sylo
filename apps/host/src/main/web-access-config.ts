@@ -24,8 +24,8 @@ export const DEFAULT_WEB_ACCESS_CONFIG: Record<string, unknown> = {
   heavy_tiers_enabled: true,
   // Default OFF (2026-06-09): tool-result images get relocated into a synthetic role:"user"
   // turn by the OpenAI/Ollama wire transform, confusing small local models into thinking the
-  // user shared an image / that the turn was already answered. See
-  // issue_tracker/resolved/2026-06-09_web_search_tool_result_image_role_confusion.md.
+  // user shared an image / that the turn was already answered. (Rationale doc lives in the
+  // private dev repo's git history — folder trackers retired 2026-09-11.)
   preview_images_enabled: false,
   max_preview_images_per_page: 1,
 }

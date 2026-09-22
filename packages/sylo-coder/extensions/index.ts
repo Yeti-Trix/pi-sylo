@@ -14,8 +14,8 @@
  *
  * Phase 2 (planned, not yet wired): `semantic_search` + codebase indexing
  * (local Ollama embeddings, SQLite store). Phase 3: subagent chain wrapper
- * lives in the skill, not here. See
- * features_tracker/active/2026-07-21_14-30-00_sylo_coder_package.md.
+ * lives in the skill, not here. Design doc: pi-sylo-dev git history
+ * (folder trackers retired 2026-09-11): features_tracker/active/2026-07-21_14-30-00_sylo_coder_package.md.
  */
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'

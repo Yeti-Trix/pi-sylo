@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { cn } from '../../lib/cn'
 import { detailsOpenFromToggleEvent } from '../../panels/capability/helpers'
@@ -19,19 +19,21 @@ import {
 } from '../../panels/ui-classes'
 
 import type { SubagentTaskBatch } from './matchSubagentBatches'
+import { batchWorstStatus, pickFocusTask } from './subagentFocus'
 
 function batchTitle(batch: SubagentTaskBatch, focusId: string | null): string {
-  const focus =
-    batch.tasks.find((t) => t.id === focusId) ??
-    batch.tasks.find((t) => t.status === 'running') ??
-    batch.tasks[0]
+  const focusIx = batch.tasks.findIndex((t) => t.id === focusId)
+  const focus = batch.tasks[focusIx] ?? batch.tasks.find((t) => t.status === 'running') ?? batch.tasks[0]
   const model = focus ? taskModelLabel(focus) : null
   const withModel = (label: string) => (model ? `${label} · ${model}` : label)
   if (batch.mode === 'single') {
     return withModel(focus?.agent_name ?? 'subagent')
   }
   if (batch.mode === 'chain') {
-    return withModel(`chain · ${batch.tasks.length} steps`)
+    // Not "N steps": a chain registers each step as it starts, so the count is only
+    // the steps so far. Name the step on screen instead, which is the live one.
+    const step = focus?.step_index ?? (focusIx >= 0 ? focusIx + 1 : batch.tasks.length)
+    return withModel(`chain · step ${step} · ${focus?.agent_name ?? 'subagent'}`)
   }
   const { done, total, running } = batchProgress(batch.tasks)
   return withModel(`parallel · ${running > 0 ? `${running} live` : `${done}/${total} done`}`)
@@ -66,28 +68,46 @@ export function SubagentRunBlockPending({ segmentId }: { segmentId: string }): R
 export function SubagentRunBlock({
   batch,
   segmentId,
+  live,
   onNotice,
 }: {
   batch: SubagentTaskBatch
   segmentId: string
+  /** The `subagent` tool has not returned yet — more steps may still be coming. */
+  live?: boolean
   onNotice?: (message: string) => void
 }): React.ReactElement {
   const anyRunning = batch.tasks.some((t) => t.status === 'running')
-  const [open, setOpen] = useState(anyRunning)
-  const [selectedId, setSelectedId] = useState<string | null>(() => {
-    const live = batch.tasks.find((t) => t.status === 'running')
-    return live?.id ?? batch.tasks[0]?.id ?? null
-  })
+  // A chain spends the gap between steps with nothing running, because the next step
+  // is not registered until it starts. Treating that as finished collapsed the block
+  // mid-run, so an unreturned tool counts as active.
+  const active = anyRunning || live === true
+  const [open, setOpen] = useState(active)
+  const [selectedId, setSelectedId] = useState<string | null>(() => pickFocusTask(batch.tasks, null))
+  // Set once the operator picks a step themselves: their choice outranks following.
+  const pinned = useRef(false)
 
   useEffect(() => {
-    if (anyRunning) setOpen(true)
-  }, [anyRunning])
+    if (active) setOpen(true)
+  }, [active])
 
+  const taskStates = batch.tasks.map((t) => `${t.id}:${t.status}`).join(',')
   useEffect(() => {
-    if (selectedId && batch.tasks.some((t) => t.id === selectedId)) return
-    const live = batch.tasks.find((t) => t.status === 'running')
-    setSelectedId(live?.id ?? batch.tasks[0]?.id ?? null)
-  }, [batch.tasks, selectedId])
+    if (pinned.current && batch.tasks.some((t) => t.id === selectedId)) return
+    setSelectedId((prev) => pickFocusTask(batch.tasks, prev))
+    // Keyed on the ids and statuses: re-following on every render would fight the
+    // operator's click, and a new tasks array arrives on every telemetry tick.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskStates])
+
+  const selectTask = useCallback(
+    (id: string) => {
+      // Clicking the step Sylo would have followed anyway resumes following.
+      pinned.current = pickFocusTask(batch.tasks, null) !== id
+      setSelectedId(id)
+    },
+    [batch.tasks],
+  )
 
   const selectedTask = batch.tasks.find((t) => t.id === selectedId) ?? null
   const chainTasks = batch.mode === 'chain' && batch.tasks.length > 1 ? batch.tasks : null
@@ -133,7 +153,7 @@ export function SubagentRunBlock({
             : 'border-border bg-bg-tertiary text-text-secondary',
           )}
         >
-          {anyRunning ? 'running' : statusLabel(batch.tasks[0]!.status)}
+          {anyRunning ? 'running' : statusLabel(batchWorstStatus(batch.tasks))}
         </span>
         <span className={chatSegmentChevron} aria-hidden="true" />
       </summary>
@@ -152,7 +172,7 @@ export function SubagentRunBlock({
                 task={task}
                 selected={task.id === selectedId}
                 compact
-                onSelect={() => setSelectedId(task.id)}
+                onSelect={() => selectTask(task.id)}
               />
             ))}
           </div>
@@ -160,15 +180,17 @@ export function SubagentRunBlock({
 
         {chainTasks ?
           <div className="mb-3">
-            <ChainStepper tasks={chainTasks} selectedId={selectedId} onSelect={setSelectedId} />
+            <ChainStepper tasks={chainTasks} selectedId={selectedId} onSelect={selectTask} />
           </div>
         : null}
 
         <TaskDetailDrawer
           embedded
           task={selectedTask}
-          chainTasks={chainTasks}
-          onSelectTask={setSelectedId}
+          // The stepper above is this block's; the drawer renders its own for the
+          // Tasks panel, and inline that stacked two identical steppers.
+          chainTasks={null}
+          onSelectTask={selectTask}
           onRetry={onNotice ?? (() => {})}
           onCancel={onNotice}
         />

@@ -1,6 +1,6 @@
 # sylo-tasks
 
-Per-workspace task lists shared by the agent and the operator. Part of the Sylo live-Canvas + tasks feature (see `features_tracker/active/2026-07-25_12-11-42_live_canvas_sylo_tasks.md`).
+Per-workspace task lists shared by the agent and the operator. Part of the Sylo live-Canvas + tasks feature (design doc: pi-sylo-dev git history — `features_tracker/active/2026-07-25_12-11-42_live_canvas_sylo_tasks.md`; folder trackers retired 2026-09-11).
 
 ## What it does (Phase 1)
 

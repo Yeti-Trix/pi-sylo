@@ -16,6 +16,15 @@ import {
   SUBAGENT_THINKING_LEVELS,
   type SubagentModelPin,
 } from '../../../shared/subagent-model-pin'
+import {
+  PI_BUILTIN_TOOL_IDS,
+  PI_BUILTIN_TOOL_LABELS,
+  PI_TOOL_ACCESS_GROUPS,
+  isPiBuiltinToolId,
+  type PiBuiltinToolId,
+} from '../../../shared/pi-builtin-tools'
+import { useConfiguredProviders } from '../chat/useConfiguredProviders'
+import { invalidateSubagentNames } from '../chat/useSubagentNames'
 import { cn } from '../lib/cn'
 import { normalizeOllamaOriginUi, OllamaModelSelect } from './ollama-ui'
 import { WeeklySweepCard } from './WeeklySweepCard'
@@ -59,7 +68,7 @@ async function revealDirectory(
   }
 }
 
-type SubagentAgentInfo = { name: string; description: string; source: 'builtin' | 'user' | 'project' }
+type SubagentAgentInfo = Awaited<ReturnType<typeof window.sylo.tasks.agents>>[number]
 
 /** Provider + model pair and optional thinking, shared by the all-subagents default and each per-agent override. */
 function SubagentModelFields({
@@ -70,6 +79,7 @@ function SubagentModelFields({
   pin,
   onChange,
   ollamaTags,
+  providers,
 }: {
   idPrefix: string
   label: string
@@ -78,6 +88,7 @@ function SubagentModelFields({
   pin: SubagentModelPin
   onChange: (next: SubagentModelPin) => void
   ollamaTags: string[]
+  providers: readonly string[]
 }): React.ReactElement {
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -89,9 +100,9 @@ function SubagentModelFields({
         aria-label={`${label} provider`}
       >
         <option value="">{inheritLabel}</option>
-        {SYLO_MODEL_PROVIDERS.map((p) => (
+        {providers.map((p) => (
           <option key={p} value={p}>
-            {SYLO_MODEL_PROVIDER_LABELS[p]}
+            {SYLO_MODEL_PROVIDER_LABELS[p as keyof typeof SYLO_MODEL_PROVIDER_LABELS] ?? p}
           </option>
         ))}
       </select>
@@ -192,6 +203,29 @@ export function SettingsPanel({
     extensionEnabled: boolean
   } | null>(null)
   const [clearOrphanBusy, setClearOrphanBusy] = useState(false)
+  const [newAgentName, setNewAgentName] = useState('')
+  const [newAgentDescription, setNewAgentDescription] = useState('')
+  const [newAgentPrompt, setNewAgentPrompt] = useState('')
+  const [newAgentPin, setNewAgentPin] = useState<SubagentModelPin>({ provider: '', modelId: '' })
+  // Every tool on to start: that is what a persona with no `tools:` line gets today,
+  // so the default stays the behaviour operators already know.
+  const [newAgentTools, setNewAgentTools] = useState<readonly PiBuiltinToolId[]>(PI_BUILTIN_TOOL_IDS)
+  const [newAgentTimeout, setNewAgentTimeout] = useState('')
+  const [newAgentBusy, setNewAgentBusy] = useState(false)
+  const [newAgentError, setNewAgentError] = useState('')
+  /** Name of the persona being edited, or null while composing a new one. */
+  const [editingAgent, setEditingAgent] = useState<string | null>(null)
+
+  const toggleNewAgentTools = (tools: readonly PiBuiltinToolId[], on: boolean) => {
+    setNewAgentTools((prev) => {
+      const next = new Set(prev)
+      for (const t of tools) {
+        if (on) next.add(t)
+        else next.delete(t)
+      }
+      return PI_BUILTIN_TOOL_IDS.filter((id) => next.has(id))
+    })
+  }
   const [ollamaBaseUrl, setOllamaBaseUrl] = useState('http://127.0.0.1:11434')
   const [ollamaTags, setOllamaTags] = useState<string[]>([])
   const [ollamaListError, setOllamaListError] = useState<string | null>(null)
@@ -244,6 +278,11 @@ export function SettingsPanel({
   const [gaDraft, setGaDraft] = useState('')
   const [gaDirty, setGaDirty] = useState(false)
   const [gaBusy, setGaBusy] = useState(false)
+  const [configuredProviderRefresh, setConfiguredProviderRefresh] = useState(0)
+  const configuredProviders = useConfiguredProviders(
+    [subagentProvider, newAgentPin.provider, ...Object.values(agentPins).map((p) => p.provider)],
+    configuredProviderRefresh,
+  )
 
   const loadGlobalAgents = useCallback(async () => {
     try {
@@ -531,6 +570,7 @@ export function SettingsPanel({
         setChatgptProgress(null)
         await refreshChatgptStatus()
         if (modelId.trim() === '') setModelId(CHATGPT_CODEX_DEFAULT_MODEL)
+        setConfiguredProviderRefresh((n) => n + 1)
       } else if (!r.cancelled) {
         setChatgptError(r.error)
         setChatgptProgress(null)
@@ -564,6 +604,7 @@ export function SettingsPanel({
     }
     setChatgptConnected(false)
     setChatgptAccountId(null)
+    setConfiguredProviderRefresh((n) => n + 1)
   }, [])
 
     const saveModelPrefs = async () => {
@@ -636,6 +677,7 @@ export function SettingsPanel({
     }
     // Chat caption + AgentSession read the running broker; prefs alone do not hot-swap the model.
     await window.sylo.broker.restart()
+    setConfiguredProviderRefresh((n) => n + 1)
     onChanged()
   }
 
@@ -696,6 +738,149 @@ export function SettingsPanel({
     // The subagent extension reads these from the broker's env, which is frozen at fork.
     await window.sylo.broker.restart()
     setSubagentModelSaving(false)
+    onChanged()
+  }
+
+  const reloadSubagentAgents = async () => {
+    // Keeps the transcript's mention chips in step with the persona list.
+    invalidateSubagentNames()
+    try {
+      setSubagentAgents(await window.sylo.tasks.agents())
+    } catch {
+      setSubagentAgents([])
+    }
+  }
+
+  const resetAgentForm = () => {
+    setEditingAgent(null)
+    setNewAgentName('')
+    setNewAgentDescription('')
+    setNewAgentPrompt('')
+    setNewAgentPin({ provider: '', modelId: '' })
+    setNewAgentTools(PI_BUILTIN_TOOL_IDS)
+    setNewAgentTimeout('')
+    setNewAgentError('')
+  }
+
+  /** Load a persona into the form below so it can be edited in place. */
+  const beginEditSubagent = async (name: string) => {
+    setNewAgentError('')
+    try {
+      const res = await window.sylo.tasks.readAgent(name)
+      if (!res.ok) {
+        window.alert(res.error)
+        return
+      }
+      const { agent } = res
+      setEditingAgent(agent.name)
+      setNewAgentName(agent.name)
+      setNewAgentDescription(agent.description)
+      setNewAgentPrompt(agent.prompt)
+      // No `tools:` line means unrestricted, which is every box checked.
+      setNewAgentTools(agent.tools ? (agent.tools.filter(isPiBuiltinToolId)) : PI_BUILTIN_TOOL_IDS)
+      setNewAgentTimeout(agent.timeoutSeconds ? String(agent.timeoutSeconds) : '')
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const saveCustomSubagent = async () => {
+    setNewAgentError('')
+    const editing = editingAgent
+    const name = newAgentName.trim()
+    const prompt = newAgentPrompt.trim()
+    if (!name || !prompt) {
+      setNewAgentError('Name and instructions are both required.')
+      return
+    }
+    const provider = newAgentPin.provider.trim()
+    const modelId = newAgentPin.modelId.trim()
+    const thinkingLevel = newAgentPin.thinkingLevel?.trim() ?? ''
+    if (provider && !modelId) {
+      setNewAgentError('Pick a model for that provider, or set it back to the inherit option.')
+      return
+    }
+    if (newAgentTools.length === 0) {
+      setNewAgentError('Leave at least one tool enabled — an agent with no tools cannot do anything.')
+      return
+    }
+    const timeoutRaw = newAgentTimeout.trim()
+    const timeoutSeconds = timeoutRaw === '' ? undefined : Number(timeoutRaw)
+    if (timeoutSeconds != null && !Number.isInteger(timeoutSeconds)) {
+      setNewAgentError('Timeout must be a whole number of seconds, or blank for the default.')
+      return
+    }
+
+    setNewAgentBusy(true)
+    try {
+      const payload = {
+        name,
+        // Discovery skips personas without a description, and it is what the
+        // orchestrator reads when picking an agent on its own.
+        description: newAgentDescription.trim() || prompt.split('\n')[0]!.slice(0, 160),
+        prompt,
+        tools: [...newAgentTools],
+        ...(timeoutSeconds != null ? { timeoutSeconds } : {}),
+      }
+      const created =
+        editing ?
+          await window.sylo.tasks.updateAgent(payload)
+        : await window.sylo.tasks.createAgent(payload)
+      if (!created.ok) {
+        setNewAgentError(created.error)
+        return
+      }
+      // Editing leaves the pin alone: it is owned by this agent's row above, so
+      // writing it from here would commit whatever that row happens to show.
+      if (!editing && (provider || thinkingLevel)) {
+        const pin: SubagentModelPin =
+          thinkingLevel ? { provider, modelId, thinkingLevel } : { provider, modelId }
+        // Merge onto what is persisted, not onto local state: writing the whole
+        // local map would also commit unsaved pin edits for other agents.
+        const stored = parseSubagentPins(
+          (await window.sylo.prefs.get('sylo.subagents.model_by_agent', '')) as string,
+        )
+        await window.sylo.prefs.set(
+          'sylo.subagents.model_by_agent',
+          JSON.stringify({ ...stored, [created.name]: pin }),
+        )
+        setAgentPins((prev) => ({ ...prev, [created.name]: pin }))
+        // Pins ride in the broker env, so they only take effect on the next fork.
+        await window.sylo.broker.restart()
+      }
+      resetAgentForm()
+      await reloadSubagentAgents()
+      onChanged()
+    } catch (e) {
+      setNewAgentError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setNewAgentBusy(false)
+    }
+  }
+
+  const removeCustomSubagent = async (name: string) => {
+    if (!window.confirm(`Delete the "${name}" subagent? Its markdown file is removed from disk.`)) {
+      return
+    }
+    try {
+      const res = await window.sylo.tasks.deleteAgent(name)
+      if (!res.ok) {
+        window.alert(res.error)
+        return
+      }
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : String(e))
+      return
+    }
+    // The form would otherwise keep offering to save edits to a file that is gone.
+    if (editingAgent === name) resetAgentForm()
+    setAgentPins((prev) => {
+      if (!prev[name]) return prev
+      const next = { ...prev }
+      delete next[name]
+      return next
+    })
+    await reloadSubagentAgents()
     onChanged()
   }
 
@@ -852,6 +1037,7 @@ export function SettingsPanel({
                         }
                         setOrAuthHasKey(false)
                         setOrAuthPreview(null)
+                        setConfiguredProviderRefresh((n) => n + 1)
                       })()
                     }}
                   >
@@ -936,11 +1122,13 @@ export function SettingsPanel({
                 : 'border-amber-500/40 bg-amber-500/10 text-amber-200',
               )}
             >
-              <div className="font-medium">
+                            <div className="font-medium">
                 {contextStatus.verdict === 'truncating' ?
                   'Context window too large — Ollama will silently drop tokens'
                 : contextStatus.verdict === 'wasting' ?
                   'Context window under-declared — Pi compacts early'
+                : contextStatus.verdict === 'missing' ?
+                  'Context window not declared — Pi assumes 128,000'
                 : 'Context window is very small'}
               </div>
               <p className="mt-1 opacity-90">{contextStatus.message}</p>
@@ -1538,7 +1726,10 @@ export function SettingsPanel({
         <p className={leadText}>
           Sylo ships <strong>sylo-subagents</strong> (built-in extension) so the primary agent can delegate to
           scout, planner, worker, and reviewer child sessions. Runs appear inline in chat under each{' '}
-          <code className="font-mono text-[0.86em]">subagent</code> tool row. Custom agent personas live as markdown under{' '}
+          <code className="font-mono text-[0.86em]">subagent</code> tool row. The agent decides for itself when to
+          delegate; to force it, start a chat message with{' '}
+          <code className="font-mono text-[0.86em]">@planner</code> (or any persona below) and that agent runs on its
+          pinned model before the chat model sees the turn. Custom agent personas live as markdown under{' '}
           <code className="break-all">{diagnostics.resolvedPiAgentDir}/agents</code> (global) or{' '}
           <code className="break-all">{activeWorkspace.resolvedPiCwd}/.pi/agents</code> (project, optional).
         </p>
@@ -1590,6 +1781,7 @@ export function SettingsPanel({
                 setSubagentThinking(next.thinkingLevel ?? '')
               }}
               ollamaTags={ollamaTags}
+              providers={configuredProviders}
             />
           </label>
 
@@ -1603,12 +1795,36 @@ export function SettingsPanel({
               </p>
               {subagentAgents.map((agent) => (
                 <div key={agent.name} className="flex flex-col gap-1">
-                  <span className="text-[0.82rem] text-text-primary">
+                  <span className="flex items-center gap-2 text-[0.82rem] text-text-primary">
                     <code className="font-mono text-[0.86em]">{agent.name}</code>
                     {agent.source !== 'builtin' ?
-                      <span className={cn(mutedText, ' text-[0.74rem]')}> · {agent.source}</span>
+                      <span className={cn(mutedText, ' text-[0.74rem]')}>· {agent.source}</span>
+                    : null}
+                    {agent.source === 'user' ?
+                      <>
+                        <button
+                          type="button"
+                          className={cn(mutedText, 'border-0 bg-transparent p-0 text-[0.74rem] hover:text-text-primary hover:underline')}
+                          onClick={() => void beginEditSubagent(agent.name)}
+                        >
+                          {editingAgent === agent.name ? 'Editing below' : 'Edit'}
+                        </button>
+                        <button
+                          type="button"
+                          className={cn(mutedText, 'border-0 bg-transparent p-0 text-[0.74rem] hover:text-danger hover:underline')}
+                          onClick={() => void removeCustomSubagent(agent.name)}
+                        >
+                          Delete
+                        </button>
+                      </>
                     : null}
                   </span>
+                  {agent.tools || agent.timeoutSeconds ?
+                    <span className={caption}>
+                      {agent.tools ? `Tools: ${agent.tools.join(', ')}` : 'Tools: all'}
+                      {agent.timeoutSeconds ? ` · ceiling ${agent.timeoutSeconds}s` : ''}
+                    </span>
+                  : null}
                   <SubagentModelFields
                     idPrefix={`sylo-subagent-${agent.name}`}
                     label={agent.name}
@@ -1621,6 +1837,7 @@ export function SettingsPanel({
                       setAgentPins((prev) => ({ ...prev, [agent.name]: next }))
                     }
                     ollamaTags={ollamaTags}
+                    providers={configuredProviders}
                   />
                 </div>
               ))}
@@ -1637,6 +1854,194 @@ export function SettingsPanel({
               {subagentModelSaving ? 'Restarting broker…' : 'Save subagent models'}
             </button>
             <span className={caption}>Restarts the broker so the next run picks these up.</span>
+          </div>
+        </div>
+
+        <div className="mt-3 flex flex-col gap-2.5 rounded-md border border-[color-mix(in_srgb,var(--sylo-border)_70%,transparent)] px-3 py-2.5">
+          <span className={fieldLabel}>
+            {editingAgent ? `Edit "${editingAgent}"` : 'Add a custom subagent'}
+          </span>
+          <p className={caption}>
+            {editingAgent ?
+              <>
+                Rewrites its persona file in place. Changes apply to the next run — no restart
+                needed unless you change its model, which is set in its row above.
+              </>
+            : <>
+                Writes a persona to{' '}
+                <code className="break-all">{diagnostics.resolvedPiAgentDir}/agents</code>. It is
+                available immediately — the primary agent can pick it on its own, and you can force
+                it from the composer by typing <code>@{newAgentName.trim() || 'name'}</code>.
+              </>
+            }
+          </p>
+          <label className="flex flex-col gap-1">
+            <span className={fieldLabel}>Name</span>
+            <input
+              className={input}
+              value={newAgentName}
+              placeholder="researcher"
+              spellCheck={false}
+              // The name keys this agent's model pin and is what @mention types,
+              // so renaming is a delete plus a create rather than an edit.
+              disabled={editingAgent !== null}
+              onChange={(e) => setNewAgentName(e.target.value)}
+            />
+            <span className={caption}>
+              {editingAgent ?
+                'Names cannot be changed here — delete and recreate to rename.'
+              : <>
+                  Letters, numbers, dot, dash, underscore. This is what you type after{' '}
+                  <code>@</code>.
+                </>
+              }
+            </span>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className={fieldLabel}>What it does</span>
+            <input
+              className={input}
+              value={newAgentDescription}
+              placeholder="Deep research across docs and the web, read-only"
+              onChange={(e) => setNewAgentDescription(e.target.value)}
+            />
+            <span className={caption}>
+              One line. This is what the primary agent reads when deciding whether to delegate here
+              on its own. Left blank, the first line of the instructions is used.
+            </span>
+          </label>
+          <label className={cn('flex flex-col gap-1', editingAgent ? 'hidden' : '')}>
+            <span className={fieldLabel}>Model</span>
+            <SubagentModelFields
+              idPrefix="sylo-subagent-new"
+              label="new subagent"
+              inheritLabel="Use the setting above"
+              thinkingInheritLabel={
+                subagentThinking ? `Use the setting above (${subagentThinking})` : 'Use the setting above'
+              }
+              pin={newAgentPin}
+              onChange={setNewAgentPin}
+              ollamaTags={ollamaTags}
+              providers={configuredProviders}
+            />
+          </label>
+          <div className="flex flex-col gap-1">
+            <span className={fieldLabel}>Tool access</span>
+            <span className={caption}>
+              What this agent is allowed to do, regardless of what its instructions say. Enforced by
+              the child process itself, so it holds even if the agent is told otherwise. The
+              Capability manager applies on top: a built-in switched off there stays off here, and
+              an agent left with nothing usable refuses to run rather than running unrestricted.
+            </span>
+            <div className="mt-1 flex flex-col gap-2 rounded-md border border-[color-mix(in_srgb,var(--sylo-border)_70%,transparent)] px-3 py-2">
+              {PI_TOOL_ACCESS_GROUPS.map((group) => {
+                const all = group.tools.every((t) => newAgentTools.includes(t))
+                const some = group.tools.some((t) => newAgentTools.includes(t))
+                return (
+                  <div key={group.id} className="flex flex-col gap-1">
+                    <label className="flex cursor-pointer items-start gap-2 text-[0.88rem]">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={all}
+                        ref={(el) => {
+                          // Partial selection is a real state here; without this the box
+                          // would read as "off" while some of its tools are on.
+                          if (el) el.indeterminate = some && !all
+                        }}
+                        onChange={(e) => toggleNewAgentTools(group.tools, e.target.checked)}
+                      />
+                      <span className="flex flex-col">
+                        <span>{group.label}</span>
+                        <span className={caption}>{group.hint}</span>
+                      </span>
+                    </label>
+                    {group.tools.length > 1 ?
+                      <div className="ml-6 flex flex-wrap gap-x-4 gap-y-1">
+                        {group.tools.map((tool) => (
+                          <label
+                            key={tool}
+                            className="flex cursor-pointer items-center gap-1.5 text-[0.8rem]"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={newAgentTools.includes(tool)}
+                              onChange={(e) => toggleNewAgentTools([tool], e.target.checked)}
+                            />
+                            <span>{PI_BUILTIN_TOOL_LABELS[tool]}</span>
+                          </label>
+                        ))}
+                      </div>
+                    : null}
+                  </div>
+                )
+              })}
+            </div>
+            <span className={caption}>
+              {newAgentTools.length === 0 ?
+                'Nothing enabled — pick at least one tool.'
+              : newAgentTools.length === PI_BUILTIN_TOOL_IDS.length ?
+                'Everything enabled, so no restriction is written and the agent inherits the usual tool set.'
+              : `Written as tools: ${newAgentTools.join(', ')} — the agent is handed only these.`}
+            </span>
+          </div>
+          <label className="flex flex-col gap-1">
+            <span className={fieldLabel}>Timeout (seconds)</span>
+            <input
+              className={cn(input, 'max-w-[10rem]')}
+              type="number"
+              min={60}
+              max={7200}
+              step={30}
+              value={newAgentTimeout}
+              placeholder="default"
+              onChange={(e) => setNewAgentTimeout(e.target.value)}
+            />
+            <span className={caption}>
+              Optional hard ceiling for one run, 60–7200 seconds. Blank uses 2 hours. A working
+              child is not killed for taking time — only if it goes silent (10 min local / 5 min
+              cloud) or hits this ceiling. Lower it for a scout you never want to wait on.
+            </span>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className={fieldLabel}>Instructions (system prompt)</span>
+            <textarea
+              className={cn(textarea, 'min-h-[8rem] w-full')}
+              value={newAgentPrompt}
+              placeholder={
+                'You are a research specialist.\n\nGather evidence, cite file paths and URLs, and do not edit files.\n\nReport:\n- Findings\n- Open questions'
+              }
+              onChange={(e) => setNewAgentPrompt(e.target.value)}
+            />
+            <span className={caption}>
+              Becomes the child session&apos;s system prompt. Say what it should do, what it must not
+              touch, and the shape of the report you want back.
+            </span>
+          </label>
+          {newAgentError ? <p className={errorText}>{newAgentError}</p> : null}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className={btnGhostSm}
+              onClick={() => void saveCustomSubagent()}
+              disabled={newAgentBusy || !newAgentName.trim() || !newAgentPrompt.trim()}
+            >
+              {newAgentBusy ?
+                editingAgent ? 'Saving…'
+                : 'Creating…'
+              : editingAgent ? 'Save changes'
+              : 'Create subagent'}
+            </button>
+            {editingAgent ?
+              <button type="button" className={btnGhostSm} onClick={resetAgentForm}>
+                Cancel
+              </button>
+            : null}
+            <span className={caption}>
+              {editingAgent ?
+                'Takes effect on the next run of this agent.'
+              : 'Picking a model restarts the broker; otherwise no restart is needed.'}
+            </span>
           </div>
         </div>
         <div className="mt-3 rounded-md border border-[color-mix(in_srgb,var(--sylo-border)_70%,transparent)] px-3 py-2.5">

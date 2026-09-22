@@ -17,7 +17,7 @@
  */
 import { execFile as execFileCb } from 'node:child_process'
 import { X509Certificate } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { promisify } from 'node:util'
@@ -139,6 +139,9 @@ export async function ensureTailscaleCompanionCert(opts: {
   if (certFresh) return { fqdn, provisioned: false }
 
   try {
+    // `tailscale cert` writes the files but will not create their directory,
+    // which does not exist yet on a fresh install.
+    mkdirSync(opts.certsDir, { recursive: true })
     await execFile(
       binary,
       ['cert', '--cert-file', certPath, '--key-file', keyPath, fqdn],

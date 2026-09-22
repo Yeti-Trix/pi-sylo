@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import { SYLO_MODEL_PROVIDERS, SYLO_MODEL_PROVIDER_LABELS, CHATGPT_CODEX_PROVIDER, CHATGPT_CODEX_MODELS } from '../../../shared/chatgpt-codex'
+import { SYLO_MODEL_PROVIDER_LABELS, CHATGPT_CODEX_PROVIDER, CHATGPT_CODEX_MODELS } from '../../../shared/chatgpt-codex'
 import { cn } from '../lib/cn'
 import { modelBarPill, mutedText } from '../panels/ui-classes'
 import { normalizeOllamaOriginUi, OllamaModelSelect } from '../panels/ollama-ui'
 import { ChatSubagentModelsModal } from './ChatSubagentModelsModal'
+import { useConfiguredProviders } from './useConfiguredProviders'
 
 /**
  * Per-chat model selector shown in the chat status row. Each chat stores an
@@ -14,9 +15,9 @@ import { ChatSubagentModelsModal } from './ChatSubagentModelsModal'
  *
  * Changing the model persists to the chat and asks the host to re-bind the
  * broker (switchSession re-resolves the model — no full restart).
+ * The provider list is only the ones with a working login (plus the current
+ * selection, so a removed key does not blank the control).
  */
-
-const PROVIDERS = SYLO_MODEL_PROVIDERS
 
 type GlobalDefaults = {
   provider: string
@@ -80,6 +81,10 @@ export function ChatModelBar({
   const [visionTags, setVisionTags] = useState<string[]>([])
   const [visionTagsLoading, setVisionTagsLoading] = useState(false)
   const [subagentModalOpen, setSubagentModalOpen] = useState(false)
+  const providers = useConfiguredProviders(
+    [override.model_provider, effective?.provider, globalDefaults?.provider],
+    agentReady,
+  )
 
   // Load global defaults (prefs) once.
   useEffect(() => {
@@ -339,7 +344,7 @@ export function ChatModelBar({
           title="Model provider (global default shown in parentheses)"
         >
           <option value={GLOBAL_SENTINEL}>Global ({globalProviderLabel})</option>
-          {PROVIDERS.map((p) => (
+          {providers.map((p) => (
             <option key={p} value={p}>
               {SYLO_MODEL_PROVIDER_LABELS[p]}
             </option>

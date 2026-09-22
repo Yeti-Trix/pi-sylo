@@ -2,6 +2,7 @@
  * Agent broker: runs as a forked child (ELECTRON_RUN_AS_NODE) with IPC to Electron main.
  * Owns a single Pi AgentSession; streams slimmed events back to the host.
  */
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -42,6 +43,13 @@ import {
 } from '../shared/pi-builtin-tools-broker.js'
 import type { PiBuiltinToolsPref } from '../shared/pi-builtin-tools.js'
 import { parsePiSlashInput } from '../shared/pi-slash-command.js'
+import { readModelContextWindow, readModelMaxTokens } from '../main/model-input.js'
+import {
+  decideEmptyReply,
+  lastAssistantCutoff,
+  lastAssistantText as lastAssistantTextFromMessages,
+  type SessionMessage,
+} from './empty-reply.js'
 import {
   makeSyloDisabledToolKey,
   normalizeDisabledToolsJson,
@@ -53,6 +61,7 @@ import {
 } from '../shared/sylo-capability-paths.js'
 import { isSkillPathInOperatorScope } from '../shared/sylo-skill-scope.js'
 import { readSyloPrefBool } from '../shared/sylo-sqlite-prefs.js'
+import { runForcedSubagentChain } from '../../../../packages/sylo-subagents/extensions/index.ts'
 import {
   cancelAllSubagentRuns,
   cancelSubagentRun,
@@ -151,6 +160,27 @@ type BrokerForkBeforeLastUser = { type: 'fork_before_last_user'; requestId: stri
 
 type BrokerCancelSubagent = { type: 'cancel_subagent'; runId: string }
 
+/**
+ * Operator-forced subagent run (`@mention` in the composer), driven by the host
+ * instead of by the orchestrator's `subagent` tool call. `turnId` is the id main
+ * uses to attribute lifecycle events to a conversation; there is no Pi turn
+ * streaming yet when this runs.
+ */
+type BrokerRunSubagent = {
+  type: 'run_subagent'
+  requestId: string
+  turnId: string
+  agents: string[]
+  task: string
+}
+
+/**
+ * Stop a forced chain the host has given up on (RPC timeout, turn aborted).
+ * Without it the chain keeps spawning `pi` children whose events can no longer
+ * be attributed to anything.
+ */
+type BrokerCancelForcedSubagent = { type: 'cancel_forced_subagent'; turnId: string }
+
 type BrokerMessageIn =
   | BrokerInit
   | BrokerPrompt
@@ -164,6 +194,8 @@ type BrokerMessageIn =
   | BrokerSwitchSession
   | BrokerForkBeforeLastUser
   | BrokerCancelSubagent
+  | BrokerRunSubagent
+  | BrokerCancelForcedSubagent
   // Pass-through IPC messages: the broker does not consume these. Main → broker
   // IPC fans them out to every `process.on('message')` listener (e.g. the
   // sylo-tasks extension's edit listener, or think-tank/schedule RPC waiters).
@@ -558,6 +590,20 @@ let brokerChatOnly = false
 /** Routes extension notify/error IPC to the active chat turn. */
 let activePromptTurnId: string | undefined
 /**
+ * Turn id for the operator-forced subagent run executing on this async stack.
+ *
+ * Forced runs happen *before* the Pi turn starts, so `activePromptTurnId` is
+ * still unset and `sylo_subagent` events would otherwise arrive at main
+ * untagged (no runs strip, no Tasks row, no cancel). Async-scoped rather than a
+ * module variable because a single variable misattributed events as soon as
+ * anything overlapped: a second forced run clobbered it, and the first run's
+ * `finally` cleared it while another was still working.
+ */
+const forcedRunTurnIdStore = new AsyncLocalStorage<string>()
+
+/** In-flight forced chains by turn id, so a timeout or abort can stop them. */
+const forcedRunAborts = new Map<string, AbortController>()
+/**
  * Set on successful compaction_end. A provider usage reading taken before a
  * compaction describes the PRE-compaction context — until a fresh post-compaction
  * reading lands (next turn), such readings must be ignored so the token counter
@@ -589,10 +635,14 @@ function installSubagentTurnIdBridge(): void {
         msgType === 'sylo_think_tank_rpc' ||
         msgType === 'sylo_schedule_rpc' ||
         msgType === 'sylo_ask_question') &&
-      activePromptTurnId &&
       !(msg as { turnId?: string }).turnId
     ) {
-      return nativeSend({ ...(msg as Record<string, unknown>), turnId: activePromptTurnId })
+      // A forced chain's own turn wins: its events belong to it even when
+      // another conversation's prompt is streaming on this same broker.
+      const turnId = forcedRunTurnIdStore.getStore() ?? activePromptTurnId
+      if (turnId) {
+        return nativeSend({ ...(msg as Record<string, unknown>), turnId })
+      }
     }
     // Inject workspaceKey for show_canvas / show_widget so the renderer can
     // gate by workspace — same pattern as sylo-tasks:open-on-canvas. Without
@@ -699,64 +749,73 @@ function extensionBrokerPolicy() {
   }
 }
 
-function assistantTurnErrorFromSession(sess: AgentSession): string | null {
-  for (let i = sess.messages.length - 1; i >= 0; i--) {
-    const msg = sess.messages[i]!
-    if (msg.role !== 'assistant') continue
-    const a = msg as {
-      stopReason?: string
-      errorMessage?: string
-      content?: unknown
-    }
-    if (a.stopReason === 'error' && typeof a.errorMessage === 'string' && a.errorMessage.trim()) {
-      return a.errorMessage.trim()
-    }
-    const text = assistantMessageText(a.content)
-    if (!text.trim() && a.stopReason === 'error') {
-      return 'Model returned an error with no details.'
-    }
-    return null
-  }
-  return null
+function sessionMessages(sess: AgentSession): SessionMessage[] {
+  return sess.messages as unknown as SessionMessage[]
 }
 
-function assistantMessageText(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return ''
-  let out = ''
-  for (const block of content) {
-    if (!block || typeof block !== 'object') continue
-    const b = block as { type?: string; text?: string }
-    if (b.type === 'text' && typeof b.text === 'string') out += b.text
-  }
-  return out
+function decideSessionEmptyReply(sess: AgentSession) {
+  const agentDir = brokerAgentDir || undefined
+  return decideEmptyReply({
+    messages: sessionMessages(sess),
+    chatOnly: brokerChatOnly,
+    contextWindow: agentDir
+      ? readModelContextWindow(agentDir, brokerModelProvider, brokerModelId)
+      : null,
+    maxTokens: agentDir ? readModelMaxTokens(agentDir, brokerModelProvider, brokerModelId) : null,
+  })
 }
 
-/** Extract the text content of the last assistant message in the session. */
 function lastAssistantText(sess: AgentSession): string {
-  for (let i = sess.messages.length - 1; i >= 0; i--) {
-    const msg = sess.messages[i]!
-    if (msg.role !== 'assistant') continue
-    const a = msg as { content?: unknown }
-    return assistantMessageText(a.content)
-  }
-  return ''
+  return lastAssistantTextFromMessages(sessionMessages(sess))
 }
 
-function assistantEmptyReplyHint(sess: AgentSession): string | null {
-  for (let i = sess.messages.length - 1; i >= 0; i--) {
-    const msg = sess.messages[i]!
-    if (msg.role !== 'assistant') continue
-    const a = msg as { stopReason?: string; content?: unknown }
-    const text = assistantMessageText(a.content)
-    if (text.trim()) return null
-    // An aborted/interrupted turn (user steer, push, or Stop) is expected to
-    // have little or no text — don't report it as a "Model returned no text"
-    // error. Only flag genuinely empty model responses (stopReason !== aborted).
-    if (a.stopReason === 'aborted') return null
-    return 'Model returned no text. If you enabled chat-only for a local model, start a new chat and restart the broker after saving Settings.'
+/**
+ * Usage for a final assistant message the provider truncated (`stopReason: 'length'`).
+ *
+ * Pi reports this like any other completed turn, so without an explicit check a
+ * cut-off reply is written to the transcript as a normal, finished answer and the
+ * agent simply appears to stop mid-task. Only the *last* assistant message counts —
+ * an intermediate truncation the agent loop recovered from is not a stalled turn.
+ */
+function assistantTurnCutoffFromSession(
+  sess: AgentSession,
+): { output: number; total: number } | null {
+  return lastAssistantCutoff(sessionMessages(sess))
+}
+
+/** One recovery prompt: no tools, thinking minimized, so a local model writes text. */
+async function promptEmptyReplyContinue(
+  sess: AgentSession,
+  continuePrompt: string,
+): Promise<void> {
+  const prevLevel = currentThinkingLevel(sess)
+  applySyloActiveToolsFromBrokerPolicy(sess, { ...extensionBrokerPolicy(), chatOnly: true })
+  let lowered = false
+  try {
+    if (prevLevel && prevLevel !== 'off') {
+      try {
+        sess.setThinkingLevel('off' as Parameters<typeof sess.setThinkingLevel>[0])
+        lowered = true
+      } catch {
+        try {
+          sess.setThinkingLevel('minimal' as Parameters<typeof sess.setThinkingLevel>[0])
+          lowered = true
+        } catch {
+          /* model may not expose a lower level */
+        }
+      }
+    }
+    await sess.prompt(continuePrompt)
+  } finally {
+    applySyloActiveToolsFromBrokerPolicy(sess, extensionBrokerPolicy())
+    if (lowered && prevLevel) {
+      try {
+        sess.setThinkingLevel(prevLevel as Parameters<typeof sess.setThinkingLevel>[0])
+      } catch {
+        /* restore is best-effort */
+      }
+    }
   }
-  return null
 }
 
 function emitExtensionBroker(payload: Record<string, unknown>): void {
@@ -881,6 +940,13 @@ async function handleInit(msg: BrokerInit): Promise<void> {
       const norm = normalizeSyloCapabilityPath(imageFallbackPath)
       if (!norm || !disabledExtensionPathsSet.has(norm)) {
         extraExtensionPaths.push(imageFallbackPath)
+      }
+    }
+    const compactionAnchorPath = process.env.SYLO_COMPACTION_ANCHOR_EXTENSION
+    if (compactionAnchorPath && existsSync(compactionAnchorPath)) {
+      const norm = normalizeSyloCapabilityPath(compactionAnchorPath)
+      if (!norm || !disabledExtensionPathsSet.has(norm)) {
+        extraExtensionPaths.push(compactionAnchorPath)
       }
     }
     const canvasSketchExtensionPath = process.env.SYLO_CANVAS_SKETCH_EXTENSION
@@ -1417,10 +1483,27 @@ async function handlePrompt(msg: BrokerPrompt): Promise<void> {
     const promptOptions =
       msg.images && msg.images.length > 0 ? { images: msg.images } : undefined
     await session.prompt(msg.text, promptOptions)
-    const turnErr = assistantTurnErrorFromSession(session)
-    const emptyHint = turnErr ? null : assistantEmptyReplyHint(session)
-    if (turnErr || emptyHint) {
-      process.send?.({ type: 'error', turnId: msg.turnId, error: turnErr ?? emptyHint! })
+    let empty = decideSessionEmptyReply(session)
+    // Local primary (and any empty thinking/tool turn): one recovery prompt is
+    // cheap and is the difference between "Ran N tools" and a written status.
+    // Tools are stripped and thinking is minimized so it cannot start a new plan.
+    if (empty.autoContinue && empty.continuePrompt) {
+      emitExtensionBroker({
+        type: 'extension_notify',
+        turnId: msg.turnId,
+        message:
+          'No reply text after the last step — asking the model once to write a status (tools off, thinking minimized).',
+        notifyType: 'warning',
+      })
+      try {
+        await promptEmptyReplyContinue(session, empty.continuePrompt)
+      } catch (e) {
+        console.error('[sylo-broker] empty-reply continue failed:', e)
+      }
+      empty = decideSessionEmptyReply(session)
+    }
+    if (empty.kind === 'provider_error' && empty.userMessage) {
+      process.send?.({ type: 'error', turnId: msg.turnId, error: empty.userMessage })
       return
     }
     // Fallback: if the session has assistant text but no text_delta events were
@@ -1434,7 +1517,29 @@ async function handlePrompt(msg: BrokerPrompt): Promise<void> {
       const text = lastAssistantText(currentSession)
       if (text) {
         process.send?.({ type: 'event', turnId: msg.turnId, event: { type: 'text_delta', delta: text } })
+        textForwarded = true
       }
+    }
+    // Sent before `done` so the host can append the explanation to the partial
+    // reply the turn did produce, rather than discarding it as an error.
+    // Must run even when the last message has no text — empty + length is the
+    // usual local-model failure, and used to be swallowed by the chat-only hint.
+    const cutoff = assistantTurnCutoffFromSession(currentSession)
+    if (cutoff) {
+      process.send?.({
+        type: 'turn_cutoff',
+        turnId: msg.turnId,
+        output: cutoff.output,
+        total: cutoff.total,
+        provider: brokerModelProvider,
+        modelId: brokerModelId,
+      })
+    } else if (!textForwarded && empty.userMessage && empty.kind !== 'aborted') {
+      process.send?.({
+        type: 'event',
+        turnId: msg.turnId,
+        event: { type: 'text_delta', delta: empty.userMessage },
+      })
     }
     process.send?.({ type: 'done', turnId: msg.turnId })
     sendContextWindowStats()
@@ -1489,6 +1594,36 @@ async function handleFollowUp(msg: BrokerFollowUp): Promise<void> {
   }
 }
 
+async function handleRunSubagent(msg: BrokerRunSubagent): Promise<void> {
+  const abort = new AbortController()
+  forcedRunAborts.set(msg.turnId, abort)
+  await forcedRunTurnIdStore.run(msg.turnId, async () => {
+    try {
+      const outcomes = await runForcedSubagentChain({
+        cwd: brokerSessionCwd || process.cwd(),
+        agentNames: msg.agents,
+        task: msg.task,
+        signal: abort.signal,
+      })
+      process.send?.({
+        type: 'run_subagent_result',
+        requestId: msg.requestId,
+        ok: true,
+        outcomes,
+      })
+    } catch (e) {
+      process.send?.({
+        type: 'run_subagent_result',
+        requestId: msg.requestId,
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+      })
+    } finally {
+      forcedRunAborts.delete(msg.turnId)
+    }
+  })
+}
+
 async function handleSteer(msg: BrokerSteer): Promise<void> {
   if (!session) return
   try {
@@ -1539,12 +1674,24 @@ function handleMessage(msg: unknown): void {
   }
   if (m.type === 'abort' && session) {
     cancelAllSubagentRuns()
+    // Killing the current children is not enough: without this the chain just
+    // moves on and spawns the next agent in the sequence.
+    for (const ac of forcedRunAborts.values()) ac.abort()
     void session.abort()
     return
   }
   if (m.type === 'cancel_subagent') {
     const runId = typeof m.runId === 'string' ? m.runId.trim() : ''
     if (runId) cancelSubagentRun(runId)
+    return
+  }
+  if (m.type === 'run_subagent') {
+    void handleRunSubagent(m)
+    return
+  }
+  if (m.type === 'cancel_forced_subagent') {
+    const turnId = typeof m.turnId === 'string' ? m.turnId.trim() : ''
+    if (turnId) forcedRunAborts.get(turnId)?.abort()
     return
   }
   if (m.type === 'sylo_think_tank_rpc_result') {

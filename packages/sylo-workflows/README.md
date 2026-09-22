@@ -26,8 +26,8 @@ Base, always-on Sylo package: a **database of operator prompt playbooks** (markd
 
 Registered in `SYLO_OPTIONAL_PACKAGES` (`apps/host/src/shared/sylo-optional-packages.ts`). Enable in Capability Manager → Sylo optional packages to load `sylo_workflows_list` and show the Tools → Workflows route. Off by default. No host broker/env wiring (unlike the sylo-builtin subagents/scheduler).
 
-## Tracker
+## Design history
 
-`features_tracker/active/2026-07-17_17-00-00_sylo_workflows_base_package.md`
+pi-sylo-dev git history (folder trackers retired 2026-09-11): `features_tracker/active/2026-07-17_17-00-00_sylo_workflows_base_package.md`
 
 **Pending phases:** route UI under Tools (port of LogicForge WorkflowsTab) + host IPC (`syloWorkflow*`), then strip LogicForge workflow references and repoint the logicforge skill.
