@@ -72,7 +72,7 @@ type PluginModule = {
 type Candidate = { dir: string; id: string; legacy: boolean; source: 'local' | 'npm' | 'legacy' }
 type LoadedPlugin = { id: string; dir: string; plugin: PersonalPlugin }
 
-const LEGACY_BUNDLE_NAMES = ['sylo-tools-personal', 'sylo-personal-tools']
+const BUNDLE_NAMES = ['sylo-health', 'sylo-tools-personal', 'sylo-personal-tools']
 const LEGACY_PLUGIN_ID = 'personal'
 
 let plugins: LoadedPlugin[] | null = null
@@ -169,7 +169,9 @@ function npmInstalledSyloDirs(agentDir: string): string[] {
 /** Pre-contract personal-bundle resolver (env var → settings basename → dev dirs). */
 function legacyPersonalDir(agentDir: string): string | null {
   const env =
-    process.env.SYLO_TOOLS_PERSONAL_DIR?.trim() ?? process.env.SYLO_PERSONAL_TOOLS_DIR?.trim()
+    process.env.SYLO_HEALTH_DIR?.trim() ??
+    process.env.SYLO_TOOLS_PERSONAL_DIR?.trim() ??
+    process.env.SYLO_PERSONAL_TOOLS_DIR?.trim()
   if (env) {
     const abs = resolve(env)
     if (existsSync(abs)) return abs
@@ -181,7 +183,7 @@ function legacyPersonalDir(agentDir: string): string | null {
       const req = createRequire(import.meta.url)
       const raw = req(settingsPath) as { packages?: string[] }
       const entry = raw.packages?.find((p) =>
-        LEGACY_BUNDLE_NAMES.includes(basename(p.replace(/\\/g, '/'))),
+        BUNDLE_NAMES.includes(basename(p.replace(/\\/g, '/'))),
       )
       if (entry) {
         const abs = resolve(settingsPath, '..', entry)
@@ -191,8 +193,10 @@ function legacyPersonalDir(agentDir: string): string | null {
   } catch {
     /* settings unreadable — fall through */
   }
-  const fallback = join(homedir(), 'Documents', 'GitHub', 'sylo-tools-personal')
+  const fallback = join(homedir(), 'Documents', 'GitHub', 'sylo-health')
   if (existsSync(fallback)) return fallback
+  const prev = join(homedir(), 'Documents', 'GitHub', 'sylo-tools-personal')
+  if (existsSync(prev)) return prev
   const legacy = join(homedir(), 'Documents', 'GitHub', 'sylo-personal-tools')
   return existsSync(legacy) ? legacy : null
 }

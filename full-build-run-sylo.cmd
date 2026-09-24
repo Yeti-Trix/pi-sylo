@@ -7,6 +7,8 @@ REM      broker, companion, sync skill-surface fixtures
 REM   3. electron-vite dev (renderer + main hot reload) in the FOREGROUND so you see
 REM      errors stream and the window pauses on any failure.
 REM
+REM Refuses to run while Sylo is already up - it never force-kills the app.
+REM
 REM Use this when you are actively editing Sylo. For a quiet "just the GUI" launch
 REM (e.g. from the Windows Startup folder), use run-sylo.cmd instead.
 cd /d "%~dp0"
@@ -23,11 +25,16 @@ if errorlevel 1 (
 )
 
 echo.
-echo Stopping leftover Sylo/Electron processes from this repo (if any)...
-powershell -NoProfile -Command "Get-Process electron -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*sylo-dev*' -or $_.Path -like '*pi-sylo*' } | Stop-Process -Force -ErrorAction SilentlyContinue"
-timeout /t 2 /nobreak >nul
-
-echo Close any running Sylo window before continuing...
+echo Checking that Sylo is not already running - dev mode would conflict with it...
+powershell -NoProfile -Command "if (Get-Process electron -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*sylo-dev*' -or $_.Path -like '*pi-sylo*' }) { exit 1 }"
+if errorlevel 1 (
+  echo.
+  echo Sylo is already running. Close the Sylo window first, then run this script again.
+  echo This script never force-kills Sylo: a running instance may host active agent
+  echo sessions, and killing it mid-session destroys them.
+  pause
+  exit /b 1
+)
 echo.
 
 call npm install

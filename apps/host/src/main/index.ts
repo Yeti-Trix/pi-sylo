@@ -449,6 +449,7 @@ import {
 } from './scheduled-prompts-db.js'
 import type { ScheduledPromptInput, ScheduledPromptPatch } from '../shared/scheduled-prompts-types.js'
 import type { ScheduledPromptRow } from '../shared/scheduled-prompts-types.js'
+import { shouldReuseScheduleConversation } from '../shared/scheduled-prompts-reuse.js'
 import { handleScheduleRpc, type ScheduleRpcRequest } from './scheduled-prompts-rpc.js'
 import {
   fireScheduledPromptNow,
@@ -4421,7 +4422,18 @@ async function fireScheduledPromptFromHost(
   schedule: ScheduledPromptRow,
 ): Promise<{ conversationId: string; status: 'started' | 'failed' | 'broker_unavailable' }> {
   const title = schedule.title.trim() || 'Scheduled prompt'
-  const conv = db.createConversation(title, schedule.workspace_id)
+  // Chat mode: reuse the schedule's last conversation when the mode is on and the
+  // target still exists, is not archived, and belongs to the schedule's workspace.
+  // Otherwise (default mode, first run, deleted/archived/cross-workspace target)
+  // create a fresh chat — recordScheduledPromptRun makes it the new target.
+  const reuseCandidate =
+    schedule.reuse_conversation === 1 && schedule.last_conversation_id ?
+      db.getConversation(schedule.last_conversation_id)
+    : undefined
+  const conv =
+    reuseCandidate && shouldReuseScheduleConversation(schedule, reuseCandidate) ?
+      reuseCandidate
+    : db.createConversation(title, schedule.workspace_id)
   const markNotify = () =>
     notifyOnDoneByConv.set(conv.id, { workspaceId: schedule.workspace_id ?? null, title })
   if (!brokerAgentReady || !broker || db.getPref('sylo.safe_mode', false)) {
@@ -4456,6 +4468,7 @@ function readScheduledPromptInput(raw: unknown): ScheduledPromptInput {
     max_runs: o.max_runs === null ? null : typeof o.max_runs === 'number' ? o.max_runs : undefined,
     catchup_on_startup: typeof o.catchup_on_startup === 'boolean' ? o.catchup_on_startup : undefined,
     enabled: typeof o.enabled === 'boolean' ? o.enabled : undefined,
+    reuse_conversation: typeof o.reuse_conversation === 'boolean' ? o.reuse_conversation : undefined,
   }
 }
 
@@ -4474,6 +4487,7 @@ function readScheduledPromptPatch(raw: unknown): ScheduledPromptPatch {
   else if (typeof o.max_runs === 'number') patch.max_runs = o.max_runs
   if (typeof o.catchup_on_startup === 'boolean') patch.catchup_on_startup = o.catchup_on_startup
   if (typeof o.enabled === 'boolean') patch.enabled = o.enabled
+  if (typeof o.reuse_conversation === 'boolean') patch.reuse_conversation = o.reuse_conversation
   return patch
 }
 

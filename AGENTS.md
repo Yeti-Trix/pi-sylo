@@ -25,9 +25,25 @@ Crashes and unhandled errors are appended to `%APPDATA%\@sylo\host\logs\crash.lo
 (rotated at 2 MB). Include it in bug reports — the `logs\sylo-dev*.log` files in the
 repo are truncated on every launch.
 
-Note: `full-build-run-sylo.cmd` kills leftover Electron processes from this repo before launching.
-If `npm install` fails with EPERM/EBUSY around `better-sqlite3`, close any running Sylo
-window and run it again.
+Note: `build-sylo.cmd`, `full-build-run-sylo.cmd`, and `run-sylo.cmd` **never force-kill a
+running Sylo** — they check first and **refuse to run with `Sylo is already running`** when an
+instance from this repo is up. Close the Sylo window, then re-run. If `npm install` fails with
+EPERM/EBUSY around `better-sqlite3`, the same fix applies: close the running Sylo first.
+
+## Agents: never restart Sylo yourself — ask the operator
+
+If you are a Pi session hosted by Sylo, a restart kills your own host mid-turn and destroys
+your session — this has actually happened. Rules:
+
+- **Never restart, kill, or relaunch Sylo as part of implementing or testing a change** —
+  not via `Stop-Process`/`taskkill`, not via the launcher scripts, not via the supervisor.
+- Safe verification that does not touch a running app: typecheck, unit tests, and
+  `npm run build -w apps/host`.
+- When a change needs a relaunch to take effect (main-process/preload code, deps, skill
+  surfaces), **tell the operator to relaunch Sylo and stop there**. Verify afterward in the
+  fresh session the operator started.
+- The only sanctioned automated kill/restart is the operator-triggered sylo-supervisor
+  channel (ntfy control topic `restart` / `rebuild`), which snapshots uncommitted work first.
 
 ## Building the installer
 
@@ -80,6 +96,11 @@ smoke-testing an installer build without touching your real chat history.
 
 ## Making changes
 
+- **Never create a branch unless the operator specifically asks for one.** Work on the branch
+  that is already checked out (or leave changes in the working tree) and let the operator decide
+  when to branch, PR, and merge. Agent-created branches linger and confuse the repo — this has
+  happened repeatedly. This overrides the branch/PR steps in docs/WORKFLOW.md for agent sessions
+  in this repo; the issue-claiming and `Fixes #N` rules still apply whenever a PR is used.
 - Skills live under `packages/skills/` with a sidebar UI when applicable; extensions are
   TypeScript tools under `packages/`. Follow the patterns of an existing sibling package.
 - After editing skills without restarting, re-run `npm run prepare:dev` (or `sync-skill-surfaces`)

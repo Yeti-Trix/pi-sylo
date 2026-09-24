@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS scheduled_prompts (
   run_count INTEGER NOT NULL DEFAULT 0,
   catchup_on_startup INTEGER NOT NULL DEFAULT 1,
   enabled INTEGER NOT NULL DEFAULT 1,
+  reuse_conversation INTEGER NOT NULL DEFAULT 0,
   next_run_at INTEGER NOT NULL,
   last_run_at INTEGER,
   last_conversation_id TEXT,
@@ -60,6 +61,12 @@ CREATE TABLE IF NOT EXISTS scheduled_prompts (
 CREATE INDEX IF NOT EXISTS idx_scheduled_prompts_workspace ON scheduled_prompts(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_scheduled_prompts_next_run ON scheduled_prompts(enabled, next_run_at);
 `)
+
+  // Column migration for pre-existing per-workspace DBs (runs on every open, guarded).
+  const columns = d.prepare(`PRAGMA table_info(scheduled_prompts)`).all() as Array<{ name: string }>
+  if (!columns.some((c) => c.name === 'reuse_conversation')) {
+    d.exec('ALTER TABLE scheduled_prompts ADD COLUMN reuse_conversation INTEGER NOT NULL DEFAULT 0')
+  }
 }
 
 /**

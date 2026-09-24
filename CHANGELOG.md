@@ -5,9 +5,10 @@ All notable changes to Sylo are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
-## [Unreleased]
 
 ### Added
+
+- **Schedules — per-schedule chat mode:** every schedule can now choose between **"New chat each run"** (previous, still the default) and **"Continue in same chat"** — each fire appends the prompt turn into one persistent conversation. Selectable in the Schedules form for both new and existing schedules. Self-healing: if the target chat is missing (first run), deleted, or archived, the next fire creates a fresh chat and continues there. "Run now" and startup-catchup follow the same rule.
 
 ## [0.4.0] - 2026-09-10
 

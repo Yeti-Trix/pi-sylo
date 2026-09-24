@@ -1906,6 +1906,7 @@ declare global {
             run_count: number
             catchup_on_startup: number
             enabled: number
+            reuse_conversation: number
             next_run_at: number
             last_run_at: number | null
             last_conversation_id: string | null

@@ -5,6 +5,7 @@ import {
   listCatchupCandidates,
   listDueScheduledPrompts,
   getScheduledPrompt,
+  recordScheduledPromptConversation,
   recordScheduledPromptRun,
   skipMissedScheduledPrompt,
 } from './scheduled-prompts-db.js'
@@ -119,6 +120,10 @@ export async function fireScheduledPromptNow(id: string): Promise<
   } catch {
     return { ok: false, error: 'fire_failed' }
   }
+  // Keep the reuse target current without touching run accounting (see
+  // recordScheduledPromptConversation): a later fire — manual or scheduled —
+  // continues in this conversation when the schedule's chat mode says so.
+  if (result.conversationId) recordScheduledPromptConversation(schedule.id, result.conversationId)
   mainWindowRef?.()?.webContents.send('schedules:changed', {
     workspaceId: schedule.workspace_id,
     scheduleId: schedule.id,

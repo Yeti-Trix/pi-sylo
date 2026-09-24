@@ -67,7 +67,7 @@ export function syloBuiltinExtensionHint(kind: SyloBuiltinExtensionKind): string
     case 'scheduler':
       return (
         'Registers schedule_list/create/update/delete - workspace-scoped prompt schedules. ' +
-        'Host fires due schedules as new chats; optional startup catchup.'
+        'Host fires due schedules (new chat per run by default, or one persistent chat per schedule); optional startup catchup.'
       )
     case 'ask-question':
       return (

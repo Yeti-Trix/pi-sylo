@@ -21,6 +21,8 @@ export interface ScheduledPromptRow {
   run_count: number
   catchup_on_startup: number
   enabled: number
+  /** 0 = new chat each run (default); 1 = continue in the same conversation. */
+  reuse_conversation: number
   next_run_at: number
   last_run_at: number | null
   last_conversation_id: string | null
@@ -40,6 +42,8 @@ export type ScheduledPromptInput = {
   max_runs?: number | null
   catchup_on_startup?: boolean
   enabled?: boolean
+  /** true = every fire appends into one persistent chat (self-healing); default false. */
+  reuse_conversation?: boolean
 }
 
 export type ScheduledPromptPatch = Partial<ScheduledPromptInput> & {

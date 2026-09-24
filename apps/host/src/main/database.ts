@@ -767,7 +767,7 @@ export function findLatestEmptyConversationId(workspaceId: string): string | und
 export function getConversation(id: string): ConversationRow | undefined {
   return getDb()
     .prepare(
-      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, subagent_models_json FROM conversations WHERE id = ?',
+      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, subagent_models_json, archived_at FROM conversations WHERE id = ?',
     )
     .get(id) as ConversationRow | undefined
 }

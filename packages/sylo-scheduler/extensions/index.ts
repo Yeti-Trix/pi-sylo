@@ -17,6 +17,7 @@ function formatSchedule(row: Record<string, unknown>): string {
     `  recurrence: ${row.recurrence}; next: ${new Date(Number(row.next_run_at)).toLocaleString()}`,
     `  runs: ${row.run_count}${row.max_runs != null ? ` / ${row.max_runs}` : ' (indefinite)'}`,
     `  enabled: ${row.enabled}; catchup: ${row.catchup_on_startup}`,
+    `  chat per run: ${row.reuse_conversation ? 'continue in same chat' : 'new chat'}`,
   ]
   return lines.join('\n')
 }
@@ -46,7 +47,7 @@ export default function syloSchedulerExtension(pi: ExtensionAPI): void {
     name: 'schedule_create',
     label: 'Create scheduled prompt',
     description:
-      'Create a workspace-scoped scheduled prompt. When it fires, Sylo opens a **new chat** and sends `prompt_text`. Times use the operator local timezone.',
+      'Create a workspace-scoped scheduled prompt. By default each fire opens a **new chat**; set `reuse_conversation: true` to continue every fire in one persistent chat (self-heals to a fresh chat if it was deleted or archived). Times use the operator local timezone.',
     parameters: Type.Object({
       prompt_text: Type.String({ description: 'User message to send when the schedule fires.' }),
       title: Type.Optional(Type.String({ description: 'Short label for the Schedules panel.' })),
@@ -74,6 +75,12 @@ export default function syloSchedulerExtension(pi: ExtensionAPI): void {
             'If true and Sylo was closed when a run was due, fire once on next startup (most recent missed interval only). Default true.',
         }),
       ),
+      reuse_conversation: Type.Optional(
+        Type.Boolean({
+          description:
+            'Chat mode: true = every fire continues in the same persistent chat (first fire creates it; self-heals to a fresh chat if the target was deleted or archived). Default false = new chat each run.',
+        }),
+      ),
     }),
     async execute(_id, params) {
       const result = (await scheduleRpc({
@@ -87,6 +94,7 @@ export default function syloSchedulerExtension(pi: ExtensionAPI): void {
         day_of_month: params.day_of_month,
         max_runs: params.max_runs,
         catchup_on_startup: params.catchup_on_startup,
+        reuse_conversation: params.reuse_conversation,
       })) as { schedule?: Record<string, unknown> }
       const schedule = result.schedule
       return {
@@ -122,6 +130,12 @@ export default function syloSchedulerExtension(pi: ExtensionAPI): void {
           max_runs: Type.Optional(Type.Union([Type.Number({ minimum: 1 }), Type.Null()])),
           catchup_on_startup: Type.Optional(Type.Boolean()),
           enabled: Type.Optional(Type.Boolean()),
+          reuse_conversation: Type.Optional(
+            Type.Boolean({
+              description:
+                'Chat mode: true = continue every fire in the same chat; false (default) = new chat each run.',
+            }),
+          ),
         },
         { additionalProperties: false },
       ),

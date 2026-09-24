@@ -23,6 +23,7 @@ export type ScheduleRpcRequest =
       day_of_month?: number
       max_runs?: number | null
       catchup_on_startup?: boolean
+      reuse_conversation?: boolean
     }
   | {
       op: 'update'
@@ -59,6 +60,7 @@ function serializeSchedule(row: NonNullable<ReturnType<typeof getScheduledPrompt
     run_count: row.run_count,
     catchup_on_startup: row.catchup_on_startup === 1,
     enabled: row.enabled === 1,
+    reuse_conversation: row.reuse_conversation === 1,
     next_run_at: row.next_run_at,
     last_run_at: row.last_run_at,
     last_conversation_id: row.last_conversation_id,
@@ -81,6 +83,7 @@ function patchFromRpc(raw: Record<string, unknown>): ScheduledPromptPatch {
   else if (typeof raw.max_runs === 'number') patch.max_runs = raw.max_runs
   if (typeof raw.catchup_on_startup === 'boolean') patch.catchup_on_startup = raw.catchup_on_startup
   if (typeof raw.enabled === 'boolean') patch.enabled = raw.enabled
+  if (typeof raw.reuse_conversation === 'boolean') patch.reuse_conversation = raw.reuse_conversation
   return patch
 }
 
@@ -106,6 +109,7 @@ export function handleScheduleRpc(req: ScheduleRpcRequest): ScheduleRpcResult {
       day_of_month: req.day_of_month,
       max_runs: req.max_runs,
       catchup_on_startup: req.catchup_on_startup,
+      reuse_conversation: req.reuse_conversation,
     }
     const row = createScheduledPrompt(workspaceId, input)
     return { op: 'create', schedule: serializeSchedule(row) }

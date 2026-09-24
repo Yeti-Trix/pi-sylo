@@ -1,6 +1,6 @@
 # @sylo/sylo-scheduler
 
-Workspace-scoped **scheduled prompts** for Sylo. The host main process fires due schedules (new chat + prompt). This package registers agent tools:
+Workspace-scoped **scheduled prompts** for Sylo. The host main process fires due schedules (prompt in a new chat by default, or one persistent chat per schedule). This package registers agent tools:
 
 - `schedule_list`
 - `schedule_create`

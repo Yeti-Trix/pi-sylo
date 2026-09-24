@@ -96,16 +96,16 @@ function pkgInstalled(names, fallbackDirs) {
 function personalToolsInstalled() {
   // Renamed 2026-09-02: sylo-personal-tools → sylo-tools-personal (legacy name kept as alias).
   return pkgInstalled(
-    ['sylo-tools-personal', 'sylo-personal-tools'],
-    ['sylo-tools-personal', 'sylo-personal-tools'])
+    ['sylo-health', 'sylo-tools-personal', 'sylo-personal-tools'],
+    ['sylo-health', 'sylo-tools-personal', 'sylo-personal-tools'])
 }
 
 function newsRedditInstalled() {
   // 2026-09-10: news/reddit split into standalone packages; the health bundle
   // no longer declares their skills, so their copies need their own owners.
   return pkgInstalled(
-    ['sylo-tools-personal', 'sylo-personal-tools', 'sylo-news', 'sylo-reddit'],
-    ['sylo-tools-personal', 'sylo-personal-tools', 'sylo-news', 'sylo-reddit'])
+    ['sylo-health', 'sylo-tools-personal', 'sylo-personal-tools', 'sylo-news', 'sylo-reddit'],
+    ['sylo-health', 'sylo-tools-personal', 'sylo-personal-tools', 'sylo-news', 'sylo-reddit'])
 }
 
 const personalSkillNames = ['nutrition', 'workouts']
@@ -118,7 +118,7 @@ if (!personalToolsInstalled()) {
     }
   }
 } else {
-  console.log('Sylo bootstrap: sylo-tools-personal bundle present — keeping personal skills')
+  console.log('Sylo bootstrap: health bundle present — keeping personal skills')
 }
 
 const newsRedditSkillNames = ['news', 'reddit']

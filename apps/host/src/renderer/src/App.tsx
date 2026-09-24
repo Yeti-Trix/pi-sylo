@@ -4254,14 +4254,27 @@ export function App(): React.ReactElement {
                   <button
                     type="button"
                     className={convActionBtn}
-                    aria-label={`Export ${c.title || 'conversation'} as Markdown`}
-                    title="Download as Markdown"
+                    aria-label={`Archive ${c.title || 'conversation'}`}
+                    title="Archive — hide from the sidebar without deleting; restore from the Archived section"
                     onClick={(e) => {
                       e.stopPropagation()
-                      void exportConversationMarkdown(c.id)
+                      void performArchiveConversation(c.id)
                     }}
                   >
-                    ↓
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      className="h-3.5 w-3.5"
+                      aria-hidden="true"
+                    >
+                      <rect x="2" y="3" width="20" height="5" rx="1" />
+                      <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
+                      <path d="M10 12h4" />
+                    </svg>
                   </button>
                   <button
                     type="button"
@@ -6425,7 +6438,7 @@ export function App(): React.ReactElement {
                   void exportConversationMarkdown(id)
                 }}
               >
-                Export Markdown
+                Download as .md
               </button>
               <button
                 type="button"

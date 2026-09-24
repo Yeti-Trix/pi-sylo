@@ -29,6 +29,19 @@ if not exist "node_modules\electron" (
   exit /b 1
 )
 
+echo.
+echo Checking that Sylo is not already running...
+powershell -NoProfile -Command "if (Get-Process electron -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*pi-sylo*' }) { exit 1 }"
+if errorlevel 1 (
+  echo.
+  echo Sylo is already running - nothing to do.
+  echo Close the running Sylo window first if you want a fresh launch.
+  echo This script never force-kills Sylo: a running instance may host active agent
+  echo sessions, and killing it mid-session destroys them.
+  pause
+  exit /b 0
+)
+
 REM --- Rebuild flag (set by sylo-supervisor for "rebuild & restart") ------------
 REM When .sylo-rebuild-flag exists, run npm install + prepare:dev so companion,
 REM broker, and skill-surface changes are applied before launching. The flag is
@@ -51,10 +64,6 @@ if exist ".sylo-rebuild-flag" (
 REM ---------------------------------------------------------------------------
 
 echo.
-echo Stopping leftover Sylo/Electron processes from this repo (if any)...
-powershell -NoProfile -Command "Get-Process electron -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*pi-sylo*' } | Stop-Process -Force -ErrorAction SilentlyContinue"
-timeout /t 2 /nobreak >nul
-
 echo Ensuring Electron binary is installed...
 node scripts\ensure-electron.mjs
 if errorlevel 1 (

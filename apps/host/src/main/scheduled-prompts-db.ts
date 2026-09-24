@@ -22,7 +22,8 @@ import {
 
 const COLUMNS = `id, workspace_id, title, prompt_text, recurrence, start_at, time_local,
   day_of_week, day_of_month, max_runs, run_count, catchup_on_startup, enabled,
-  next_run_at, last_run_at, last_conversation_id, last_run_status, created_at, updated_at`
+  reuse_conversation, next_run_at, last_run_at, last_conversation_id, last_run_status,
+  created_at, updated_at`
 
 function rowFromDb(r: Record<string, unknown>): ScheduledPromptRow {
   return r as unknown as ScheduledPromptRow
@@ -149,6 +150,7 @@ export function createScheduledPrompt(workspaceId: string, input: ScheduledPromp
     run_count: 0,
     catchup_on_startup: input.catchup_on_startup === false ? 0 : 1,
     enabled: input.enabled === false ? 0 : 1,
+    reuse_conversation: input.reuse_conversation === true ? 1 : 0,
     next_run_at: timing.next_run_at,
     last_run_at: null,
     last_conversation_id: null,
@@ -160,8 +162,9 @@ export function createScheduledPrompt(workspaceId: string, input: ScheduledPromp
     `INSERT INTO scheduled_prompts (
         id, workspace_id, title, prompt_text, recurrence, start_at, time_local,
         day_of_week, day_of_month, max_runs, run_count, catchup_on_startup, enabled,
-        next_run_at, last_run_at, last_conversation_id, last_run_status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        reuse_conversation, next_run_at, last_run_at, last_conversation_id, last_run_status,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id,
     row.workspace_id,
@@ -176,6 +179,7 @@ export function createScheduledPrompt(workspaceId: string, input: ScheduledPromp
     row.run_count,
     row.catchup_on_startup,
     row.enabled,
+    row.reuse_conversation,
     row.next_run_at,
     row.last_run_at,
     row.last_conversation_id,
@@ -210,6 +214,10 @@ export function updateScheduledPrompt(id: string, patch: ScheduledPromptPatch): 
         patch.catchup_on_startup
       : existing.catchup_on_startup === 1,
     enabled: patch.enabled !== undefined ? patch.enabled : existing.enabled === 1,
+    reuse_conversation:
+      patch.reuse_conversation !== undefined ?
+        patch.reuse_conversation
+      : existing.reuse_conversation === 1,
   }
 
   const timing = resolveScheduleTiming(merged)
@@ -232,7 +240,7 @@ export function updateScheduledPrompt(id: string, patch: ScheduledPromptPatch): 
     `UPDATE scheduled_prompts SET
         title = ?, prompt_text = ?, recurrence = ?, start_at = ?, time_local = ?,
         day_of_week = ?, day_of_month = ?, max_runs = ?, catchup_on_startup = ?,
-        enabled = ?, next_run_at = ?, updated_at = ?
+        enabled = ?, reuse_conversation = ?, next_run_at = ?, updated_at = ?
        WHERE id = ?`,
   ).run(
     (merged.title ?? '').trim(),
@@ -245,6 +253,7 @@ export function updateScheduledPrompt(id: string, patch: ScheduledPromptPatch): 
     merged.max_runs ?? null,
     merged.catchup_on_startup === false ? 0 : 1,
     enabled,
+    merged.reuse_conversation === true ? 1 : 0,
     next_run_at,
     now,
     trimmed,
@@ -340,6 +349,30 @@ export function recordScheduledPromptRun(
     now,
     trimmed,
   )
+  const row = db.prepare(`SELECT ${COLUMNS} FROM scheduled_prompts WHERE id = ?`).get(trimmed) as
+    | Record<string, unknown>
+    | undefined
+  return row ? rowFromDb(row) : undefined
+}
+
+/**
+ * Maintain only the `last_conversation_id` pointer — no run_count / next_run_at /
+ * last_run_at changes. Used by manual fires ("Run now") which deliberately do not
+ * advance the schedule's run accounting but must still keep the reuse target
+ * current so a later fire (manual or scheduled) continues in the same chat.
+ */
+export function recordScheduledPromptConversation(
+  id: string,
+  conversationId: string,
+): ScheduledPromptRow | undefined {
+  const trimmed = id.trim()
+  const cid = conversationId.trim()
+  if (!trimmed || !cid) return undefined
+  const db = findScheduleDbForId(trimmed)
+  if (!db) return undefined
+  db.prepare(
+    'UPDATE scheduled_prompts SET last_conversation_id = ?, updated_at = ? WHERE id = ?',
+  ).run(cid, Date.now(), trimmed)
   const row = db.prepare(`SELECT ${COLUMNS} FROM scheduled_prompts WHERE id = ?`).get(trimmed) as
     | Record<string, unknown>
     | undefined

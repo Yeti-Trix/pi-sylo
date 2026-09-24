@@ -31,6 +31,7 @@ type ScheduledPromptRow = {
   run_count: number
   catchup_on_startup: number
   enabled: number
+  reuse_conversation: number
   next_run_at: number
   last_run_at: number | null
   last_conversation_id: string | null
@@ -83,6 +84,7 @@ const emptyForm = () => ({
   max_runs: '',
   catchup_on_startup: true,
   enabled: true,
+  reuse_conversation: false,
 })
 
 function promptPreview(text: string, maxLen = 160): string {
@@ -172,6 +174,8 @@ function ScheduleRow({
         <div className={cn(mutedText, 'text-[0.78rem]')}>
           {!row.enabled ? 'Disabled · ' : ''}
           {row.catchup_on_startup ? 'Catchup on startup' : 'No startup catchup'}
+          {' · '}
+          {row.reuse_conversation === 1 ? 'Same chat' : 'New chat'}
         </div>
         <p className="m-0 whitespace-pre-wrap text-[0.82rem] text-text-secondary">{row.prompt_text}</p>
         {row.last_conversation_id ?
@@ -245,6 +249,7 @@ export function SchedulesPanel({
       max_runs: row.max_runs != null ? String(row.max_runs) : '',
       catchup_on_startup: row.catchup_on_startup === 1,
       enabled: row.enabled === 1,
+      reuse_conversation: row.reuse_conversation === 1,
     })
     setError(null)
   }
@@ -264,6 +269,7 @@ export function SchedulesPanel({
       max_runs: max_runs != null && Number.isFinite(max_runs) ? max_runs : null,
       catchup_on_startup: form.catchup_on_startup,
       enabled: form.enabled,
+      reuse_conversation: form.reuse_conversation,
     }
   }, [form])
 
@@ -447,6 +453,19 @@ export function SchedulesPanel({
               onChange={(e) => setForm((f) => ({ ...f, max_runs: e.target.value }))}
               placeholder="e.g. 10"
             />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className={fieldLabel}>Chat per run</span>
+            <select
+              className={select}
+              value={form.reuse_conversation ? '1' : '0'}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, reuse_conversation: e.target.value === '1' }))
+              }
+            >
+              <option value="0">New chat each run</option>
+              <option value="1">Continue in same chat</option>
+            </select>
           </label>
         </div>
         <div className="flex flex-wrap gap-4 text-[0.82rem]">

@@ -1,6 +1,6 @@
 ---
 name: sylo-scheduler
-description: Create and manage workspace-scoped scheduled prompts that start new chats automatically.
+description: Create and manage workspace-scoped scheduled prompts that fire on a schedule (new chat per run by default, or one persistent chat).
 ---
 
 # Scheduled prompts
@@ -19,7 +19,7 @@ Use when the operator wants recurring or one-shot prompts in the **current works
 ## Rules
 
 - Times are **local timezone** (operator machine).
-- Each fire starts a **new chat** with the prompt text.
+- Each fire starts a **new chat** by default. `reuse_conversation: true` instead continues every fire in one persistent chat (created on first fire; if that chat is later deleted or archived, the next fire starts a fresh chat and continues there).
 - `catchup_on_startup` (default true): if Sylo was closed when a run was due, fire **once** on next startup (not once per missed interval).
 - `max_runs`: omit for indefinite; set a number to auto-complete.
 - Sylo must be **running** for schedules to fire.
