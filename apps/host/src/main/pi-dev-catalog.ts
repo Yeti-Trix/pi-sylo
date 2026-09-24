@@ -98,14 +98,24 @@ const PI_DEV_PACKAGES = 'https://pi.dev/packages'
 const NPM_SEARCH = 'https://registry.npmjs.org/-/v1/search'
 const SYLO_PINNED_CAP = 8
 
+const NAMED_ENTITIES: Record<string, string> = {
+  '&amp;': '&',
+  '&lt;': '<',
+  '&gt;': '>',
+  '&quot;': '"',
+  '&apos;': "'",
+  '&#39;': "'",
+  '&#x27;': "'",
+}
+
+/** Decode the handful of entities pi.dev emits in one tokenizer pass — a
+ *  sequential replace chain double-decodes input like `&amp;lt;` (→ `<`)
+ *  instead of the intended literal text `&lt;`. */
 function decodeHtmlEntities(s: string): string {
-  return s
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#x27;/gi, "'")
+  return s.replace(/&(?:amp|lt|gt|quot|apos|#39|#x27);/gi, (m) => {
+    const mapped = NAMED_ENTITIES[m.toLowerCase()]
+    return mapped !== undefined ? mapped : m
+  })
 }
 
 function buildCatalogUrl(q: PiDevCatalogQuery): string {
@@ -306,7 +316,15 @@ export function parsePiDevPackagesHtml(html: string, sourceUrl: string): PiDevCa
     const installFull = body.match(/data-copy-text="pi install (npm:[^"]+)"/)?.[1]
     if (!installFull) continue
     const descRaw =
-      body.match(/<p class="packages-desc">([\s\S]*?)<\/p>/)?.[1]?.replace(/<[^>]+>/g, '') ?? ''
+      body.match(/<p class="packages-desc">([\s\S]*?)<\/p>/)?.[1] ?? ''
+    // Strip tags to a fixed point: a single pass over multi-character
+    // patterns can recombine leftovers into a new tag (`<scr<script>ipt>`).
+    let descStripped = descRaw
+    let prev: string
+    do {
+      prev = descStripped
+      descStripped = descStripped.replace(/<[^>]*>/g, '')
+    } while (descStripped !== prev)
     const downloads = Number(attrs.match(/\bdata-package-downloads="(\d+)"/)?.[1] ?? '0')
     const publishedMs = Number(attrs.match(/\bdata-package-date="(\d+)"/)?.[1] ?? '0')
     packages.push({

@@ -1829,7 +1829,8 @@ def _cmd_plc_download(params):
         
         dest = params.get("dest", "")
         if not dest:
-            dest = tempfile.mktemp(prefix="plc_", suffix=os.path.splitext(src)[1] or ".bin")
+            fd, dest = tempfile.mkstemp(prefix="plc_", suffix=os.path.splitext(src)[1] or ".bin")
+            os.close(fd)  # close immediately; file is used by path below
         
         overwrite = str(params.get("overwrite", "1")).lower() in ("1", "true", "yes")
         
@@ -2166,7 +2167,8 @@ def _cmd_plc_log(params):
         if not hasattr(online_dev, 'upload_file'):
             return {"ok": False, "error": "Online device has no upload_file method"}
 
-        tmp = tempfile.mktemp(suffix=".log")
+        fd, tmp = tempfile.mkstemp(suffix=".log")
+        os.close(fd)  # secure temp file: create + close fd, use by path (mktemp is racy)
         try:
             online_dev.upload_file(log_file, tmp, True)
         except Exception as e:
@@ -2302,7 +2304,8 @@ def _cmd_app_crc(params):
         if not hasattr(online_dev, 'upload_file'):
             result["crc_note"] = "upload_file not available"
         else:
-            tmp = tempfile.mktemp(suffix=".crc")
+            fd, tmp = tempfile.mkstemp(suffix=".crc")
+            os.close(fd)  # secure temp file (mktemp is racy)
             try:
                 # Find the .crc file name
                 crc_filename = "Application.crc"
@@ -2540,7 +2543,8 @@ def _cmd_compare_crc(params):
         app_dir = params.get('app_dir', "PlcLogic/Application")
         
         # 1. Download PLC CRC
-        tmp_plc = tempfile.mktemp(suffix=".crc")
+        fd, tmp_plc = tempfile.mkstemp(suffix=".crc")
+        os.close(fd)  # secure temp file (mktemp is racy)
         try:
             online_dev.upload_file(app_dir + "/Application.crc", tmp_plc, True)
             with open(tmp_plc, "rb") as f:

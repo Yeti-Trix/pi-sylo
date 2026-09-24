@@ -150,6 +150,14 @@ function mdEscapeInline(text: string): string {
   return text.replace(/\r/g, '')
 }
 
+/** Make arbitrary text safe inside a markdown table cell. Backslash must be
+ *  escaped FIRST (before the pipe it could be shielding), then pipes, then
+ *  flatten newlines — otherwise a literal `\|` in the input would survive as
+ *  an unescaped pipe after the pipe substitution. */
+function escapeTableCell(text: string): string {
+  return text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ')
+}
+
 function orderSegments(segments: AssistantSegment[]): AssistantSegment[] {
   return segments.slice().sort((a, b) => {
     const ao = a.textOffset ?? Number.POSITIVE_INFINITY
@@ -341,7 +349,7 @@ function buildAssistantWorkflowAppendix(input: {
     lines.push('| Interval | Duration | Stage |')
     lines.push('| --- | ---: | --- |')
     for (const g of timingAudit.gaps) {
-      const detail = g.detail.replace(/\|/g, '\\|').replace(/\n/g, ' ')
+      const detail = escapeTableCell(g.detail)
       lines.push(`| ${g.label} | ${formatDurationMs(g.ms)} | ${g.stage.replace(/_/g, ' ')} |`)
       lines.push(`| ↳ _${detail}_ | | |`)
     }
@@ -353,7 +361,7 @@ function buildAssistantWorkflowAppendix(input: {
     lines.push('| Tool | Args | Wall duration | Status |')
     lines.push('| --- | --- | ---: | --- |')
     for (const run of toolRuns) {
-      const args = summarizeToolArgsPreview(run.args, 2000).replace(/\|/g, '\\|').replace(/\n/g, ' ')
+      const args = escapeTableCell(summarizeToolArgsPreview(run.args, 2000))
       const dur = run.durationMs !== null ? formatDurationMs(run.durationMs) : 'still running'
       const st = run.isError === true ? 'error' : run.durationMs !== null ? 'ok' : 'open'
       lines.push(`| \`${run.toolName}\` | ${args} | ${dur} | ${st} |`)

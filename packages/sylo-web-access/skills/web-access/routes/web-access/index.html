@@ -127,6 +127,10 @@
             var div = document.createElement('div')
             div.className = 'sylo-run'
             var title = r.tool === 'search' ? r.query || '(search)' : r.url || '(fetch)'
+            // NOTE: every value interpolated into innerHTML below is escaped —
+            // run rows echo remote content (urls, tiers, statuses).
+            var statusHtml = escapeHtml(r.status)
+            var toolHtml = escapeHtml(r.tool)
             var scores = ''
             if (r.rank_scores_json) {
               try {
@@ -137,7 +141,7 @@
                     sc
                       .slice(0, 6)
                       .map(function (s) {
-                        return (s.score != null ? s.score.toFixed(2) : '?') + ' ' + (s.url || '').slice(0, 48)
+                        return (s.score != null ? s.score.toFixed(2) : '?') + ' ' + escapeHtml((s.url || '').slice(0, 48))
                       })
                       .join('; ') +
                     '</p>'
@@ -152,7 +156,7 @@
                     '<p class="sylo-surface-muted">Fetches: ' +
                     fx
                       .map(function (f) {
-                        return (f.tier || '?') + ' ' + (f.url || '').slice(0, 40) + (f.relevant === false ? ' [irrelevant]' : '')
+                        return escapeHtml(f.tier || '?') + ' ' + escapeHtml((f.url || '').slice(0, 40)) + (f.relevant === false ? ' [irrelevant]' : '')
                       })
                       .join('; ') +
                     '</p>'
@@ -160,9 +164,9 @@
             }
             div.innerHTML =
               '<h4><span class="sylo-badge">' +
-              r.status +
+              statusHtml +
               '</span><span class="sylo-badge">' +
-              r.tool +
+              toolHtml +
               '</span> ' +
               escapeHtml(title) +
               '</h4>' +
@@ -199,18 +203,18 @@
       row.style.alignItems = 'center'
       row.innerHTML =
         '<input type="checkbox" data-backend="' +
-        id +
+        escapeHtml(id) +
         '" ' +
         (checked ? 'checked' : '') +
         ' />' +
         '<span>' +
-        label +
+        escapeHtml(label) +
         '</span>' +
         '<button type="button" class="sylo-surface-btn sylo-up" data-id="' +
-        id +
+        escapeHtml(id) +
         '">↑</button>' +
         '<button type="button" class="sylo-surface-btn sylo-down" data-id="' +
-        id +
+        escapeHtml(id) +
         '">↓</button>'
       container.appendChild(row)
     }
@@ -378,6 +382,8 @@
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
     }
 
     loadHistory()

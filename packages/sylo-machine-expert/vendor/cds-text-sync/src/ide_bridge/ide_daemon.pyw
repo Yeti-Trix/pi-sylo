@@ -456,7 +456,8 @@ class DaemonPipeServer(object):
             if target is None:
                 return {"ok": False, "error": "Object not found."}
             import tempfile
-            tmp = tempfile.mktemp(suffix=".xml")
+            fd, tmp = tempfile.mkstemp(suffix=".xml")
+            os.close(fd)  # secure temp file (mktemp is racy)
             try:
                 project.export_native([target], tmp, recursive=False)
                 with io.open(tmp, "r", encoding="utf-8-sig") as f:

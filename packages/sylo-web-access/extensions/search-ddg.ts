@@ -30,7 +30,9 @@ function decodeDdgRedirect(href: string): string {
     const u = new URL(href, 'https://duckduckgo.com')
     const uddg = u.searchParams.get('uddg')
     if (uddg) return decodeURIComponent(uddg)
-    if (u.hostname.endsWith('duckduckgo.com') && u.pathname === '/l/') return ''
+    if ((u.hostname === 'duckduckgo.com' || u.hostname.endsWith('.duckduckgo.com')) && u.pathname === '/l/') {
+      return ''
+    }
     return u.href
   } catch {
     return href.startsWith('http') ? href : ''

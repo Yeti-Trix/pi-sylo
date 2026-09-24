@@ -70,6 +70,25 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload)
 }
 
+/** Log the real error server-side; never reflect error internals to the client. */
+function internalError(res: ServerResponse, status: 400 | 404 | 500 | 501 | 503, e: unknown): void {
+  console.error('[companion]', status, e instanceof Error ? (e.stack ?? e.message) : String(e))
+  json(res, status, { ok: false, error: 'internal_error' })
+}
+
+/** Respond with a thrown error, reflecting ONLY known protocol codes
+ *  (e.g. 'workspace_not_found'); unexpected errors are logged server-side
+ *  and reported generically so internal details never reach the wire. */
+function errorResponse(res: ServerResponse, e: unknown, codes: Record<string, number>): void {
+  const msg = e instanceof Error ? e.message : String(e)
+  const status = codes[msg]
+  if (status !== undefined) {
+    json(res, status, { ok: false, error: msg })
+    return
+  }
+  internalError(res, 500, e)
+}
+
 function readJsonBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
@@ -197,7 +216,7 @@ function createCompanionHandler(opts: {
         })
         res.end(payload)
       } catch (e) {
-        json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
+        internalError(res, 500, e)
       }
       return
     }
@@ -267,7 +286,7 @@ function createCompanionHandler(opts: {
       try {
         json(res, 200, getCompanionHostApi().getBrokerStatus())
       } catch (e) {
-        json(res, 503, { ok: false, error: e instanceof Error ? e.message : String(e) })
+        internalError(res, 503, e)
       }
       return
     }
@@ -277,7 +296,7 @@ function createCompanionHandler(opts: {
       try {
         json(res, 200, await getCompanionHostApi().listModels())
       } catch (e) {
-        json(res, 503, { ok: false, error: e instanceof Error ? e.message : String(e) })
+        internalError(res, 503, e)
       }
       return
     }
@@ -291,7 +310,7 @@ function createCompanionHandler(opts: {
           activeWorkspaceId: api.getActiveWorkspaceId(),
         })
       } catch (e) {
-        json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
+        internalError(res, 500, e)
       }
       return
     }
@@ -308,8 +327,7 @@ function createCompanionHandler(opts: {
         getCompanionHostApi().setActiveWorkspaceId(workspaceId)
         json(res, 200, { ok: true, activeWorkspaceId: workspaceId })
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        json(res, msg === 'workspace_not_found' ? 404 : 500, { ok: false, error: msg })
+        errorResponse(res, e, { workspace_not_found: 404 })
       }
       return
     }
@@ -323,7 +341,7 @@ function createCompanionHandler(opts: {
         const conversationId = api.findLatestEmptyConversation(workspaceId) ?? null
         json(res, 200, { conversationId, workspaceId })
       } catch (e) {
-        json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
+        internalError(res, 500, e)
       }
       return
     }
@@ -343,7 +361,7 @@ function createCompanionHandler(opts: {
           workspaceId,
         })
       } catch (e) {
-        json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
+        internalError(res, 500, e)
       }
       return
     }
@@ -361,7 +379,7 @@ function createCompanionHandler(opts: {
                 const conversation = api.createConversation(title, workspaceId)
         json(res, 201, { conversation })
       } catch (e) {
-        json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
+        internalError(res, 500, e)
       }
       return
     }
@@ -376,7 +394,7 @@ function createCompanionHandler(opts: {
         getCompanionHostApi().setConversationTitle(conversationId, title)
         json(res, 200, { ok: true, conversationId, title: title.trim() })
       } catch (e) {
-        json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
+        internalError(res, 500, e)
       }
       return
     }
@@ -405,7 +423,7 @@ function createCompanionHandler(opts: {
         })
         json(res, 200, { ...result, conversationId })
       } catch (e) {
-        json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
+        internalError(res, 500, e)
       }
       return
     }
@@ -420,7 +438,7 @@ function createCompanionHandler(opts: {
         getCompanionHostApi().setConversationArchived(conversationId, archived)
         json(res, 200, { ok: true, conversationId, archived })
       } catch (e) {
-        json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
+        internalError(res, 500, e)
       }
       return
     }
@@ -433,7 +451,7 @@ function createCompanionHandler(opts: {
         const removed = getCompanionHostApi().deleteConversation(conversationId)
         json(res, removed ? 200 : 404, { ok: removed })
       } catch (e) {
-        json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
+        internalError(res, 500, e)
       }
       return
     }
@@ -445,7 +463,7 @@ function createCompanionHandler(opts: {
         const conversationId = decodeURIComponent(messagesMatch[1] ?? '')
         json(res, 200, { messages: getCompanionHostApi().listMessages(conversationId) })
       } catch (e) {
-        json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
+        internalError(res, 500, e)
       }
       return
     }
@@ -461,7 +479,7 @@ function createCompanionHandler(opts: {
         const result = await getCompanionHostApi().sendChat(conversationId, text, attachments)
         json(res, 200, result)
       } catch (e) {
-        json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
+        internalError(res, 500, e)
       }
       return
     }
@@ -483,9 +501,7 @@ function createCompanionHandler(opts: {
         const written = writeCompanionUpload(userDataPath, buf, name)
         json(res, 201, written)
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        const status = msg === 'file_too_large' || msg === 'empty_file' ? 400 : 500
-        json(res, status, { ok: false, error: msg })
+        errorResponse(res, e, { file_too_large: 400, empty_file: 400 })
       }
       return
     }
@@ -508,7 +524,7 @@ function createCompanionHandler(opts: {
           }),
         )
       } catch (e) {
-        json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
+        internalError(res, 500, e)
       }
       return
     }
@@ -520,7 +536,7 @@ function createCompanionHandler(opts: {
         const conversationId = decodeURIComponent(abortMatch[1] ?? '')
         json(res, 200, await getCompanionHostApi().abortChat(conversationId))
       } catch (e) {
-        json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
+        internalError(res, 500, e)
       }
       return
     }
@@ -535,7 +551,7 @@ function createCompanionHandler(opts: {
         const attachments = filterCompanionSendAttachments(userDataPath, body.attachments)
         json(res, 200, await getCompanionHostApi().steerChat(conversationId, text, attachments))
       } catch (e) {
-        json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
+        internalError(res, 500, e)
       }
       return
     }
@@ -550,7 +566,7 @@ function createCompanionHandler(opts: {
         const attachments = filterCompanionSendAttachments(userDataPath, body.attachments)
         json(res, 200, await getCompanionHostApi().deliverQueuedChat(conversationId, text, attachments))
       } catch (e) {
-        json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
+        internalError(res, 500, e)
       }
       return
     }
@@ -599,9 +615,7 @@ function createCompanionHandler(opts: {
         const manifest = await getCompanionHostApi().personalManifest()
         json(res, 200, manifest ?? null)
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        const status = msg === 'personal_plugin_unavailable' ? 501 : 500
-        json(res, status, { ok: false, error: msg })
+        errorResponse(res, e, { personal_plugin_unavailable: 501 })
       }
       return
     }
@@ -618,10 +632,7 @@ function createCompanionHandler(opts: {
         const result = await getCompanionHostApi().personalRpc(op, body.payload ?? {})
         json(res, 200, { ok: true, result })
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        const status =
-          msg === 'unknown_op' ? 400 : msg === 'personal_plugin_unavailable' ? 501 : 500
-        json(res, status, { ok: false, error: msg })
+        errorResponse(res, e, { unknown_op: 400, personal_plugin_unavailable: 501 })
       }
       return
     }
