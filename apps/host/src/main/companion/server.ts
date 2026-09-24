@@ -81,10 +81,13 @@ function internalError(res: ServerResponse, status: 400 | 404 | 500 | 501 | 503,
  *  and reported generically so internal details never reach the wire. */
 function errorResponse(res: ServerResponse, e: unknown, codes: Record<string, number>): void {
   const msg = e instanceof Error ? e.message : String(e)
-  const status = codes[msg]
-  if (status !== undefined) {
-    json(res, status, { ok: false, error: msg })
-    return
+  for (const [code, status] of Object.entries(codes)) {
+    // Respond with the static code literal — never the raw e.message — so no
+    // error internals reach the wire even when a known code matches.
+    if (msg === code) {
+      json(res, status, { ok: false, error: code })
+      return
+    }
   }
   internalError(res, 500, e)
 }

@@ -171,9 +171,9 @@
               escapeHtml(title) +
               '</h4>' +
               '<p class="sylo-surface-muted">' +
-              fmtTime(r.started_at) +
+              escapeHtml(fmtTime(r.started_at)) +
               (r.search_tier ? ' · search ' + escapeHtml(r.search_tier) : '') +
-              (r.rank_kept != null ? ' · kept ' + r.rank_kept + '/' + (r.rank_kept + r.rank_dropped) : '') +
+              (r.rank_kept != null ? ' · kept ' + escapeHtml(r.rank_kept) + '/' + escapeHtml(r.rank_kept + r.rank_dropped) : '') +
               '</p>' +
               scores +
               fetches +
