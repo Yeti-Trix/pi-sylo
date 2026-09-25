@@ -5,6 +5,13 @@ import React, { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 const PersonalSettingsCard = lazy(() => import('./PersonalSettingsCard'))
 import { SYLO_DEFAULT_MODEL_ID } from '../../../shared/sylo-model-defaults'
 import {
+  clampMaxConcurrentTurns,
+  DEFAULT_MAX_CONCURRENT_TURNS,
+  MAX_CONCURRENT_TURNS_LIMIT,
+  MIN_CONCURRENT_TURNS,
+  SYLO_MAX_CONCURRENT_TURNS_PREF,
+} from '../../../shared/concurrent-turns'
+import {
   CHATGPT_CODEX_DEFAULT_MODEL,
   CHATGPT_CODEX_MODELS,
   CHATGPT_CODEX_PROVIDER,
@@ -178,6 +185,7 @@ export function SettingsPanel({
     resolvedPiAgentDir: string
         canonicalWorkspaceProject: string
     concurrentTurns: boolean
+    maxConcurrentTurns: number
     chatOnly: boolean
   }
   activeWorkspace: {
@@ -189,6 +197,9 @@ export function SettingsPanel({
   const [modelId, setModelId] = useState(diagnostics.modelId)
     const [modelProvider, setModelProvider] = useState(diagnostics.modelProvider)
   const [concurrentTurns, setConcurrentTurns] = useState(diagnostics.concurrentTurns)
+  const [maxConcurrentTurns, setMaxConcurrentTurns] = useState(diagnostics.maxConcurrentTurns)
+  /** Free-text draft for the number input — persisted only when it parses. */
+  const [maxConcurrentDraft, setMaxConcurrentDraft] = useState(String(diagnostics.maxConcurrentTurns))
   const [chatOnly, setChatOnly] = useState(diagnostics.chatOnly)
   const [allowProjectAgents, setAllowProjectAgents] = useState(false)
   const [subagentProvider, setSubagentProvider] = useState('')
@@ -363,8 +374,10 @@ export function SettingsPanel({
         setModelId(diagnostics.modelId)
     setModelProvider(diagnostics.modelProvider)
     setConcurrentTurns(diagnostics.concurrentTurns)
+    setMaxConcurrentTurns(diagnostics.maxConcurrentTurns)
+    setMaxConcurrentDraft(String(diagnostics.maxConcurrentTurns))
     setChatOnly(diagnostics.chatOnly)
-  }, [diagnostics.modelId, diagnostics.modelProvider, diagnostics.concurrentTurns, diagnostics.chatOnly])
+  }, [diagnostics.modelId, diagnostics.modelProvider, diagnostics.concurrentTurns, diagnostics.maxConcurrentTurns, diagnostics.chatOnly])
 
   useEffect(() => {
     void (async () => {
@@ -1473,13 +1486,45 @@ export function SettingsPanel({
                 .then(onChanged)
             }}
           />
-          <span>Allow concurrent agent turns across conversations (up to 4 in flight)</span>
+          <span>Allow concurrent agent turns across conversations</span>
         </label>
         <p className={leadText}>
           When enabled, you can send in another chat while a cloud model is still working in the
-                    current one. Each extra turn uses its own Pi broker process. Same chat still runs one turn
+          current one. Each extra turn uses its own Pi broker process. Same chat still runs one turn
           at a time (use Enter to queue or Ctrl+Enter to steer).
         </p>
+        {concurrentTurns ?
+          <label className="mt-3 flex flex-col gap-1">
+            <span className={fieldLabel}>Max concurrent turns</span>
+            <input
+              className={cn(input, 'max-w-[10rem]')}
+              type="number"
+              min={MIN_CONCURRENT_TURNS}
+              max={MAX_CONCURRENT_TURNS_LIMIT}
+              step={1}
+              value={maxConcurrentDraft}
+              onChange={(e) => {
+                const draft = e.target.value
+                setMaxConcurrentDraft(draft)
+                const parsed = Number.parseInt(draft, 10)
+                if (Number.isFinite(parsed)) {
+                  const clamped = clampMaxConcurrentTurns(parsed)
+                  setMaxConcurrentTurns(clamped)
+                  void window.sylo.prefs
+                    .set(SYLO_MAX_CONCURRENT_TURNS_PREF, clamped)
+                    .then(onChanged)
+                }
+              }}
+              onBlur={() => setMaxConcurrentDraft(String(maxConcurrentTurns))}
+            />
+            <span className={caption}>
+              How many agent turns may run at once across conversations ({MIN_CONCURRENT_TURNS}–
+              {MAX_CONCURRENT_TURNS_LIMIT}, default {DEFAULT_MAX_CONCURRENT_TURNS}). Each in-flight
+              turn beyond the first spawns its own Pi broker process, so very high numbers eat RAM.
+              Out-of-range or blank input snaps back to the last valid value.
+            </span>
+          </label>
+        : null}
       </section>
 
       <Suspense fallback={null}>

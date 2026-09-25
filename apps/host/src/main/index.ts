@@ -184,6 +184,7 @@ import {
   turnBrokerPool,
   type OverflowBrokerSlot,
 } from './concurrent-broker-pool.js'
+import { DEFAULT_MAX_CONCURRENT_TURNS, SYLO_MAX_CONCURRENT_TURNS_PREF } from '../shared/concurrent-turns.js'
 import { BrokerSupervisor, type BrokerImageContent, type BrokerOutMessage, type BrokerResolvedModel } from './broker-supervisor.js'
 import type { SystemPromptStats } from '../shared/system-prompt-stats.js'
 import { encodeImageAttachmentsForPi } from './image-attachments.js'
@@ -1856,7 +1857,10 @@ function concurrentTurnsEnabled(): boolean {
 }
 
 function maxConcurrentTurns(): number {
-  return turnBrokerPool.maxConcurrent(concurrentTurnsEnabled())
+  return turnBrokerPool.maxConcurrent(
+    concurrentTurnsEnabled(),
+    db.getPref<number>(SYLO_MAX_CONCURRENT_TURNS_PREF, DEFAULT_MAX_CONCURRENT_TURNS),
+  )
 }
 
 function hasPendingTurn(turnId: string): boolean {

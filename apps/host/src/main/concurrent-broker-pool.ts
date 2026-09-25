@@ -1,4 +1,8 @@
 import type { BrokerSupervisor } from './broker-supervisor.js'
+import {
+  clampMaxConcurrentTurns,
+  DEFAULT_MAX_CONCURRENT_TURNS,
+} from '../shared/concurrent-turns.js'
 
 export type OverflowBrokerSlot = {
   supervisor: BrokerSupervisor
@@ -7,15 +11,16 @@ export type OverflowBrokerSlot = {
   readyWaiters: Array<(ok: boolean) => void>
 }
 
-/** Max in-flight agent turns when concurrent mode is enabled. */
-export const MAX_CONCURRENT_TURNS_WHEN_ENABLED = 4
-
 export class TurnBrokerPool {
   readonly overflowBrokers: OverflowBrokerSlot[] = []
   readonly turnBrokerByTurnId = new Map<string, BrokerSupervisor>()
 
-  maxConcurrent(concurrentEnabled: boolean): number {
-    return concurrentEnabled ? MAX_CONCURRENT_TURNS_WHEN_ENABLED : 1
+  /**
+   * Max in-flight agent turns. Concurrent mode off ⇒ 1. On ⇒ the user's
+   * configured max (clamped; default when unset or out of range).
+   */
+  maxConcurrent(concurrentEnabled: boolean, configuredMax = DEFAULT_MAX_CONCURRENT_TURNS): number {
+    return concurrentEnabled ? clampMaxConcurrentTurns(configuredMax) : 1
   }
 
   isSupervisorBusy(

@@ -24,6 +24,10 @@ import {
 } from './exportChatMarkdown'
 // import { WorkflowModal } from './WorkflowModal'
 import { SYLO_DEFAULT_MODEL_ID, SYLO_DEFAULT_MODEL_PROVIDER } from '../../shared/sylo-model-defaults'
+import {
+  DEFAULT_MAX_CONCURRENT_TURNS,
+  SYLO_MAX_CONCURRENT_TURNS_PREF,
+} from '../../shared/concurrent-turns'
 import type { AppUpdateStatus } from '../../shared/app-update-types'
 import { SettingsPanel } from './panels/SettingsPanel'
 import { normalizeOllamaOriginUi } from './panels/ollama-ui'
@@ -1036,6 +1040,7 @@ export function App(): React.ReactElement {
     resolvedPiAgentDir: '',
         canonicalWorkspaceProject: '',
     concurrentTurns: false,
+    maxConcurrentTurns: 4,
     chatOnly: false,
     strikes: 0,
     skillSurfaceSummary: '',
@@ -1147,6 +1152,10 @@ export function App(): React.ReactElement {
         const canonicalWorkspaceProject = await window.sylo.paths.canonicalWorkspaceProject()
     const resolvedHostPiCwd = await window.sylo.paths.hostPiCwd()
     const concurrentTurns = (await window.sylo.prefs.get('sylo.chat.concurrent_turns', false)) as boolean
+    const maxConcurrentTurns = (await window.sylo.prefs.get(
+      SYLO_MAX_CONCURRENT_TURNS_PREF,
+      DEFAULT_MAX_CONCURRENT_TURNS,
+    )) as number
     const chatOnly = (await window.sylo.prefs.get('sylo.chat_only', false)) as boolean
     const strikes = (await window.sylo.prefs.get('sylo.boot_strikes', 0)) as number
     const surf = SYLO_SKILL_SURFACE_CAPABILITY_DESCRIPTOR
@@ -1161,6 +1170,7 @@ export function App(): React.ReactElement {
       resolvedPiAgentDir,
             canonicalWorkspaceProject,
       concurrentTurns,
+      maxConcurrentTurns,
       chatOnly,
       strikes,
       skillSurfaceSummary,
