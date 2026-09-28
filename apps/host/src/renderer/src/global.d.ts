@@ -655,6 +655,13 @@ declare global {
         prepareConversation: (
           conversationId: string,
         ) => Promise<{ ok: true } | { ok: false; error: string }>
+        /** Operator "Compact now" (chat footer) — manual compaction of this conversation's context. */
+        compactNow: (
+          conversationId: string,
+        ) => Promise<
+          | { ok: true; summary?: string; tokensBefore?: number; tokensAfter?: number }
+          | { ok: false; error: string }
+        >
         getStatus: () => Promise<{
           ready: boolean
           safeMode: boolean
@@ -953,6 +960,34 @@ declare global {
         ) => Promise<{ ok: true } | { ok: false; error: string }>
         /** Providers with a working login — chat / subagent pickers hide the rest. */
         configuredProviders: () => Promise<string[]>
+      }
+      /** Per-model compaction trigger (Settings → Model (Pi) → Compaction). */
+      compaction: {
+        state: (
+          provider: string,
+          modelId: string,
+        ) => Promise<
+          | {
+              ok: true
+              provider: string
+              modelId: string
+              /** models.json-declared context window; null → Pi falls back to 128,000. */
+              contextWindow: number | null
+              usesFallbackWindow: boolean
+              piDefaultReserveTokens: number
+              defaultPct: number
+              overridePct: number | null
+              effectivePct: number
+              effectiveReserveTokens: number
+              autoCompactionEnabled: boolean
+            }
+          | { ok: false; error: string }
+        >
+        /** Push the saved per-model trigger to live brokers (no restart needed). */
+        apply: (
+          provider: string,
+          modelId: string,
+        ) => Promise<{ ok: true } | { ok: false; error: string }>
       }
       /** Provider API keys — stored in Pi's `~/.pi/agent/auth.json` (masked reads). */
       piAuth: {

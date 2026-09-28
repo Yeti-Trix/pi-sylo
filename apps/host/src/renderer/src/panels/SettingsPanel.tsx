@@ -5,6 +5,13 @@ import React, { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 const PersonalSettingsCard = lazy(() => import('./PersonalSettingsCard'))
 import { SYLO_DEFAULT_MODEL_ID } from '../../../shared/sylo-model-defaults'
 import {
+  compactionModelKey,
+  PI_DEFAULT_COMPACTION_RESERVE_TOKENS,
+  PI_FALLBACK_CONTEXT_WINDOW_TOKENS,
+  reserveTokensForTriggerPct,
+  SYLO_COMPACTION_RESERVE_PREF,
+} from '../../../shared/sylo-compaction-settings'
+import {
   clampMaxConcurrentTurns,
   DEFAULT_MAX_CONCURRENT_TURNS,
   MAX_CONCURRENT_TURNS_LIMIT,
@@ -32,6 +39,8 @@ import {
 } from '../../../shared/pi-builtin-tools'
 import { useConfiguredProviders } from '../chat/useConfiguredProviders'
 import { invalidateSubagentNames } from '../chat/useSubagentNames'
+import { ChatGptSignIn } from './ChatGptSignIn'
+import { ManageProvidersModal } from './ManageProvidersModal'
 import { cn } from '../lib/cn'
 import { normalizeOllamaOriginUi, OllamaModelSelect } from './ollama-ui'
 import { WeeklySweepCard } from './WeeklySweepCard'
@@ -76,6 +85,37 @@ async function revealDirectory(
 }
 
 type SubagentAgentInfo = Awaited<ReturnType<typeof window.sylo.tasks.agents>>[number]
+
+// --- Compaction trigger (per model) helpers ---------------------------------
+
+/** Format a percentage for display/draft without trailing zeros (91.8 → "91.8", 85 → "85"). */
+function formatCompactionPct(pct: number): string {
+  return String(Math.round(pct * 100) / 100)
+}
+
+/** Parse the trigger draft: number in (0, 100], rounded to 2dp; null when invalid. */
+function parseCompactionDraftPct(draft: string): number | null {
+  const raw = Number(draft.trim())
+  if (!Number.isFinite(raw) || raw <= 0 || raw > 100) return null
+  return Math.round(raw * 100) / 100
+}
+
+function isCompactionDraftValid(draft: string): boolean {
+  return parseCompactionDraftPct(draft) != null
+}
+
+/** Current per-model compaction overrides from the Sylo prefs store. */
+async function readCompactionOverrides(): Promise<Record<string, number>> {
+  const raw = (await window.sylo.prefs.get(SYLO_COMPACTION_RESERVE_PREF, {})) as unknown
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const out: Record<string, number> = {}
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 100) {
+      out[key] = Math.round(value * 100) / 100
+    }
+  }
+  return out
+}
 
 /** Provider + model pair and optional thinking, shared by the all-subagents default and each per-agent override. */
 function SubagentModelFields({
@@ -251,6 +291,14 @@ export function SettingsPanel({
     { ok: true }
   >['status']
   const [contextStatus, setContextStatus] = useState<OllamaContextStatus | null>(null)
+  type CompactionStateOk = Extract<
+    Awaited<ReturnType<typeof window.sylo.compaction.state>>,
+    { ok: true }
+  >
+  const [compactionState, setCompactionState] = useState<CompactionStateOk | null>(null)
+  /** Free-text draft of the compaction trigger (% of context window) — persisted only when valid. */
+  const [compactionDraft, setCompactionDraft] = useState('')
+  const [compactionBusy, setCompactionBusy] = useState(false)
   const [imageModelId, setImageModelId] = useState('')
   // OpenRouter (free tier): API key (auth.json) + live free-model list.
   const [orKeyInput, setOrKeyInput] = useState('')
@@ -261,13 +309,7 @@ export function SettingsPanel({
   const [orModelsSource, setOrModelsSource] = useState<'live' | 'fallback' | null>(null)
   const [orModelsLoading, setOrModelsLoading] = useState(false)
   const [orKeySaving, setOrKeySaving] = useState(false)
-  const [chatgptConnected, setChatgptConnected] = useState(false)
-  const [chatgptAccountId, setChatgptAccountId] = useState<string | null>(null)
-  const [chatgptBusy, setChatgptBusy] = useState(false)
-  const [chatgptError, setChatgptError] = useState<string | null>(null)
-  const [chatgptDeviceCode, setChatgptDeviceCode] = useState('')
-  const [chatgptDeviceUri, setChatgptDeviceUri] = useState('')
-  const [chatgptProgress, setChatgptProgress] = useState<string | null>(null)
+  const [providersModalOpen, setProvidersModalOpen] = useState(false)
   const [companionEnabled, setCompanionEnabled] = useState(false)
   const [companionBind, setCompanionBind] = useState<'loopback' | 'lan'>('loopback')
   const [companionPort, setCompanionPort] = useState(9241)
@@ -543,82 +585,92 @@ export function SettingsPanel({
     void refreshOrModels()
   }, [modelProvider, refreshOrAuth, refreshOrModels])
 
-  const refreshChatgptStatus = useCallback(async () => {
-    const st = await window.sylo.chatgpt.status()
-    setChatgptConnected(st.connected)
-    setChatgptAccountId(st.accountId)
-  }, [])
-
+  // Compaction trigger (per model): refetch whenever the drafted provider/model changes
+  // so the card always previews the selected model's default and any saved override.
+  const reloadCompactionState = useCallback(async () => {
+    const st = await window.sylo.compaction.state(modelProvider.trim(), modelId.trim())
+    if (!st.ok) return
+    setCompactionState(st)
+    setCompactionDraft(formatCompactionPct(st.effectivePct))
+  }, [modelProvider, modelId])
   useEffect(() => {
-    if (modelProvider !== CHATGPT_CODEX_PROVIDER) return
-    void refreshChatgptStatus()
-  }, [modelProvider, refreshChatgptStatus])
+    let cancelled = false
+    void (async () => {
+      const st = await window.sylo.compaction.state(modelProvider.trim(), modelId.trim())
+      if (cancelled || !st.ok) return
+      setCompactionState(st)
+      setCompactionDraft(formatCompactionPct(st.effectivePct))
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [modelProvider, modelId])
 
-  useEffect(() => {
-    return window.sylo.chatgpt.onLoginEvent((event) => {
-      if (event.type === 'device_code' && event.userCode && event.verificationUri) {
-        setChatgptDeviceCode(event.userCode)
-        setChatgptDeviceUri(event.verificationUri)
-        setChatgptProgress('Waiting for you to approve in the browser…')
-        setChatgptError(null)
-      } else if (event.type === 'auth_url' && event.url) {
-        setChatgptDeviceUri(event.url)
-        setChatgptProgress(event.instructions || 'Complete login in your browser…')
-      } else if ((event.type === 'progress' || event.type === 'info') && event.message) {
-        setChatgptProgress(event.message)
-      }
-    })
-  }, [])
+  const compactionKey = compactionModelKey(modelProvider.trim(), modelId.trim())
+  const compactionDraftValid = isCompactionDraftValid(compactionDraft)
+  const compactionHasOverride = compactionState?.overridePct != null
 
-  const startChatgptLogin = useCallback(async () => {
-    setChatgptBusy(true)
-    setChatgptError(null)
-    setChatgptDeviceCode('')
-    setChatgptDeviceUri('')
-    setChatgptProgress('Starting ChatGPT sign-in…')
+  const saveCompactionOverride = async () => {
+    if (compactionBusy) return
+    const pct = parseCompactionDraftPct(compactionDraft)
+    if (pct == null) return
+    setCompactionBusy(true)
     try {
-      const r = await window.sylo.chatgpt.login()
-      if (r.ok) {
-        setChatgptConnected(true)
-        setChatgptProgress(null)
-        await refreshChatgptStatus()
-        if (modelId.trim() === '') setModelId(CHATGPT_CODEX_DEFAULT_MODEL)
-        setConfiguredProviderRefresh((n) => n + 1)
-      } else if (!r.cancelled) {
-        setChatgptError(r.error)
-        setChatgptProgress(null)
-      } else {
-        setChatgptProgress(null)
-      }
-    } catch (e) {
-      setChatgptError(e instanceof Error ? e.message : String(e))
-      setChatgptProgress(null)
+      const current = await readCompactionOverrides()
+      const next = { ...current, [compactionKey]: pct }
+      await window.sylo.prefs.set(SYLO_COMPACTION_RESERVE_PREF, next)
+      await window.sylo.compaction.apply(modelProvider.trim(), modelId.trim())
+      await reloadCompactionState()
+      onChanged()
     } finally {
-      setChatgptBusy(false)
-      setChatgptDeviceCode('')
-      setChatgptDeviceUri('')
+      setCompactionBusy(false)
     }
-  }, [modelId, refreshChatgptStatus])
+  }
 
-  const cancelChatgptLogin = useCallback(async () => {
-    await window.sylo.chatgpt.cancel()
-    setChatgptBusy(false)
-    setChatgptDeviceCode('')
-    setChatgptDeviceUri('')
-    setChatgptProgress(null)
-  }, [])
-
-  const logoutChatgpt = useCallback(async () => {
-    if (!window.confirm('Sign out of ChatGPT Plus in Sylo?')) return
-    const r = await window.sylo.chatgpt.logout()
-    if (!r.ok) {
-      window.alert(`Could not sign out: ${r.error}`)
-      return
+  const restoreCompactionDefault = async () => {
+    if (compactionBusy) return
+    setCompactionBusy(true)
+    try {
+      const current = await readCompactionOverrides()
+      const next = { ...current }
+      delete next[compactionKey]
+      await window.sylo.prefs.set(SYLO_COMPACTION_RESERVE_PREF, next)
+      await window.sylo.compaction.apply(modelProvider.trim(), modelId.trim())
+      await reloadCompactionState()
+      onChanged()
+    } finally {
+      setCompactionBusy(false)
     }
-    setChatgptConnected(false)
-    setChatgptAccountId(null)
-    setConfiguredProviderRefresh((n) => n + 1)
-  }, [])
+  }
+
+  /** One-line status under the compaction trigger input (tokens, default vs override, apply note). */
+  const compactionStatusLine = (): string => {
+    if (!compactionState) return 'Loading compaction settings…'
+    if (!compactionState.autoCompactionEnabled) {
+      return (
+        'Auto-compaction is disabled in ~/.pi/agent/settings.json (compaction.enabled = false) — ' +
+        'this trigger has no effect until it is re-enabled.'
+      )
+    }
+    const cw = compactionState.contextWindow ?? PI_FALLBACK_CONTEXT_WINDOW_TOKENS
+    const pct =
+      compactionDraftValid ? (parseCompactionDraftPct(compactionDraft) ?? compactionState.effectivePct)
+      : compactionState.effectivePct
+    const reserve = reserveTokensForTriggerPct(cw, pct)
+    const source =
+      compactionState.overridePct != null
+        ? `Custom trigger for this model: ${formatCompactionPct(compactionState.overridePct)}%.`
+        : "Using Pi's default trigger."
+    const windowNote = compactionState.usesFallbackWindow
+      ? " Using Pi's 128,000-token fallback window — declare contextWindow in ~/.pi/agent/models.json for an exact figure."
+      : ''
+    return (
+      `${source} Compacts at ≈${(cw - reserve).toLocaleString('en-US')} of ` +
+      `${cw.toLocaleString('en-US')} tokens (${formatCompactionPct(pct)}% full), keeping ` +
+      `${reserve.toLocaleString('en-US')} in reserve. Applies immediately — no broker restart needed.` +
+      windowNote
+    )
+  }
 
     const saveModelPrefs = async () => {
     const origin = normalizeOllamaOriginUi(ollamaBaseUrl)
@@ -900,7 +952,12 @@ export function SettingsPanel({
   return (
     <div className={cn(panelShell, 'flex flex-col gap-3.5')}>
             <section className={card}>
-        <h2 className={cardTitle}>Model (Pi)</h2>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className={cn(cardTitle, 'mb-0')}>Model (Pi)</h2>
+          <button type="button" className={btnGhostSm} onClick={() => setProvidersModalOpen(true)}>
+            Manage providers
+          </button>
+        </div>
         <p className={leadText}>
           Provider + model id are passed into Pi&apos;s <code>ModelRegistry</code>. Leave both empty to use whatever Pi
           already has in <code>settings.json</code> / session defaults (no Sylo override).
@@ -956,46 +1013,12 @@ export function SettingsPanel({
           : null}
 
           {modelProvider === CHATGPT_CODEX_PROVIDER ?
-            <div className="flex flex-col gap-2.5 rounded-md border border-[color-mix(in_srgb,var(--sylo-border)_70%,transparent)] px-3 py-2.5">
-              <span className={fieldLabel}>ChatGPT OAuth</span>
-              <p className={caption}>
-                Signs into your ChatGPT subscription through OpenAI Codex (same path Hermes uses). This is not
-                the paid OpenAI API — no platform key, usage comes from your Plus/Pro quota.
-              </p>
-              {chatgptConnected ?
-                <p className={caption}>
-                  Signed in{chatgptAccountId ? <> — account <code>{chatgptAccountId}</code></> : null}.
-                  Choose a model below, then <strong>Save model settings</strong> so the broker switches over.
-                </p>
-              : <p className={caption}>Not signed in yet.</p>}
-              {chatgptError ? <p className={errorText}>{chatgptError}</p> : null}
-              {chatgptDeviceCode ?
-                <div className="flex flex-wrap items-center gap-3 rounded-md border border-border p-3">
-                  <code className="select-all text-2xl font-bold tracking-[0.2em]">{chatgptDeviceCode}</code>
-                  {chatgptDeviceUri ?
-                    <a className={cn(btnPrimary, 'ml-auto')} href={chatgptDeviceUri} target="_blank" rel="noreferrer">
-                      Open ChatGPT
-                    </a>
-                  : null}
-                </div>
-              : null}
-              {chatgptProgress ? <p className={caption}>{chatgptProgress}</p> : null}
-              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2">
-                {chatgptBusy ?
-                  <button type="button" className={btnGhostSm} onClick={() => void cancelChatgptLogin()}>
-                    Cancel sign-in
-                  </button>
-                : chatgptConnected ?
-                  <button type="button" className={btnGhostSm} onClick={() => void logoutChatgpt()}>
-                    Sign out
-                  </button>
-                : (
-                  <button type="button" className={btnPrimary} onClick={() => void startChatgptLogin()}>
-                    Sign in with ChatGPT
-                  </button>
-                )}
-              </div>
-            </div>
+            <ChatGptSignIn
+              onSignedIn={() =>
+                setModelId((cur) => (cur.trim() === '' ? CHATGPT_CODEX_DEFAULT_MODEL : cur))
+              }
+              onChange={() => setConfiguredProviderRefresh((n) => n + 1)}
+            />
           : null}
 
                     {modelProvider === 'openrouter' ?
@@ -1153,6 +1176,54 @@ export function SettingsPanel({
               </p>
             </div>
           : null}
+
+          <div className="flex flex-col gap-2 rounded-md border border-[color-mix(in_srgb,var(--sylo-border)_70%,transparent)] px-3 py-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className={fieldLabel}>Compaction — when context is summarized</span>
+              <button
+                type="button"
+                className={btnGhostSm}
+                disabled={!compactionHasOverride || compactionBusy}
+                onClick={() => void restoreCompactionDefault()}
+              >
+                Restore default
+              </button>
+            </div>
+            <p className={caption}>
+              Pi auto-compacts (summarizes older turns) when context reaches the trigger point, keeping a
+              token reserve free for the summary. Pi default for this model:{' '}
+              <strong>
+                {compactionState ? `${formatCompactionPct(compactionState.defaultPct)}%` : '…'}
+              </strong>{' '}
+              of the context window ({PI_DEFAULT_COMPACTION_RESERVE_TOKENS.toLocaleString('en-US')}{' '}
+              tokens reserved). Saved per model — switching models and back keeps each model's trigger.
+            </p>
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="flex min-w-[200px] flex-col gap-1">
+                <span className={fieldLabel}>Trigger at % of context window</span>
+                <input
+                  id="sylo-compaction-trigger-pct"
+                  className={input}
+                  inputMode="decimal"
+                  value={compactionDraft}
+                  onChange={(e) => setCompactionDraft(e.target.value)}
+                  placeholder="e.g. 85"
+                />
+              </label>
+              <button
+                type="button"
+                className={btnPrimary}
+                disabled={!compactionDraftValid || compactionBusy}
+                onClick={() => void saveCompactionOverride()}
+              >
+                {compactionBusy ? 'Saving…' : 'Save compaction'}
+              </button>
+            </div>
+            {compactionDraft.trim() !== '' && !compactionDraftValid ?
+              <p className={errorText}>Enter a trigger between 0 (exclusive) and 100.</p>
+            : null}
+            <p className={caption}>{compactionStatusLine()}</p>
+          </div>
 
           {modelProvider === 'ollama' && modelId.trim() !== '' ?
             <div className="flex flex-col gap-1.5 rounded-md border border-[color-mix(in_srgb,var(--sylo-border)_70%,transparent)] px-3 py-2.5">
@@ -2128,6 +2199,13 @@ export function SettingsPanel({
           : null}
         </div>
             </section>
+      {providersModalOpen ?
+        <ManageProvidersModal
+          activeProvider={modelProvider}
+          onProvidersChanged={() => setConfiguredProviderRefresh((n) => n + 1)}
+          onClose={() => setProvidersModalOpen(false)}
+        />
+      : null}
     </div>
   )
 }

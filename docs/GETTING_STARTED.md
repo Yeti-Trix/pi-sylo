@@ -35,7 +35,7 @@ This guide is for **you** running Sylo on your own machine — not for internal 
 ## Install and open Sylo
 
 1. Follow [README.md](../README.md) to install dependencies and start the app.
-2. Open **Developer → Settings** and set your **model** if Pi does not already have a default you use. This is the **global default** — new chats start with it. You can override the model **per chat** from the selector at the bottom of each chat (and on the companion phone app); the choice is saved with that chat. When the chat's main model is text-only, a second selector for the **image (fallback) model** appears, defaulted to the global image model from Settings.
+2. Open **Developer → Settings** and set your **model** if Pi does not already have a default you use. This is the **global default** — new chats start with it. You can override the model **per chat** from the selector at the bottom of each chat (and on the companion phone app); the choice is saved with that chat. When the chat's main model is text-only, a second selector for the **image (fallback) model** appears, defaulted to the global image model from Settings. Use **Manage providers** (in the Model card) to save API keys or sign in to any number of providers — each one is configured independently of the active chat model, so switching later never costs you a login.
 3. Open **Developer → Capability manager** to install skills/extensions or enable what you need.
 4. If you **cloned the Sylo source repository** and use bundled first-party tools, run once from that folder:
 
@@ -175,6 +175,16 @@ By default only global and bundled agents load. To allow `.pi/agents/*.md` in th
 **Orphaned tasks:** if Sylo or the broker restarts during a run, stale rows are marked **orphaned**. Clear them from **Developer → Settings → Subagents → Diagnostics** (**Clear orphaned**), or check counts there.
 
 **Marketplace alternative:** [pi-subagents](https://pi.dev/packages/pi-subagents) on pi.dev is optional for Pi CLI users. Sylo recommends the built-in **sylo-subagents** path for inline chat observability.
+
+### Cheap models for low-stakes subagent work
+
+Subagent runs consume tokens from whichever model they land on. High-volume, low-intelligence work — web searches, reading/grepping docs, codebase recon — does not need a frontier model, so pin a **free** model to a role and route that work through it:
+
+1. Save an **OpenRouter** key via **Developer → Settings → Model (Pi) → Manage providers** (free models still need a key; the free tier is rate-limited).
+2. In **Developer → Settings → Subagents**, set the per-agent row for **scout** to `OpenRouter · nvidia/nemotron-3-ultra-550b-a55b:free` (any `…:free` OpenRouter model works — pick one from the model list), then **Save subagent models**.
+3. Now scout runs (and anything similar you pin — e.g. worker runs that only grep/read) cost nothing while the main chat model stays on your paid provider.
+
+Resolution order for a subagent run: **per-agent pin → all-subagents pin → the chat's model**. You can also narrow pins per conversation from the **Subagents** button in the chat model bar. Pinning is operator-configured by agent name — the agent itself cannot pick a model per call, so it helps the free model along by asking for scout/worker runs for cheap work (see the guidance in [AGENTS.md](../AGENTS.md)).
 
 ---
 

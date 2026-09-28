@@ -185,6 +185,17 @@ import {
   type OverflowBrokerSlot,
 } from './concurrent-broker-pool.js'
 import { DEFAULT_MAX_CONCURRENT_TURNS, SYLO_MAX_CONCURRENT_TURNS_PREF } from '../shared/concurrent-turns.js'
+import {
+  PI_DEFAULT_COMPACTION_RESERVE_TOKENS,
+  PI_FALLBACK_CONTEXT_WINDOW_TOKENS,
+  SYLO_COMPACTION_RESERVE_PREF,
+  defaultCompactionTriggerPct,
+  normalizeCompactionOverridePct,
+  normalizeCompactionOverrides,
+  reserveTokensForTriggerPct,
+  resolveCompactionReserveTokens,
+  type CompactionReserveOverrides,
+} from '../shared/sylo-compaction-settings.js'
 import { BrokerSupervisor, type BrokerImageContent, type BrokerOutMessage, type BrokerResolvedModel } from './broker-supervisor.js'
 import type { SystemPromptStats } from '../shared/system-prompt-stats.js'
 import { encodeImageAttachmentsForPi } from './image-attachments.js'
@@ -1927,6 +1938,9 @@ function deferChatTurn(
       // Already written above — kept only so a re-defer on flush does not
       // insert a second notice.
     })
+    // The event-driven flush can lose races (see scheduleDeferredFlushSweep);
+    // the sweep guarantees the queued turn starts once a slot is truly free.
+    scheduleDeferredFlushSweep()
     // Deferred-turn safety snapshot (issue #8b): the user message exists but
     // the turn won't start until the other conversation's turn finishes —
     // capture pre-images NOW, before that agent can edit the same workspace.
@@ -1956,6 +1970,27 @@ async function flushDeferredTurns(): Promise<void> {
   if (result.ok && result.deferred) {
     deferredChatTurns.unshift(next)
   }
+}
+
+/**
+ * Safety net for deferred turns: the event-driven flush (on turnFinished /
+ * abort) can silently lose a race — another send grabs the freed slot between
+ * dropPendingTurn and the async flush, the re-deferred turn waits for the
+ * NEXT turnFinished, and if no further turn ever runs it sits queued forever
+ * ("sent a message in the side chat and never saw a response"). A slow sweep
+ * retries while the queue is non-empty, so a deferred turn starts as soon as
+ * a slot is actually free.
+ */
+let deferredFlushSweepTimer: NodeJS.Timeout | null = null
+function scheduleDeferredFlushSweep(): void {
+  if (deferredFlushSweepTimer) return
+  deferredFlushSweepTimer = setTimeout(() => {
+    deferredFlushSweepTimer = null
+    if (deferredChatTurns.length === 0) return
+    if (pendingTurns.size < maxConcurrentTurns()) void flushDeferredTurns()
+    if (deferredChatTurns.length > 0) scheduleDeferredFlushSweep()
+  }, 5_000)
+  deferredFlushSweepTimer.unref?.()
 }
 
 /** After steer/follow-up: close the in-flight assistant row and stream the continuation into a new one. */
@@ -2619,6 +2654,7 @@ async function ensureBrokerSessionForConversation(
     alwaysApplySkillPaths,
         modelProvider: eff.provider,
     modelId: eff.modelId,
+    compactionReserveTokens: compactionReserveTokensForModel(eff.provider, eff.modelId),
     imageModelId: eff.imageModelId,
     imageModelProvider: eff.imageModelProvider,
     thinkingLevel: eff.thinkingLevel ?? '',
@@ -3163,6 +3199,27 @@ function writeSettingsJson(next: Record<string, unknown>): void {
   mkdirSync(dir, { recursive: true })
   const p = join(dir, 'settings.json')
   writeFileSync(p, JSON.stringify(next, null, 2), 'utf8')
+}
+
+/** Operator compaction-trigger overrides, keyed by `<provider>:<modelId>` → trigger %. */
+function compactionReserveOverrides(): CompactionReserveOverrides {
+  return normalizeCompactionOverrides(db.getPref(SYLO_COMPACTION_RESERVE_PREF, {}))
+}
+
+/** Pi compaction.reserveTokens override for a model — null = Pi default (16,384 reserve). */
+function compactionReserveTokensForModel(provider: string, modelId: string): number | null {
+  return resolveCompactionReserveTokens(
+    compactionReserveOverrides(),
+    provider,
+    modelId,
+    readModelContextWindow(hostAgentDir(), provider, modelId),
+  )
+}
+
+/** Pi settings.json compaction.enabled (default true when the file/key is absent). */
+function readPiCompactionEnabled(): boolean {
+  const compaction = readSettingsJson()['compaction']
+  return !(compaction && typeof compaction === 'object' && (compaction as { enabled?: unknown }).enabled === false)
 }
 
 function extForClipboardImageMime(mime: string): string {
@@ -4175,6 +4232,7 @@ function buildBrokerSupervisorOptions(
     initialSessionCwd: initialBind.sessionCwd,
         modelProvider,
     modelId,
+    compactionReserveTokens: compactionReserveTokensForModel(modelProvider, modelId),
     thinkingLevel: eff.thinkingLevel ?? '',
     subagentModelsByAgent: eff.subagentModelsByAgent,
     disabledSkillPaths: initialBind.mergedDisabled.skillPaths,
@@ -6935,6 +6993,42 @@ function registerIpc(): void {
     }
   })
 
+  // Operator "Compact now" (chat footer): manually compact the active conversation's
+  // context. The renderer disables the button while this chat's turn is streaming; the
+  // host re-checks so a stale click can never abort an in-flight turn.
+  ipcMain.handle('broker:compactNow', async (_e, conversationId: unknown) => {
+    const id = typeof conversationId === 'string' ? conversationId.trim() : ''
+    if (!id) return { ok: false as const, error: 'missing_conversation_id' }
+    if (!broker || !isSupervisorReady(broker)) {
+      return { ok: false as const, error: 'broker_not_ready' }
+    }
+    if (findPendingTurnForConversation(id)) {
+      return { ok: false as const, error: 'turn_in_progress' }
+    }
+    // Make sure the primary broker has this conversation's session bound (no-op when
+    // it already does). A mid-turn other chat keeps the broker busy — refuse rather
+    // than compacting whatever session happens to be bound.
+    try {
+      await ensureBrokerSessionForConversation(id, { phase: 'ui-focus' })
+    } catch {
+      /* fall through — the binding check below decides */
+    }
+    if (brokerFocusedConversationId !== id) {
+      return { ok: false as const, error: 'broker_busy' }
+    }
+    const result = await broker.compactNow()
+    if (result.ok) {
+      // Same timeline notice auto-compaction produces, with the manual trigger label.
+      persistCompactionChatNotice(id, {
+        reason: 'manual',
+        summary: result.summary,
+        tokensBefore: result.tokensBefore,
+        tokensAfter: result.tokensAfter,
+      })
+    }
+    return result
+  })
+
     ipcMain.handle('broker:status:get', () => {
     const modelInput =
       brokerResolvedModel ?
@@ -7003,6 +7097,53 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('models:configuredProviders', () => listConfiguredModelProvidersForHost())
+
+  ipcMain.handle('compaction:state', (_e, provider: unknown, modelId: unknown) => {
+    if (typeof provider !== 'string' || typeof modelId !== 'string') {
+      return { ok: false as const, error: 'bad_args' }
+    }
+    const p = provider.trim()
+    const id = modelId.trim()
+    const contextWindow = readModelContextWindow(hostAgentDir(), p, id)
+    const cw = contextWindow ?? PI_FALLBACK_CONTEXT_WINDOW_TOKENS
+    const overridePct = normalizeCompactionOverridePct(
+      compactionReserveOverrides()[`${p}:${id}`],
+    )
+    const defaultPct = defaultCompactionTriggerPct(cw)
+    return {
+      ok: true as const,
+      provider: p,
+      modelId: id,
+      /** models.json-declared context window; null → Pi falls back to 128,000. */
+      contextWindow,
+      usesFallbackWindow: contextWindow == null,
+      piDefaultReserveTokens: PI_DEFAULT_COMPACTION_RESERVE_TOKENS,
+      defaultPct,
+      overridePct,
+      effectivePct: overridePct ?? defaultPct,
+      effectiveReserveTokens:
+        overridePct != null
+          ? reserveTokensForTriggerPct(cw, overridePct)
+          : PI_DEFAULT_COMPACTION_RESERVE_TOKENS,
+      autoCompactionEnabled: readPiCompactionEnabled(),
+    }
+  })
+
+  // Push the saved per-model trigger to live brokers (no restart needed). Brokers bound
+  // to a different model ignore it; init/switch_session always carry the correct value.
+  ipcMain.handle('compaction:apply', (_e, provider: unknown, modelId: unknown) => {
+    if (typeof provider !== 'string' || typeof modelId !== 'string') {
+      return { ok: false as const, error: 'bad_args' }
+    }
+    const p = provider.trim()
+    const id = modelId.trim()
+    const reserveTokens = compactionReserveTokensForModel(p, id)
+    const supervisors = [broker, ...turnBrokerPool.overflowBrokers.map((s) => s.supervisor)]
+    for (const supervisor of supervisors) {
+      supervisor?.sendChildMessage({ type: 'compaction_update', provider: p, modelId: id, reserveTokens })
+    }
+    return { ok: true as const }
+  })
 
   ipcMain.handle('ollama:inferBaseUrl', () => {
     const pref = (db.getPref('sylo.ollama_base_url', '') as string).trim()

@@ -191,6 +191,15 @@ export type BrokerOutMessage =
     }
   | { type: 'system_prompt_stats'; stats: SystemPromptStats }
   | { type: 'context_window_stats'; actualMessageTokens: number; includesSystemPrompt?: boolean }
+  | {
+      type: 'compact_now_result'
+      requestId: string
+      ok: true
+      summary?: string
+      tokensBefore?: number
+      tokensAfter?: number
+    }
+  | { type: 'compact_now_result'; requestId: string; ok: false; error: string }
 
 export interface BrokerConfig {
   brokerScriptPath: string
@@ -210,6 +219,12 @@ export interface BrokerConfig {
   initialSessionCwd: string
   modelProvider: string
     modelId: string
+  /**
+   * Per-model compaction trigger for this broker's model — Pi `reserveTokens` override
+   * resolved by the host (null = Pi default, 16,384). Applied to the session settings
+   * manager in the broker's createRuntime factory.
+   */
+  compactionReserveTokens?: number | null
   /** Per-chat thinking level; empty means Pi default. Published so child subagents can inherit it. */
   thinkingLevel?: string
   /** Serialized `{ "<agent>": { provider, modelId, thinkingLevel? } }` — global pins plus the chat's own. */
@@ -311,6 +326,15 @@ type PendingForcedSubagent = {
   timer: ReturnType<typeof setTimeout>
 }
 
+type PendingCompactNow = {
+  resolve: (
+    value:
+      | { ok: true; summary?: string; tokensBefore?: number; tokensAfter?: number }
+      | { ok: false; error: string },
+  ) => void
+  timer: ReturnType<typeof setTimeout>
+}
+
 export class BrokerSupervisor {
   private child: ChildProcess | undefined
   private cfg: BrokerConfig
@@ -322,6 +346,7 @@ export class BrokerSupervisor {
   private pendingFork = new Map<string, PendingFork>()
   private pendingThinkingLevels = new Map<string, PendingThinkingLevels>()
   private pendingForcedSubagent = new Map<string, PendingForcedSubagent>()
+  private pendingCompactNow = new Map<string, PendingCompactNow>()
 
   constructor(cfg: Omit<BrokerConfig, 'brokerScriptPath'> & { brokerScriptPath?: string }) {
     const scriptPath = cfg.brokerScriptPath ?? resolveBrokerScript()
@@ -340,6 +365,7 @@ export class BrokerSupervisor {
       initialSessionCwd: cfg.initialSessionCwd,
       modelProvider: cfg.modelProvider,
             modelId: cfg.modelId,
+      compactionReserveTokens: cfg.compactionReserveTokens ?? null,
       subagentModelsByAgent: cfg.subagentModelsByAgent ?? '',
       disabledSkillPaths: cfg.disabledSkillPaths ?? [],
       disabledExtensionPaths: cfg.disabledExtensionPaths ?? [],
@@ -497,6 +523,10 @@ export class BrokerSupervisor {
         this.resolveThinkingLevels(m)
         return
       }
+      if (m && typeof m === 'object' && m.type === 'compact_now_result') {
+        this.resolveCompactNow(m)
+        return
+      }
       if (m && typeof m === 'object' && m.type === 'run_subagent_result') {
         this.resolveForcedSubagent(m)
         return
@@ -523,6 +553,7 @@ export class BrokerSupervisor {
       sessionCwd: this.cfg.initialSessionCwd,
       modelProvider: this.cfg.modelProvider,
       modelId: this.cfg.modelId,
+      compactionReserveTokens: this.cfg.compactionReserveTokens ?? null,
       disabledSkillPaths: this.cfg.disabledSkillPaths ?? [],
       disabledExtensionPaths: this.cfg.disabledExtensionPaths ?? [],
       disabledTools: this.cfg.disabledTools ?? [],
@@ -556,6 +587,8 @@ export class BrokerSupervisor {
       imageModelProvider?: string
       /** Per-chat thinking-level override (off/minimal/low/medium/high/[xhigh|max]; omitted = Pi default). */
       thinkingLevel?: string
+      /** Compaction reserveTokens override for the switched-to chat's model (null/undefined = Pi default). */
+      compactionReserveTokens?: number | null
       timeoutMs?: number
     },
   ): Promise<void> {
@@ -595,6 +628,7 @@ export class BrokerSupervisor {
           imageModelId: options?.imageModelId,
           imageModelProvider: options?.imageModelProvider,
           thinkingLevel: options?.thinkingLevel,
+          compactionReserveTokens: options?.compactionReserveTokens ?? null,
         })
       } catch (e) {
         clearTimeout(timer)
@@ -822,6 +856,56 @@ export class BrokerSupervisor {
     }
   }
 
+  /**
+   * Operator "Compact now" (chat footer): run Pi's manual compaction on the session this
+   * broker has bound. Resolves with the compaction result (or a friendly error like
+   * "Nothing to compact (session too small)") — long timeout since summarization is an
+   * LLM call.
+   */
+  compactNow(
+    timeoutMs = 300_000,
+  ): Promise<
+    | { ok: true; summary?: string; tokensBefore?: number; tokensAfter?: number }
+    | { ok: false; error: string }
+  > {
+    if (!this.child || this.child.killed) {
+      return Promise.reject(new Error('Broker not running'))
+    }
+    const requestId = randomUUID()
+    return new Promise((resolveFn) => {
+      const timer = setTimeout(() => {
+        if (this.pendingCompactNow.delete(requestId)) {
+          resolveFn({ ok: false, error: `Compaction timed out after ${timeoutMs}ms` })
+        }
+      }, timeoutMs)
+      this.pendingCompactNow.set(requestId, { resolve: resolveFn, timer })
+      try {
+        this.child!.send({ type: 'compact_now', requestId })
+      } catch (e) {
+        clearTimeout(timer)
+        this.pendingCompactNow.delete(requestId)
+        resolveFn({ ok: false, error: e instanceof Error ? e.message : String(e) })
+      }
+    })
+  }
+
+  private resolveCompactNow(msg: Extract<BrokerOutMessage, { type: 'compact_now_result' }>): void {
+    const pending = this.pendingCompactNow.get(msg.requestId)
+    if (!pending) return
+    this.pendingCompactNow.delete(msg.requestId)
+    clearTimeout(pending.timer)
+    if (msg.ok) {
+      pending.resolve({
+        ok: true,
+        summary: msg.summary,
+        tokensBefore: msg.tokensBefore,
+        tokensAfter: msg.tokensAfter,
+      })
+    } else {
+      pending.resolve({ ok: false, error: msg.error ?? 'Compaction failed' })
+    }
+  }
+
   private resolveSwitchSession(
     msg:
       | { type: 'switch_session_result'; requestId: string; ok: true }
@@ -882,6 +966,11 @@ export class BrokerSupervisor {
       p.reject(new Error(reason))
     }
     this.pendingForcedSubagent.clear()
+    for (const [, p] of this.pendingCompactNow) {
+      clearTimeout(p.timer)
+      p.resolve({ ok: false, error: reason })
+    }
+    this.pendingCompactNow.clear()
   }
 
   private disposeChild(): void {

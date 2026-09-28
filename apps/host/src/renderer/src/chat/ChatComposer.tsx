@@ -13,7 +13,9 @@ import {
   firstClipboardImageFile,
   isImageAttachmentPath,
   resolveImageAttachmentFromFile,
+  splitUserMessageAttachments,
 } from '../chatUserAttachments'
+import { registerComposerDropHandler } from './chatDropBus'
 import { cn } from '../lib/cn'
 import {
   applyMentionCompletion,
@@ -25,6 +27,7 @@ import {
   chatAttachmentChipImage,
   chatAttachmentChipName,
   chatAttachmentChipRemove,
+  chatAttachmentPending,
   chatAttachmentStrip,
   chatComposer,
   chatComposerDrag,
@@ -36,9 +39,12 @@ import {
   chatMentionItemActive,
   chatMentionName,
   chatMentionPicker,
+  chatQueueEdit,
+  chatQueueEditBtn,
   chatQueueIndex,
   chatQueueItem,
   chatQueueItemDragging,
+  chatQueueAttachBadge,
   chatQueueRemove,
   chatQueueSendNow,
   chatQueueStrip,
@@ -49,6 +55,18 @@ export type QueuedComposerMessage = {
   id: string
   text: string
   attachments?: { path: string; name: string }[]
+}
+
+/**
+ * A staged attachment chip. `pending` marks a drop still being resolved (no
+ * local path yet) — the chip renders immediately so the operator can see the
+ * drop registered, then upgrades in place to its on-disk path.
+ */
+export type ComposerAttachment = {
+  id: string
+  path: string
+  name: string
+  pending?: boolean
 }
 
 type SubagentPickerAgent = {
@@ -80,6 +98,15 @@ type ChatComposerProps = {
   onSendingStarted: () => void
   onRefreshMessages: () => void
   onDeliverQueued: (text: string, attachments?: { path: string; name: string }[]) => Promise<boolean>
+  /**
+   * Fired the moment Send is dispatched (with the exact formatted prompt text)
+   * so App can render an optimistic user bubble while the host prepares the
+   * turn (image encode + broker acquire + session ensure) — otherwise dropped
+   * files are visible nowhere during that window.
+   */
+  onOptimisticUserMessage?: (text: string) => void
+  /** Fired when the send failed and the optimistic bubble must come down. */
+  onOptimisticUserMessageFailed?: () => void
 }
 
 function newQueueId(): string {
@@ -91,14 +118,25 @@ function newQueueId(): string {
  * `useRef`) so it survives ChatComposer unmount/remount when the operator
  * switches to a non-chat tab (e.g. the Tasks dashboard) and back — the
  * textarea state and any component-scoped ref would otherwise be destroyed.
- * Does NOT survive a Sylo restart (process exit clears module state). The
- * message *queue* is deliberately NOT persisted here (it's a committed action,
- * not a draft).
+ * Does NOT survive a Sylo restart (process exit clears module state). Pending
+ * (still-resolving) drop placeholders are filtered out when stashed — their
+ * resolution promise dies with the component.
  */
 const composerDrafts = new Map<
   string,
-  { input: string; attachments: { path: string; name: string }[] }
+  { input: string; attachments: ComposerAttachment[] }
 >()
+
+/**
+ * Per-conversation queued follow-ups, same module-scope lifetime as drafts.
+ * A queued message is a committed send intent — it must survive switching to
+ * another chat (or a non-chat tab) and back, not silently evaporate. Still
+ * in-memory only (a restart clears it, like drafts); the auto-flush stays tied
+ * to the activeSending transition while that conversation is on screen, so a
+ * queue restored after its turn already finished waits for the operator
+ * (Send-now / next turn) instead of surprising them.
+ */
+const composerQueues = new Map<string, QueuedComposerMessage[]>()
 
 export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(function ChatComposer(
   {
@@ -112,13 +150,16 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
     onSendingStarted,
     onRefreshMessages,
     onDeliverQueued,
+    onOptimisticUserMessage,
+    onOptimisticUserMessageFailed,
   },
   ref,
 ) {
   const [input, setInput] = useState('')
-  const [chatAttachments, setChatAttachments] = useState<{ path: string; name: string }[]>([])
+  const [chatAttachments, setChatAttachments] = useState<ComposerAttachment[]>([])
   const [messageQueue, setMessageQueue] = useState<QueuedComposerMessage[]>([])
   const [queueDragId, setQueueDragId] = useState<string | null>(null)
+  const [editingQueueId, setEditingQueueId] = useState<string | null>(null)
   const [composerDragOver, setComposerDragOver] = useState(false)
   const [mentionAgents, setMentionAgents] = useState<SubagentPickerAgent[]>([])
   const [mentionSpan, setMentionSpan] = useState<MentionSpan | null>(null)
@@ -128,6 +169,26 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
   const prevSendingRef = useRef(false)
   const flushQueueLockRef = useRef(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const queueEditTextareaRef = useRef<HTMLTextAreaElement>(null)
+  // Focus + autosize the inline queue editor once when editing starts — NOT in
+  // a ref callback (an inline callback re-runs on every parent re-render and
+  // would steal the caret back mid-typing on streaming frames).
+  useEffect(() => {
+    if (!editingQueueId) return
+    const el = queueEditTextareaRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(el.scrollHeight, 96)}px`
+    el.focus()
+    el.setSelectionRange(el.value.length, el.value.length)
+  }, [editingQueueId])
+  /** Mirror of the queue for effects/handlers that must not read stale state. */
+  const messageQueueRef = useRef<QueuedComposerMessage[]>([])
+  useEffect(() => {
+    messageQueueRef.current = messageQueue
+  })
+  /** Active inline edit of a queued item; null when not editing. Uncontrolled textarea. */
+  const queueEditRef = useRef<{ id: string; text: string } | null>(null)
 
   // Composer grows with content: 1 line at rest, up to 4 lines, then internal
   // scroll (Cursor-style). Runs on every input change.
@@ -202,44 +263,61 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
     [input, mentionSpan],
   )
 
-    // Per-conversation draft persistence. Typed-but-unsent text + staged
-  // attachments are stashed in the module-scoped `composerDrafts` map so they
-  // survive BOTH conversation switches (staying on the chat tab) AND tab
-  // switches that unmount this composer (e.g. chat → Tasks → chat). The map is
-  // in-memory only — drafts do not survive a Sylo restart. The message *queue*
-  // is deliberately still reset on switch (it's a committed action, not a
-  // draft).
+    // Per-conversation draft + queue persistence. Typed-but-unsent text, staged
+  // attachments AND the queued follow-ups are stashed in module-scoped maps so
+  // they survive BOTH conversation switches (staying on the chat tab) AND tab
+  // switches that unmount this composer (e.g. chat → Tasks → chat). The maps
+  // are in-memory only — nothing here survives a Sylo restart.
   const prevActiveIdRef = useRef<string | undefined>(undefined)
   useEffect(() => {
     const prev = prevActiveIdRef.current
     if (prev === activeId) return
     // Save the draft for the conversation we're leaving (state hasn't
-    // switched yet, so `input`/`chatAttachments` are still the old conv's).
-    if (prev) composerDrafts.set(prev, { input, attachments: chatAttachments })
+    // switched yet, so `input`/`chatAttachments`/`messageQueue` are still the
+    // old conv's).
+    if (prev) {
+      composerDrafts.set(prev, {
+        input,
+        attachments: chatAttachments.filter((a) => !a.pending),
+      })
+      composerQueues.set(prev, messageQueueRef.current)
+    }
     prevActiveIdRef.current = activeId
+    // Entering a different conversation: any activeSending true→false
+    // transition in flight belongs to the conversation we LEFT, not this one.
+    // Without this reset, switching away from a sending chat would make the
+    // flush effect fire the just-restored queue of the chat we switched TO
+    // (the old always-empty reset masked this).
+    prevSendingRef.current = false
     // Restore the draft for the conversation we're entering. Also runs on
-    // mount, so a remount after a tab switch rehydrates the saved draft
-    // instead of showing an empty textarea.
+    // mount, so a remount after a tab switch rehydrates the saved state
+    // instead of showing an empty composer.
     const d = activeId ? composerDrafts.get(activeId) : undefined
     setInput(d?.input ?? '')
     setChatAttachments(d?.attachments ?? [])
     setMentionSpan(null)
-    setMessageQueue([])
+    const q = activeId ? composerQueues.get(activeId) : undefined
+    setMessageQueue(q ? [...q] : [])
     setQueueDragId(null)
+    queueEditRef.current = null
+    setEditingQueueId(null)
   }, [activeId, input, chatAttachments])
 
   // Tab switches to a non-chat tab unmount this composer WITHOUT changing
-  // `activeId`, so the effect above never runs its save branch and the textarea
-  // state would be lost. Keep a fresh snapshot of the current draft and stash
-  // it on unmount so the remount restores it.
-  const latestDraftRef = useRef({ activeId, input, chatAttachments })
+  // `activeId`, so the effect above never runs its save branch and the state
+  // would be lost. Keep a fresh snapshot of the current draft + queue and stash
+  // it on unmount so the remount restores them.
+  const latestStateRef = useRef({ activeId, input, chatAttachments, messageQueue })
   useEffect(() => {
-    latestDraftRef.current = { activeId, input, chatAttachments }
+    latestStateRef.current = { activeId, input, chatAttachments, messageQueue }
   })
   useEffect(() => {
     return () => {
-      const { activeId: aid, input: inp, chatAttachments: att } = latestDraftRef.current
-      if (aid) composerDrafts.set(aid, { input: inp, attachments: att })
+      const { activeId: aid, input: inp, chatAttachments: att, messageQueue: q } = latestStateRef.current
+      if (aid) {
+        composerDrafts.set(aid, { input: inp, attachments: att.filter((a) => !a.pending) })
+        composerQueues.set(aid, q)
+      }
     }
   }, [])
 
@@ -277,12 +355,56 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
     })
   }, [])
 
+  /** Queued text minus the structured attachment block — what the operator edits. */
+  const queuedDisplayText = useCallback((item: QueuedComposerMessage): string => {
+    return splitUserMessageAttachments(item.text).text
+  }, [])
+
+  const startQueueEdit = useCallback(
+    (item: QueuedComposerMessage) => {
+      queueEditRef.current = { id: item.id, text: queuedDisplayText(item) }
+      setEditingQueueId(item.id)
+    },
+    [queuedDisplayText],
+  )
+
+  /**
+   * Commit (or cancel) the inline edit. The attachment block parsed from the
+   * original item is preserved verbatim — editing prose must never mangle the
+   * paths the agent receives. Emptying the prose removes the item when there
+   * are no attachments to carry it.
+   */
+  const commitQueueEdit = useCallback(
+    (cancel = false) => {
+      const cur = queueEditRef.current
+      if (!cur) return
+      queueEditRef.current = null
+      setEditingQueueId(null)
+      if (cancel) return
+      const item = messageQueueRef.current.find((x) => x.id === cur.id)
+      if (!item) return
+      const trimmed = cur.text.trim()
+      const { attachments } = splitUserMessageAttachments(item.text)
+      if (!trimmed && attachments.length === 0) {
+        setMessageQueue((q) => q.filter((x) => x.id !== cur.id))
+        return
+      }
+      const nextText = formatUserMessageWithAttachments(trimmed, attachments)
+      setMessageQueue((q) => q.map((x) => (x.id === cur.id ? { ...x, text: nextText } : x)))
+    },
+    [],
+  )
+
   const submitComposer = useCallback(
     async (mode: 'send' | 'queue' | 'steer') => {
       if (!activeId || safeMode || !agentReady || inputLocked) return
       setMentionSpan(null)
       const trimmed = input.trim()
       if (!trimmed && chatAttachments.length === 0) return
+      // Drop placeholders still resolving — their path isn't known yet, so the
+      // message can't be formatted. Resolution is fast; send re-enables right
+      // after. (The Send button is disabled with a hint meanwhile.)
+      if (chatAttachments.some((a) => a.pending)) return
 
       if (onThinkTankInject && trimmed && chatAttachments.length === 0 && mode !== 'steer') {
         setInput('')
@@ -302,8 +424,12 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
       }
 
       const restoreAttachments = [...chatAttachments]
-      const text = formatUserMessageWithAttachments(trimmed, restoreAttachments)
-      const attachmentsForPi = restoreAttachments.length > 0 ? restoreAttachments : undefined
+      const text = formatUserMessageWithAttachments(
+        trimmed,
+        restoreAttachments.map(({ path, name }) => ({ path, name })),
+      )
+      const attachmentsForPi =
+        restoreAttachments.length > 0 ? restoreAttachments.map(({ path, name }) => ({ path, name })) : undefined
 
       if (mode === 'queue' && activeSending) {
         setMessageQueue((q) => [
@@ -342,9 +468,15 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
 
       setInput('')
       setChatAttachments([])
+      // Optimistic user bubble: the host does not insert the user row until
+      // image encoding + broker acquire + session ensure have all run, which
+      // can take seconds — without this the just-sent files are visible
+      // nowhere. App supersedes it as soon as the real row lands via refresh.
+      onOptimisticUserMessage?.(text)
       try {
         const r = await window.sylo.chat.send(activeId, text, attachmentsForPi)
         if (r.error) {
+          onOptimisticUserMessageFailed?.()
           setInput(trimmed)
           setChatAttachments(restoreAttachments)
           onRefreshMessages()
@@ -357,6 +489,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
         onSendingStarted()
         onRefreshMessages()
       } catch {
+        onOptimisticUserMessageFailed?.()
         setInput(trimmed)
         setChatAttachments(restoreAttachments)
         onRefreshMessages()
@@ -376,6 +509,8 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
       activeSending,
       onSendingStarted,
       onRefreshMessages,
+      onOptimisticUserMessage,
+      onOptimisticUserMessageFailed,
     ],
   )
 
@@ -408,10 +543,10 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
         })
         if (!path.trim()) return
         setChatAttachments((prev) => {
-          const seen = new Set(prev.map((a) => a.path.toLowerCase()))
+          const seen = new Set(prev.filter((a) => !a.pending).map((a) => a.path.toLowerCase()))
           const key = path.toLowerCase()
           if (seen.has(key)) return prev
-          return [...prev, { path, name }]
+          return [...prev, { id: newQueueId(), path, name }]
         })
       } catch {
         /* invalid or empty image payload */
@@ -420,53 +555,94 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
     [safeMode, activeId],
   )
 
+  /**
+   * Resolve dropped files into staged attachment chips. Placeholders are added
+   * SYNCHRONOUSLY (pending state) so the operator instantly sees the drop
+   * registered; each file then resolves concurrently and upgrades its chip in
+   * place. Failed resolutions just remove their placeholder (same silent
+   * semantics as before) — a non-image file with no local path can't be staged.
+   */
+  const ingestDroppedFiles = useCallback(
+    (files: File[]) => {
+      if (safeMode || !activeId || files.length === 0) return
+      const placeholders = files.map(
+        (f): ComposerAttachment => ({
+          id: newQueueId(),
+          path: '',
+          name: f.name || 'file',
+          pending: true,
+        }),
+      )
+      setChatAttachments((prev) => [...prev, ...placeholders])
+      void Promise.all(
+        files.map(async (f, i) => {
+          const ph = placeholders[i]!
+          const upgrade = (resolved: { path: string; name: string } | null) => {
+            setChatAttachments((prev) => {
+              const idx = prev.findIndex((x) => x.id === ph.id)
+              if (idx === -1) return prev
+              if (!resolved || !resolved.path.trim()) {
+                return prev.filter((x) => x.id !== ph.id)
+              }
+              // Dedupe by path against the other staged chips.
+              const seen = new Set(
+                prev
+                  .filter((x) => x.id !== ph.id && !x.pending && x.path)
+                  .map((x) => x.path.toLowerCase()),
+              )
+              if (seen.has(resolved.path.toLowerCase())) {
+                return prev.filter((x) => x.id !== ph.id)
+              }
+              const next = [...prev]
+              next[idx] = { id: ph.id, path: resolved.path, name: resolved.name }
+              return next
+            })
+          }
+          try {
+            let path = ''
+            try {
+              path = window.sylo.files.pathFromWebFile(f).trim()
+            } catch {
+              /* in-memory file */
+            }
+            if (path) {
+              upgrade({ path, name: f.name || path.replace(/^.*[/\\]/, '') || 'file' })
+              return
+            }
+            if (f.type.startsWith('image/')) {
+              const resolved = await resolveImageAttachmentFromFile(f, {
+                pathFromWebFile: (file) => window.sylo.files.pathFromWebFile(file),
+                writePastedImage: (data, mimeType) =>
+                  window.sylo.chat.writePastedImage(data, mimeType),
+              })
+              upgrade(resolved.path.trim() ? resolved : null)
+              return
+            }
+            upgrade(null)
+          } catch {
+            upgrade(null)
+          }
+        }),
+      )
+    },
+    [safeMode, activeId],
+  )
+
+  // The chat transcript area forwards drops here so files dropped outside the
+  // small composer box still attach instead of silently no-oping.
+  useEffect(() => {
+    registerComposerDropHandler((files) => ingestDroppedFiles(files))
+    return () => registerComposerDropHandler(null)
+  }, [ingestDroppedFiles])
+
   const handleDrop = useCallback(
-    async (e: React.DragEvent<HTMLDivElement>) => {
+    (e: React.DragEvent<HTMLDivElement>) => {
       e.preventDefault()
       e.stopPropagation()
       setComposerDragOver(false)
-      if (safeMode || !activeId) return
-      const list = Array.from(e.dataTransfer.files ?? [])
-      if (list.length === 0) return
-      const added: { path: string; name: string }[] = []
-      for (const f of list) {
-        try {
-          let path = ''
-          try {
-            path = window.sylo.files.pathFromWebFile(f).trim()
-          } catch {
-            /* in-memory file */
-          }
-          if (path) {
-            added.push({ path, name: f.name || path.replace(/^.*[/\\]/, '') || 'file' })
-            continue
-          }
-          if (f.type.startsWith('image/')) {
-            const resolved = await resolveImageAttachmentFromFile(f, {
-              pathFromWebFile: (file) => window.sylo.files.pathFromWebFile(file),
-              writePastedImage: (data, mimeType) =>
-                window.sylo.chat.writePastedImage(data, mimeType),
-            })
-            if (resolved.path.trim()) added.push(resolved)
-          }
-        } catch {
-          /* non-local or unreadable file */
-        }
-      }
-      if (added.length === 0) return
-      setChatAttachments((prev) => {
-        const next = [...prev]
-        const seen = new Set(next.map((a) => a.path.toLowerCase()))
-        for (const a of added) {
-          const key = a.path.toLowerCase()
-          if (seen.has(key)) continue
-          seen.add(key)
-          next.push(a)
-        }
-        return next
-      })
+      ingestDroppedFiles(Array.from(e.dataTransfer.files ?? []))
     },
-    [safeMode, activeId],
+    [ingestDroppedFiles],
   )
 
   return (
@@ -487,76 +663,146 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
           setComposerDragOver(false)
         }
       }}
-      onDrop={(e) => void handleDrop(e)}
+      onDrop={handleDrop}
     >
       {messageQueue.length > 0 ?
         <div className={chatQueueStrip} aria-label="Queued follow-ups">
-          {messageQueue.map((item, index) => (
-            <div
-              key={item.id}
-              className={cn(chatQueueItem, queueDragId === item.id && chatQueueItemDragging)}
-              draggable={!safeMode}
-              onDragStart={() => setQueueDragId(item.id)}
-              onDragEnd={() => setQueueDragId(null)}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={() => {
-                if (queueDragId && queueDragId !== item.id) {
-                  reorderMessageQueue(queueDragId, item.id)
-                }
-                setQueueDragId(null)
-              }}
-            >
-              <span className={chatQueueIndex} aria-hidden="true">
-                {index + 1}
-              </span>
-              <span className={chatQueueText} title={item.text}>
-                {item.text}
-              </span>
-              <button
-                type="button"
-                className={chatQueueSendNow}
-                title="Send now — interrupt after the current tool (Ctrl+Enter)"
-                aria-label={`Send queued message ${index + 1} now`}
-                disabled={safeMode || !agentReady}
-                onClick={() => void steerQueuedMessage(item)}
+          {messageQueue.map((item, index) => {
+            const display = queuedDisplayText(item)
+            const attachCount = item.attachments?.length ?? 0
+            const editing = editingQueueId === item.id
+            return (
+              <div
+                key={item.id}
+                className={cn(chatQueueItem, queueDragId === item.id && chatQueueItemDragging)}
+                draggable={!safeMode && !editing}
+                onDragStart={() => setQueueDragId(item.id)}
+                onDragEnd={() => setQueueDragId(null)}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={() => {
+                  if (queueDragId && queueDragId !== item.id) {
+                    reorderMessageQueue(queueDragId, item.id)
+                  }
+                  setQueueDragId(null)
+                }}
               >
-                Now
-              </button>
-              <button
-                type="button"
-                className={chatQueueRemove}
-                aria-label={`Remove queued message ${index + 1}`}
-                onClick={() => setMessageQueue((q) => q.filter((x) => x.id !== item.id))}
-              >
-                ×
-              </button>
-            </div>
-          ))}
+                <span className={chatQueueIndex} aria-hidden="true">
+                  {index + 1}
+                </span>
+                {editing ?
+                  <textarea
+                    ref={queueEditTextareaRef}
+                    className={chatQueueEdit}
+                    rows={1}
+                    defaultValue={queueEditRef.current?.text ?? display}
+                    aria-label={`Edit queued message ${index + 1}`}
+                    onInput={(e) => {
+                      const el = e.currentTarget
+                      el.style.height = 'auto'
+                      el.style.height = `${Math.min(el.scrollHeight, 96)}px`
+                      if (queueEditRef.current) queueEditRef.current.text = el.value
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.nativeEvent.isComposing) return
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault()
+                        commitQueueEdit()
+                      } else if (e.key === 'Escape') {
+                        e.preventDefault()
+                        commitQueueEdit(true)
+                      }
+                    }}
+                    onBlur={() => commitQueueEdit()}
+                  />
+                : <span
+                    className={chatQueueText}
+                    title={attachCount > 0 ? `${display || '(attachment only)'}  ·  ${attachCount} attachment(s)` : display}
+                  >
+                    {display || (attachCount > 0 ? '(attachment only)' : item.text)}
+                  </span>}
+                {attachCount > 0 && !editing ?
+                  <span className={chatQueueAttachBadge} title={`${attachCount} attachment(s)`}>
+                    📎 {attachCount}
+                  </span>
+                : null}
+                {editing ?
+                  <button
+                    type="button"
+                    className={chatQueueEditBtn}
+                    title="Save edit (Enter) — Shift+Enter for a new line, Esc cancels"
+                    aria-label={`Save queued message ${index + 1}`}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => commitQueueEdit()}
+                  >
+                    Save
+                  </button>
+                : <button
+                    type="button"
+                    className={chatQueueEditBtn}
+                    title="Edit this queued message before it sends"
+                    aria-label={`Edit queued message ${index + 1}`}
+                    onClick={() => startQueueEdit(item)}
+                  >
+                    ✎
+                  </button>}
+                <button
+                  type="button"
+                  className={chatQueueSendNow}
+                  title="Send now — interrupt after the current tool (Ctrl+Enter)"
+                  aria-label={`Send queued message ${index + 1} now`}
+                  disabled={safeMode || !agentReady}
+                  onClick={() => void steerQueuedMessage(item)}
+                >
+                  Now
+                </button>
+                <button
+                  type="button"
+                  className={chatQueueRemove}
+                  aria-label={`Remove queued message ${index + 1}`}
+                  onClick={() => setMessageQueue((q) => q.filter((x) => x.id !== item.id))}
+                >
+                  ×
+                </button>
+              </div>
+            )
+          })}
         </div>
       : null}
       {chatAttachments.length > 0 ?
         <div className={chatAttachmentStrip}>
           {chatAttachments.map((a) => (
             <span
-              key={a.path}
+              key={a.id}
               className={cn(
                 chatAttachmentChip,
                 isImageAttachmentPath(a.name, a.path) && chatAttachmentChipImage,
+                a.pending && chatAttachmentPending,
               )}
-              title={a.path}
+              title={a.pending ? `${a.name} — reading…` : a.path}
             >
-              <AttachmentImageThumb
-                path={a.path}
-                name={a.name}
-                className="size-10"
-                fallbackClassName={chatAttachmentChipGlyph}
-              />
-              <span className={chatAttachmentChipName}>{a.name}</span>
+              {a.pending ?
+                <span
+                  className={cn(chatAttachmentChipGlyph, 'animate-pulse')}
+                  aria-hidden="true"
+                >
+                  ◇
+                </span>
+              : <AttachmentImageThumb
+                  path={a.path}
+                  name={a.name}
+                  className="size-10"
+                  fallbackClassName={chatAttachmentChipGlyph}
+                />}
+              <span className={chatAttachmentChipName}>
+                {a.pending ? `${a.name} — reading…` : a.name}
+              </span>
               <button
                 type="button"
                 className={chatAttachmentChipRemove}
                 aria-label={`Remove ${a.name}`}
-                onClick={() => setChatAttachments((prev) => prev.filter((x) => x.path !== a.path))}
+                onClick={() =>
+                  setChatAttachments((prev) => prev.filter((x) => x.id !== a.id))
+                }
               >
                 ×
               </button>
@@ -671,7 +917,8 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
             !activeId ||
             !agentReady ||
             composerBusy ||
-            (!input.trim() && chatAttachments.length === 0)
+            (!input.trim() && chatAttachments.length === 0) ||
+            chatAttachments.some((a) => a.pending)
           }
           onClick={() =>
             void (

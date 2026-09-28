@@ -1,8 +1,15 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { ChatConversationMessageRow, type ChatMessageRowModel } from './chat/ConversationMessage'
-import { ingestAskQuestionPayload } from './chat/askQuestionClient'
+import {
+  clearAskQuestionPromptsForConversation,
+  ingestAskQuestionPayload,
+  pendingQuestionConversationIds,
+  subscribeAskQuestionPrompts,
+} from './chat/askQuestionClient'
+import { convActivityStatus, type ConvActivityStatus } from './chat/conv-activity'
 import { ChatComposer, type ChatComposerHandle } from './chat/ChatComposer'
+import { forwardDroppedFiles } from './chat/chatDropBus'
 import { ChatPlanGoalsBar } from './chat/ChatPlanGoalsBar'
 import { ChatModelBar } from './chat/ChatModelBar'
 import { LiveElapsedLabel } from './chat/LiveElapsedLabel'
@@ -93,7 +100,9 @@ import {
   convRowSelected,
   convStatusDot,
   convStatusDotRead,
-  convStatusDotUnread,
+    convStatusDotUnread,
+  convStatusQuestion,
+  convRowTitleAttention,
   convStatusSpinner,
   convTimestamp,
   leadText,
@@ -316,17 +325,20 @@ function pathsEffectivelyEqual(a: string, b: string): boolean {
   return norm(a) === norm(b)
 }
 
-/** Truncate path for dense table cells (full string in title). */
-type ConvActivityStatus = 'running' | 'unread' | 'read'
-
-function convActivityStatus(
-  convId: string,
-  sending: ReadonlySet<string>,
-  unread: ReadonlySet<string>,
-): ConvActivityStatus {
-  if (sending.has(convId)) return 'running'
-  if (unread.has(convId)) return 'unread'
-  return 'read'
+/** Friendly inline text for a failed "Compact now" click; Pi's own errors pass through. */
+function compactNowErrorText(error: string): string {
+  switch (error) {
+    case 'turn_in_progress':
+      return 'Finish the current turn first.'
+    case 'missing_conversation_id':
+      return 'No active chat.'
+    case 'broker_not_ready':
+      return 'Agent broker is not ready yet.'
+    case 'broker_busy':
+      return 'The agent is busy in another chat — try again in a moment.'
+    default:
+      return error
+    }
 }
 
 function PinGlyph({ className }: { className?: string }): React.ReactElement {
@@ -348,6 +360,18 @@ function PinGlyph({ className }: { className?: string }): React.ReactElement {
 }
 
 function ConvStatusIndicator({ status }: { status: ConvActivityStatus }): React.ReactElement {
+  if (status === 'question') {
+    return (
+      <span
+        className={convStatusQuestion}
+        role="status"
+        aria-label="Agent is waiting for your answer"
+        title="Agent is waiting for your answer"
+      >
+        ?
+      </span>
+    )
+  }
   if (status === 'running') {
     return (
       <span
@@ -758,6 +782,17 @@ export function App(): React.ReactElement {
   const [composerPrefillTick, setComposerPrefillTick] = useState(0)
   const [sendingConvIds, setSendingConvIds] = useState<Set<string>>(() => new Set())
   /**
+   * Optimistic user bubbles: the host does not insert the user message row
+   * until image encoding + broker acquire + session-ensure have all run inside
+   * the `chat:send` IPC, so the just-sent text/attachments used to be visible
+   * NOWHERE for seconds ("I dropped files and they don't show while it's
+   * analyzing"). Keyed by conversation; superseded when the real row lands via
+   * `refreshMessages`, cleared on send failure, auto-expired after the grace.
+   */
+  const [optimisticUserByConv, setOptimisticUserByConv] = useState<
+    Record<string, { text: string; ts: number }>
+  >({})
+  /**
    * Sends this renderer just made, keyed by conversation id -> ts. A turn is not in
    * `pendingTurns` on the host until the broker picks it up, so a reconcile that
    * lands in that window must not erase it.
@@ -765,6 +800,8 @@ export function App(): React.ReactElement {
   const optimisticSendingRef = useRef<Map<string, number>>(new Map())
   /** Conversations with a completed turn the operator has not opened since. */
   const [unreadConvIds, setUnreadConvIds] = useState<Set<string>>(() => new Set())
+  /** Conversations with an unanswered ask-question — "?" badge + pulsing title in the chat list. */
+  const [questionConvIds, setQuestionConvIds] = useState<Set<string>>(() => new Set())
   /** True when the active conversation has an in-flight agent turn. */
   const activeSending = activeId ? sendingConvIds.has(activeId) : false
   const activeTurnStartTs = useMemo(() => {
@@ -782,6 +819,20 @@ export function App(): React.ReactElement {
       if (prev.has(conversationId)) return prev
       const next = new Set(prev)
       next.add(conversationId)
+      return next
+    })
+  }, [])
+
+  const markOptimisticUser = useCallback((conversationId: string, text: string) => {
+    if (!conversationId) return
+    setOptimisticUserByConv((prev) => ({ ...prev, [conversationId]: { text, ts: Date.now() } }))
+  }, [])
+
+  const clearOptimisticUser = useCallback((conversationId: string) => {
+    setOptimisticUserByConv((prev) => {
+      if (!prev[conversationId]) return prev
+      const next = { ...prev }
+      delete next[conversationId]
       return next
     })
   }, [])
@@ -953,16 +1004,46 @@ export function App(): React.ReactElement {
   const activeThinkTankSessionViews = activeId ?
     (thinkTankSessionsByConv[activeId] ?? EMPTY_THINK_TANK_SESSION_VIEWS)
   : EMPTY_THINK_TANK_SESSION_VIEWS
-  const chatTimeline = useMemo(
-    () =>
-      buildChatTimeline({
-        messages,
-        bubbles: activeThinkTankBubbles,
-        sessions: activeThinkTankSessionViews,
-        liveSession: activeThinkTankSession,
-      }),
-    [messages, activeThinkTankBubbles, activeThinkTankSessionViews, activeThinkTankSession],
-  )
+  const chatTimeline = useMemo(() => {
+    const base = buildChatTimeline({
+      messages,
+      bubbles: activeThinkTankBubbles,
+      sessions: activeThinkTankSessionViews,
+      liveSession: activeThinkTankSession,
+    })
+    // Optimistic user bubble while the host prepares the turn (see
+    // `optimisticUserByConv`). Superseded rows are pruned by refreshMessages;
+    // also guard here for renders before the next refresh lands.
+    const op = activeId ? optimisticUserByConv[activeId] : undefined
+    if (!op) return base
+    const superseded = messages.some(
+      (m) => m.role === 'user' && m.created_at >= op.ts - 2000,
+    )
+    if (superseded || Date.now() - op.ts > OPTIMISTIC_SEND_GRACE_MS) return base
+    return [
+      ...base,
+      {
+        kind: 'message' as const,
+        key: `optimistic-user-${op.ts}`,
+        message: {
+          id: `optimistic-user-${op.ts}`,
+          role: 'user' as const,
+          content: op.text,
+          tool_calls_json: null,
+          status: 'complete' as const,
+          created_at: op.ts,
+          conversation_id: activeId,
+        },
+      },
+    ]
+  }, [
+    messages,
+    activeThinkTankBubbles,
+    activeThinkTankSessionViews,
+    activeThinkTankSession,
+    activeId,
+    optimisticUserByConv,
+  ])
   const [brokerInitError, setBrokerInitError] = useState<string | null>(null)
   /** Model Pi bound to the session (from broker), not Sylo prefs. */
   const [resolvedModel, setResolvedModel] = useState<{
@@ -976,6 +1057,10 @@ export function App(): React.ReactElement {
     sections: { label: string; chars: number; tokens: number; pct: number }[]
   } | null>(null)
   const [systemPromptStatsOpen, setSystemPromptStatsOpen] = useState(false)
+  /** "Compact now" (chat footer): conversation id with a manual compaction in flight. */
+  const [compactNowBusyId, setCompactNowBusyId] = useState<string | null>(null)
+  /** Transient inline error from the last manual compaction attempt (footer status). */
+  const [compactNowError, setCompactNowError] = useState<string | null>(null)
   const [actualContextByConv, setActualContextByConv] = useState<Record<string, {
     tokens: number
     includesSystemPrompt: boolean
@@ -1029,6 +1114,22 @@ export function App(): React.ReactElement {
     ].map((s) => ({ ...s, pct: total > 0 ? Math.round((s.tokens / total) * 1000) / 10 : 0 }))
     return { totalTokens: total, actualTokens, sections }
   }, [messages, systemPromptStats, liveDelta, actualContextByConv, activeId])
+
+  /** "Compact now": run Pi's manual compaction on the active conversation's context. */
+  const requestCompactNow = useCallback(async (conversationId: string) => {
+    if (compactNowBusyId !== null) return
+    setCompactNowError(null)
+    setCompactNowBusyId(conversationId)
+    try {
+      const r = await window.sylo.broker.compactNow(conversationId)
+      if (!r.ok) setCompactNowError(compactNowErrorText(r.error))
+    } catch (e) {
+      setCompactNowError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setCompactNowBusyId((cur) => (cur === conversationId ? null : cur))
+      window.setTimeout(() => setCompactNowError((cur) => (cur ? null : cur)), 8000)
+    }
+  }, [compactNowBusyId])
   const [diagnostics, setDiagnostics] = useState({
     userData: '',
     db: '',
@@ -1626,6 +1727,21 @@ export function App(): React.ReactElement {
     if (!activeId) return
     const m = await window.sylo.messages.list(activeId)
     setMessages(m as Msg[])
+    // Supersede the optimistic user bubble once the real row has landed (or
+    // after the grace window — the send may have failed silently upstream).
+    setOptimisticUserByConv((prev) => {
+      const op = prev[activeId]
+      if (!op) return prev
+      const superseded = m.some(
+        (row) => row.role === 'user' && row.created_at >= op.ts - 2000,
+      )
+      if (superseded || Date.now() - op.ts > OPTIMISTIC_SEND_GRACE_MS) {
+        const next = { ...prev }
+        delete next[activeId]
+        return next
+      }
+      return prev
+    })
     setLiveDelta((prev) => {
       const next = { ...prev }
       for (const row of m) {
@@ -2471,7 +2587,11 @@ export function App(): React.ReactElement {
     const u3 = window.sylo.chatEvents.onRefresh((p) => {
       if (!p?.conversationId) return
       if (p.conversationId === activeId) void refreshMessages()
-      if (p.kind === 'turnStarted') {
+            if (p.kind === 'turnStarted') {
+        // A turn boundary invalidates any unanswered question for this chat (the
+        // question tool call blocks the turn until answered or cancelled — a new
+        // turn starting means the previous one ended without a submit).
+        clearAskQuestionPromptsForConversation(p.conversationId)
         setUnreadConvIds((prev) => {
           if (!prev.has(p.conversationId)) return prev
           const next = new Set(prev)
@@ -2487,8 +2607,11 @@ export function App(): React.ReactElement {
         void refreshConversations()
         return
       }
-      if (p.kind === 'turnFinished') {
+            if (p.kind === 'turnFinished') {
         optimisticSendingRef.current.delete(p.conversationId)
+        // The turn ended (done / error / abort / broker exit): nothing is answerable
+        // anymore, so drop pending questions — keeps the "?" badge from sticking.
+        clearAskQuestionPromptsForConversation(p.conversationId)
         setSendingConvIds((prev) => {
           if (!prev.has(p.conversationId)) return prev
           const next = new Set(prev)
@@ -2511,12 +2634,13 @@ export function App(): React.ReactElement {
         void refreshConversations()
         return
       }
-      if (p.kind === 'conversationDeleted') {
+            if (p.kind === 'conversationDeleted') {
         if (p.conversationId === activeIdRef.current) {
           activeIdRef.current = undefined
           setActiveId(undefined)
         }
         optimisticSendingRef.current.delete(p.conversationId)
+        clearAskQuestionPromptsForConversation(p.conversationId)
         setUnreadConvIds((prev) => {
           if (!prev.has(p.conversationId)) return prev
           const next = new Set(prev)
@@ -2538,8 +2662,14 @@ export function App(): React.ReactElement {
       pending.set(ev.messageId, (pending.get(ev.messageId) ?? '') + ev.delta)
       scheduleLiveDeltaFlush()
     })
-    const uAsk = window.sylo.chatEvents.onAskQuestion?.((p) => {
+        const uAsk = window.sylo.chatEvents.onAskQuestion?.((p) => {
       ingestAskQuestionPayload(p as Record<string, unknown>)
+    })
+    // Sidebar "?" badge: track conversations with an unanswered question. The store
+    // notifies on every upsert/clear (question arrives, answered, or turn-boundary
+    // cleanup below), so this stays in sync for every chat, active or not.
+    const uQ = subscribeAskQuestionPrompts(() => {
+      setQuestionConvIds(pendingQuestionConversationIds())
     })
     const u5 = window.sylo.chatEvents.onTool((x) => {
       const pending = liveWorkflowPendingRef.current
@@ -2559,6 +2689,7 @@ export function App(): React.ReactElement {
       u4()
       u5()
       uAsk?.()
+      uQ()
       if (liveDeltaFlushTimerRef.current != null) {
         clearTimeout(liveDeltaFlushTimerRef.current)
         liveDeltaFlushTimerRef.current = null
@@ -2616,23 +2747,48 @@ export function App(): React.ReactElement {
       attachments?: { path: string; name: string }[],
     ): Promise<boolean> => {
       if (!activeId || safeMode || !agentReady) return false
+      // Same optimistic-bubble rationale as the direct send path: the host
+      // inserts the user row only after image encoding + broker setup.
+      markOptimisticUser(activeId, text)
       try {
         const r = await window.sylo.chat.deliverQueued(activeId, text, attachments)
-        if (!r.ok) return false
+        if (!r.ok) {
+          clearOptimisticUser(activeId)
+          return false
+        }
         markOptimisticSending(activeId)
         void refreshMessages()
         return true
       } catch {
+        clearOptimisticUser(activeId)
         return false
       }
     },
-    [activeId, safeMode, agentReady, refreshMessages, markOptimisticSending],
+    [activeId, safeMode, agentReady, refreshMessages, markOptimisticSending, markOptimisticUser, clearOptimisticUser],
   )
 
   const handleSendingStarted = useCallback(() => {
     if (!activeId) return
     markOptimisticSending(activeId)
   }, [activeId, markOptimisticSending])
+
+  /**
+   * The transcript area accepts file drops and forwards them to the composer
+   * (see chatDropBus) — the shell-level drop handler reads `File.path`, which
+   * Electron 32+ removed, so drops outside the composer used to silently
+   * no-op. Drops with no files (text, URLs) fall through untouched.
+   */
+  const chatAreaDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (e.dataTransfer?.types?.includes('Files')) e.preventDefault()
+  }, [])
+  const chatAreaDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    const files = Array.from(e.dataTransfer?.files ?? [])
+    if (files.length === 0) return
+    if (forwardDroppedFiles(files)) {
+      e.preventDefault()
+      e.stopPropagation()
+    }
+  }, [])
 
   const handleSegmentToggle = useCallback((key: string, next: boolean) => {
     setSegmentOverrides((prev) => ({ ...prev, [key]: next }))
@@ -4224,9 +4380,9 @@ export function App(): React.ReactElement {
                     {searching ? `No chats matching "${convSearch.trim()}"` : 'No chats yet'}
                   </div>
                 ) : null}
-          {wsConvs.map((c) => {
+                    {wsConvs.map((c) => {
             const selected = c.id === activeId
-            const activity = convActivityStatus(c.id, sendingConvIds, unreadConvIds)
+            const activity = convActivityStatus(c.id, sendingConvIds, unreadConvIds, questionConvIds)
             return (
             <div
               key={c.id}
@@ -4251,8 +4407,15 @@ export function App(): React.ReactElement {
                     })
                   }}
                 >
-                  <ConvStatusIndicator status={activity} />
-                  <span className={convRowSelectLabel}>{c.title || '(untitled)'}</span>
+                                    <ConvStatusIndicator status={activity} />
+                  <span
+                    className={cn(
+                      convRowSelectLabel,
+                      activity === 'question' && convRowTitleAttention,
+                    )}
+                  >
+                    {c.title || '(untitled)'}
+                  </span>
                   <span
                     className={convTimestamp}
                     title={new Date(c.updated_at).toLocaleString()}
@@ -4647,6 +4810,8 @@ export function App(): React.ReactElement {
                     className={chatArea}
                     onScroll={onChatAreaScroll}
                     onWheel={onChatAreaWheel}
+                    onDragOver={chatAreaDragOver}
+                    onDrop={chatAreaDrop}
                   >
                     <ChatTimelineList
                       key={activeId ?? 'none'}
@@ -4739,6 +4904,20 @@ export function App(): React.ReactElement {
                       >
                         ⚡ {(contextStats.actualTokens ?? contextStats.totalTokens).toLocaleString()} tok
                       </button>
+                    : null}
+                    {activeId && agentReady && !activeSending && contextStats.totalTokens > 0 ?
+                      <button
+                        type="button"
+                        className={cn(btnGhostSm, 'text-[0.72rem] opacity-70 hover:opacity-100')}
+                        disabled={compactNowBusyId !== null}
+                        title="Compact now — summarize older turns into a note to free context space"
+                        onClick={() => void requestCompactNow(activeId)}
+                      >
+                        {compactNowBusyId === activeId ? 'Compacting…' : 'Compact now'}
+                      </button>
+                    : null}
+                    {compactNowError ?
+                      <span className={cn(mutedText, 'text-[0.72rem] opacity-80')}>{compactNowError}</span>
                     : null}
                     {systemPromptStatsOpen && contextStats.totalTokens > 0 ?
                       <div className={cn(mutedText, 'text-[0.72rem] leading-tight border border-border rounded px-2 py-1.5 mb-1')}>
@@ -4839,6 +5018,8 @@ export function App(): React.ReactElement {
                   className={chatArea}
                   onScroll={onChatAreaScroll}
                   onWheel={onChatAreaWheel}
+                  onDragOver={chatAreaDragOver}
+                  onDrop={chatAreaDrop}
                 >
                   <ChatTimelineList
                     key={activeId ?? 'none'}
@@ -4932,6 +5113,20 @@ export function App(): React.ReactElement {
                       ⚡ {(contextStats.actualTokens ?? contextStats.totalTokens).toLocaleString()} tok
                     </button>
                   : null}
+                  {activeId && agentReady && !activeSending && contextStats.totalTokens > 0 ?
+                    <button
+                      type="button"
+                      className={cn(btnGhostSm, 'text-[0.72rem] opacity-70 hover:opacity-100')}
+                      disabled={compactNowBusyId !== null}
+                      title="Compact now — summarize older turns into a note to free context space"
+                      onClick={() => void requestCompactNow(activeId)}
+                    >
+                      {compactNowBusyId === activeId ? 'Compacting…' : 'Compact now'}
+                    </button>
+                  : null}
+                  {compactNowError ?
+                    <span className={cn(mutedText, 'text-[0.72rem] opacity-80')}>{compactNowError}</span>
+                  : null}
                   {systemPromptStatsOpen && contextStats.totalTokens > 0 ?
                     <div className={cn(mutedText, 'text-[0.72rem] leading-tight border border-border rounded px-2 py-1.5 mb-1')}>
                       {contextStats.sections.map((s, i) => (
@@ -5019,6 +5214,12 @@ export function App(): React.ReactElement {
               onSendingStarted={handleSendingStarted}
               onRefreshMessages={refreshMessages}
               onDeliverQueued={deliverQueuedText}
+              onOptimisticUserMessage={(text) => {
+                if (activeId) markOptimisticUser(activeId, text)
+              }}
+              onOptimisticUserMessageFailed={() => {
+                if (activeId) clearOptimisticUser(activeId)
+              }}
             />
           </>
         )}

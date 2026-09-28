@@ -34,6 +34,7 @@ import {
 } from './bind-pi-extensions.js'
 import { ensureWindowsPiShellFallback } from './pi-windows-shell.js'
 import { discoverBundledSkillPaths } from '../shared/bundled-skill-discovery.js'
+import { applyCompactionReserveToSettings } from '../shared/sylo-compaction-settings.js'
 import { SYLO_DEFAULT_MODEL_ID, SYLO_DEFAULT_MODEL_PROVIDER } from '../shared/sylo-model-defaults.js'
 import { SYLO_MODEL_PROVIDERS } from '../shared/chatgpt-codex.js'
 import { deriveExtensionDisplayName } from '../shared/capability-display-names-node.js'
@@ -85,6 +86,12 @@ type BrokerInit = {
   sessionCwd: string
   modelProvider: string
   modelId: string
+  /**
+   * Per-model compaction trigger — Pi `reserveTokens` override resolved by the host
+   * (null = Pi default, 16,384). Applied to the session settings manager in the
+   * createRuntime factory before the session is created.
+   */
+  compactionReserveTokens?: number | null
   /** Sylo policy: omitted paths are treated as empty (nothing excluded). */
   disabledSkillPaths?: string[]
   disabledExtensionPaths?: string[]
@@ -154,11 +161,30 @@ type BrokerSwitchSession = {
   imageModelProvider?: string
   /** Per-chat thinking-level override (off/minimal/low/medium/high/[xhigh|max]; omitted = Pi default). */
   thinkingLevel?: string
+  /** Compaction reserveTokens override for the switched-to chat's model (null/undefined = Pi default). */
+  compactionReserveTokens?: number | null
 }
 
 type BrokerForkBeforeLastUser = { type: 'fork_before_last_user'; requestId: string }
 
 type BrokerCancelSubagent = { type: 'cancel_subagent'; runId: string }
+
+/**
+ * Live compaction-trigger update (Settings → Model (Pi) → Compaction). Applied without a
+ * broker restart, but only when it targets this broker's currently-bound model — every
+ * other case self-corrects on the next init/switch_session, which always carries the
+ * host-resolved reserve for that conversation's model.
+ */
+type BrokerCompactionUpdate = {
+  type: 'compaction_update'
+  provider: string
+  modelId: string
+  /** Pi reserveTokens override; null = Pi default (16,384). */
+  reserveTokens: number | null
+}
+
+/** Operator "Compact now" (chat footer): manual compaction of the active session. */
+type BrokerCompactNow = { type: 'compact_now'; requestId: string }
 
 /**
  * Operator-forced subagent run (`@mention` in the composer), driven by the host
@@ -196,6 +222,8 @@ type BrokerMessageIn =
   | BrokerCancelSubagent
   | BrokerRunSubagent
   | BrokerCancelForcedSubagent
+  | BrokerCompactionUpdate
+  | BrokerCompactNow
   // Pass-through IPC messages: the broker does not consume these. Main → broker
   // IPC fans them out to every `process.on('message')` listener (e.g. the
   // sylo-tasks extension's edit listener, or think-tank/schedule RPC waiters).
@@ -621,6 +649,21 @@ let lastCompaction: { session: unknown; at: number } | null = null
 let brokerModelProvider = ''
 let brokerModelId = ''
 
+/**
+ * Per-model compaction trigger for the active session — Pi `reserveTokens` override
+ * resolved by the host (null = Pi default, 16,384). Applied to the session settings
+ * manager inside the `createRuntime` factory: that factory re-runs on every session
+ * switch, so the value always matches the switched-to conversation's model. Pi reads
+ * `settings.compaction.reserveTokens` live on every auto-compaction check, so a
+ * `compaction_update` message applies without a broker restart.
+ */
+let brokerCompactionReserve: number | null = null
+
+function sanitizeCompactionReserve(raw: unknown): number | null {
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) return null
+  return Math.round(raw)
+}
+
 function installSubagentTurnIdBridge(): void {
   if (!process.send) return
   const nativeSend = process.send.bind(process)
@@ -964,6 +1007,7 @@ async function handleInit(msg: BrokerInit): Promise<void> {
     // the createRuntime factory (Pi re-resolves the model on session switch).
     brokerModelProvider = msg.modelProvider
     brokerModelId = msg.modelId
+    brokerCompactionReserve = sanitizeCompactionReserve(msg.compactionReserveTokens)
     const modelCapture = model
     const extPaths = extraExtensionPaths
 
@@ -980,6 +1024,11 @@ async function handleInit(msg: BrokerInit): Promise<void> {
       const reg = new ModelRegistry(mr)
       const settingsManager = SettingsManager.create(effCwd, effAgentDir)
       ensureWindowsPiShellFallback(settingsManager, effCwd)
+      // Per-model compaction trigger (Settings → Model (Pi) → Compaction): apply the
+      // host-resolved reserveTokens override before the session is created. This factory
+      // re-runs on every session switch, so the override always matches the conversation's
+      // model; null restores Pi's built-in default.
+      applyCompactionReserveToSettings(settingsManager, brokerCompactionReserve)
 
       // Pi resolves package-bundled skills automatically when packages are listed in settings.json,
       // but only by their resolved on-disk paths (e.g. ~/.pi/agent/npm/node_modules/<pkg>/skills/…).
@@ -1126,6 +1175,9 @@ async function handleSwitchSession(msg: BrokerSwitchSession): Promise<void> {
     // re-resolves and re-binds the new model on the switched session. Empty /
     // undefined keeps the current model (no change).
     if (typeof msg.modelProvider === 'string') brokerModelProvider = msg.modelProvider
+    // Switch messages always carry the reserve (null = Pi default) — assigned even when
+    // null so the previous chat's override cannot leak into the switched-to conversation.
+    brokerCompactionReserve = sanitizeCompactionReserve(msg.compactionReserveTokens)
     if (typeof msg.modelId === 'string') brokerModelId = msg.modelId
     // Subagents spawn their own Pi CLI and read the orchestrator model from these env
     // vars at spawn time. Env is frozen at fork, so without re-publishing here a chat
@@ -1624,6 +1676,59 @@ async function handleRunSubagent(msg: BrokerRunSubagent): Promise<void> {
   })
 }
 
+function handleCompactionUpdate(msg: BrokerCompactionUpdate): void {
+  // Only apply when it targets this broker's currently-bound model — a chat bound to a
+  // different model ignores the update and gets its own (correct) reserve on the next
+  // init / switch_session, which always carries the host-resolved value.
+  const provider = (msg.provider || '').trim()
+  const modelId = (msg.modelId || '').trim()
+  if (provider !== brokerModelProvider.trim() || modelId !== brokerModelId.trim()) return
+  brokerCompactionReserve = sanitizeCompactionReserve(msg.reserveTokens)
+  applyCompactionReserveToSettings(session?.settingsManager, brokerCompactionReserve)
+}
+
+/**
+ * Operator "Compact now" (chat footer): run Pi's manual compaction on the active session.
+ * Pi aborts any in-flight agent operation first; the renderer disables the button while a
+ * turn is streaming, so this normally fires between turns. Session event subscription is
+ * prompt-scoped, so compaction events are not forwarded — the result reply is what the
+ * host turns into the timeline's compaction notice.
+ */
+async function handleCompactNow(msg: BrokerCompactNow): Promise<void> {
+  const reply = (
+    r:
+      | { ok: true; summary?: string; tokensBefore?: number; tokensAfter?: number }
+      | { ok: false; error: string },
+  ) => {
+    process.send?.({ type: 'compact_now_result', requestId: msg.requestId, ...r })
+  }
+  if (!session) {
+    reply({ ok: false, error: 'No active session' })
+    return
+  }
+  if (session.isCompacting) {
+    reply({ ok: false, error: 'Compaction is already running' })
+    return
+  }
+  try {
+    const result = await session.compact()
+    // A usage reading taken before this compaction describes the PRE-compaction context —
+    // invalidate it for context-window stats until a fresh reading lands (same as the
+    // prompt-path compaction_end handling).
+    lastCompaction = { session, at: Date.now() }
+    sendContextWindowStats()
+    reply({
+      ok: true,
+      summary: typeof result.summary === 'string' ? result.summary : undefined,
+      tokensBefore: typeof result.tokensBefore === 'number' ? result.tokensBefore : undefined,
+      tokensAfter:
+        typeof result.estimatedTokensAfter === 'number' ? result.estimatedTokensAfter : undefined,
+    })
+  } catch (e) {
+    reply({ ok: false, error: e instanceof Error ? e.message : String(e) })
+  }
+}
+
 async function handleSteer(msg: BrokerSteer): Promise<void> {
   if (!session) return
   try {
@@ -1692,6 +1797,14 @@ function handleMessage(msg: unknown): void {
   if (m.type === 'cancel_forced_subagent') {
     const turnId = typeof m.turnId === 'string' ? m.turnId.trim() : ''
     if (turnId) forcedRunAborts.get(turnId)?.abort()
+    return
+  }
+  if (m.type === 'compaction_update') {
+    handleCompactionUpdate(m)
+    return
+  }
+  if (m.type === 'compact_now') {
+    void handleCompactNow(m)
     return
   }
   if (m.type === 'sylo_think_tank_rpc_result') {

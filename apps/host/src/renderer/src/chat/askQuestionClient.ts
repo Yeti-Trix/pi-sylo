@@ -52,6 +52,35 @@ export function getAskQuestionPrompt(toolCallId: string): AskQuestionPrompt | un
   return pendingByToolCallId.get(toolCallId)
 }
 
+/** Conversation ids that currently have an unanswered question (operator attention needed). */
+export function pendingQuestionConversationIds(): Set<string> {
+  const out = new Set<string>()
+  for (const prompt of pendingByToolCallId.values()) {
+    const convId = prompt.conversationId?.trim()
+    if (convId) out.add(convId)
+  }
+  return out
+}
+
+/**
+ * Drop every unanswered question for a conversation — the turn ended (done, error,
+ * abort, broker exit) or a new one started, so nothing in it is answerable anymore.
+ * Keeps the sidebar's "attention needed" indicator from sticking forever when a
+ * waiting turn dies without the question being submitted.
+ */
+export function clearAskQuestionPromptsForConversation(conversationId: string): void {
+  const id = conversationId.trim()
+  if (!id) return
+  let removed = false
+  for (const [toolCallId, prompt] of [...pendingByToolCallId.entries()]) {
+    if (prompt.conversationId?.trim() === id) {
+      pendingByToolCallId.delete(toolCallId)
+      removed = true
+    }
+  }
+  if (removed) notify()
+}
+
 export function subscribeAskQuestionPrompts(cb: () => void): () => void {
   listeners.add(cb)
   return () => {

@@ -63,6 +63,13 @@ export function SideChatPane({
   const [rows, setRows] = useState<SideMessage[]>([])
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  /**
+   * Inline status/error line. The send flow used to die silently in five
+   * places (empty parent, wedged `sending`, createSide failure, IPC
+   * rejection, and ignored `deferred`) — the operator's message would just
+   * vanish. Everything now lands here.
+   */
+  const [status, setStatus] = useState<{ text: string; bad: boolean } | null>(null)
   /** Streaming assistant tail (between DB writes) keyed by turn. */
   const streamBufRef = useRef('')
   const [streamText, setStreamText] = useState('')
@@ -100,6 +107,10 @@ export function SideChatPane({
     setChildId(null)
     setRows([])
     setStreamText('')
+    // A turn that never produced turnFinished for the previous parent's child
+    // must not wedge the next parent's composer.
+    setSending(false)
+    setStatus(null)
     pendingModelRef.current = null
     if (!parentId) {
       setChildLoading(false)
@@ -229,11 +240,13 @@ export function SideChatPane({
           if (!childId || p.conversationId !== childId) return
           if (p.kind === 'turnStarted') {
             setSending(true)
+            setStatus(null)
             streamBufRef.current = ''
             setStreamText('')
             void reload(childId)
           } else if (p.kind === 'turnFinished') {
             setSending(false)
+            setStatus(null)
             streamBufRef.current = ''
             setStreamText('')
             void reload(childId)
@@ -264,37 +277,79 @@ export function SideChatPane({
   const send = useCallback(async () => {
     const text = input.trim()
     if (!text || !parentId) return
+    setStatus(null)
     let id = childId
-    if (!id) {
-      if (sending) return // no child yet + a turn running cannot co-occur
-      const r = await window.sylo.conversations.createSide(parentId)
-      if (!r.ok) return
-      id = r.conversation.id
-      setChildId(id)
-      // Apply a pre-child model pick before the first send resolves the model.
-      const pend = pendingModelRef.current
-      if (pend) {
-        pendingModelRef.current = null
-        await window.sylo.conversations.setModel(id, pend)
+    try {
+      if (!id) {
+        if (sending) return // no child yet + a turn running cannot co-occur
+        const r = await window.sylo.conversations.createSide(parentId)
+        if (!r.ok) {
+          setStatus({ text: `Couldn't start the side chat: ${r.error}`, bad: true })
+          return
+        }
+        id = r.conversation.id
+        setChildId(id)
+        // Apply a pre-child model pick before the first send resolves the model.
+        const pend = pendingModelRef.current
+        if (pend) {
+          pendingModelRef.current = null
+          await window.sylo.conversations.setModel(id, pend)
+        }
       }
+    } catch (e) {
+      setStatus({
+        text: `Couldn't start the side chat: ${e instanceof Error ? e.message : String(e)}`,
+        bad: true,
+      })
+      return
     }
     setInput('')
     streamBufRef.current = ''
-    if (sending) {
-      // v2 queue/steer: while a turn runs, Enter STEERS the active response
-      // (user row lands in the thread; Pi redirects mid-turn). If the turn
-      // just finished (state lag), fall back to a normal chained send.
-      const r = await window.sylo.chat.steer(id, text)
-      if (!r.ok) {
-        await window.sylo.chat.send(id, text)
+    try {
+      if (sending) {
+        // v2 queue/steer: while a turn runs, Enter STEERS the active response
+        // (user row lands in the thread; Pi redirects mid-turn). If the turn
+        // just finished (state lag), fall back to a normal chained send.
+        const r = await window.sylo.chat.steer(id, text)
+        if (!r.ok) {
+          const s = await window.sylo.chat.send(id, text)
+          if (s.deferred) {
+            setStatus({
+              text: 'Queued — it starts when the current turn in another chat finishes.',
+              bad: false,
+            })
+            setSending(true)
+            void reload(id)
+            return
+          }
+        }
+        void reload(id)
+        return
+      }
+      setSending(true)
+      setStreamText('')
+      const r = await window.sylo.chat.send(id, text)
+      if (r.deferred) {
+        // Cross-conversation deferral: the user row is already in the thread,
+        // but the turn won't stream until the other conversation's turn
+        // finishes (concurrent turns off / slots busy). Say so — otherwise
+        // this looks exactly like a dead send.
+        setStatus({
+          text: 'Queued — it starts when the current turn in another chat finishes.',
+          bad: false,
+        })
+        void reload(id)
+        return
       }
       void reload(id)
-      return
+    } catch (e) {
+      setStatus({
+        text: `Send failed: ${e instanceof Error ? e.message : String(e)}`,
+        bad: true,
+      })
+      setSending(false)
+      setInput(text)
     }
-    setSending(true)
-    setStreamText('')
-    await window.sylo.chat.send(id, text)
-    void reload(id)
   }, [input, parentId, sending, childId, reload])
 
   const noParent = !parentId
@@ -303,6 +358,18 @@ export function SideChatPane({
   return (
     <div className={cn('flex min-h-0 min-w-0 flex-1 flex-col', className)}>
       <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        {status ? (
+          <p
+            role={status.bad ? 'alert' : 'status'}
+            className={cn(
+              mutedText,
+              'm-0 mb-2 rounded-md border border-border bg-[rgb(255_255_255/0.04)] px-2.5 py-1.5 text-[0.75rem]',
+              status.bad && 'border-[rgb(241_106_80/0.45)] text-[#f6a89b]',
+            )}
+          >
+            {status.text}
+          </p>
+        ) : null}
         {noParent ?
           <p className={cn(mutedText, 'm-0 text-center text-[0.8rem]')}>
             Open a chat to use a side conversation.

@@ -829,6 +829,13 @@ export const convStatusSpinner =
 
   'inline-block h-2.5 w-2.5 shrink-0 animate-spin rounded-full border border-text-muted/50 border-t-accent'
 
+/** Agent paused on an ask-question: accent "?" badge, pulsing in the same rhythm as the title glow. */
+export const convStatusQuestion =
+  'inline-flex h-2.5 w-2.5 shrink-0 animate-[convQuestionBadge_1.6s_ease-in-out_infinite] items-center justify-center rounded-full bg-accent text-[0.55rem] font-bold leading-none text-bg-primary'
+
+/** Chat title of a chat waiting on the operator's answer — fade/glow draw-attention loop. */
+export const convRowTitleAttention = 'animate-[convQuestionGlow_1.6s_ease-in-out_infinite]'
+
 
 
 export const convRowSelectActive = 'font-medium text-text-primary'
@@ -1072,6 +1079,17 @@ export const chatQueueText =
 
 export const chatQueueSendNow =
   'shrink-0 cursor-pointer rounded-md border border-[rgb(255_255_255/0.3)] bg-[rgb(255_255_255/0.08)] px-2 py-0.5 text-[0.75rem] text-text-primary hover:bg-[rgb(255_255_255/0.16)] disabled:cursor-not-allowed disabled:opacity-50'
+
+export const chatQueueEdit =
+  'min-w-0 flex-1 resize-none rounded-md border border-[rgb(255_255_255/0.35)] bg-bg-primary px-2 py-1 text-[0.82rem] leading-snug text-text-primary outline-none focus:border-accent'
+
+export const chatQueueEditBtn =
+  'shrink-0 cursor-pointer rounded-md border border-[rgb(255_255_255/0.3)] bg-[rgb(255_255_255/0.08)] px-2 py-0.5 text-[0.75rem] text-text-primary hover:bg-[rgb(255_255_255/0.16)] disabled:cursor-not-allowed disabled:opacity-50'
+
+export const chatQueueAttachBadge =
+  'shrink-0 rounded bg-[rgb(255_255_255/0.08)] px-1.5 py-0.5 text-[0.7rem] text-text-secondary'
+
+export const chatAttachmentPending = 'border-dashed opacity-75'
 
 export const chatQueueRemove =
   'shrink-0 cursor-pointer border-none bg-transparent px-1 py-0 text-base leading-none text-text-secondary hover:text-text-primary'

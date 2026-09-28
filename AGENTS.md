@@ -126,6 +126,18 @@ improvements are welcome and get reviewed before they land in a release:
 
 The maintainer reviews PRs and folds accepted changes into the next Sylo release. Larger
 features should start as an Issue for discussion first.
+## Hosted agents: keep cheap work on cheap models
+
+Subagent model pins are **operator-configured by agent name** (Developer → Settings → Subagents, or the Subagents button in the chat model bar for per-chat pins). You cannot pick a model per `subagent` call, and you should never assume a pin exists.
+
+When the operator has pinned cheap/free models to a role (e.g. **scout** on an OpenRouter free model such as `nvidia/nemotron-3-ultra-550b-a55b:free`), route high-volume, low-intelligence work through those roles instead of doing it inline on the paid chat model:
+
+- **Websearch / web page reading** — hand the search + skim to a subagent run and have it return a compressed summary with source URLs.
+- **Doc / file reading** — have scout or a worker run grep/read across many files and return only the relevant excerpts.
+- **Codebase recon** — scout exists exactly for this.
+
+Resolution order for a subagent run: per-agent pin → all-subagents pin → the chat's model. See [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) → “Cheap models for low-stakes subagent work” for the setup recipe.
+
 ## Work coordination — check the issue board FIRST
 
 Before starting ANY feature, fix, or refactor in this repo (any tool, any session):

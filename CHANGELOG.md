@@ -8,9 +8,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Chat list shows when an agent needs an answer:** a chat whose agent paused on a question now shows a pulsing **?** badge in the chat list instead of the running spinner, and its title gently fades and glows until you answer — visible from anywhere in the app, not just while that chat is open. The badge clears the moment you submit the answer (or when the turn ends / a new turn starts), so it never sticks on a dead turn.
+
+- **Compact now — chat footer button:** a **Compact now** button next to the context token counter (both chat layouts) runs Pi's manual compaction on the active chat on demand — like Claude's `/compact`. It summarizes older turns into a compact note and frees context space immediately; the same compaction-notice card as auto-compaction appears in the timeline (labeled "manual"), and the footer token count drops. Disabled while the chat's turn is streaming (the host re-checks too, so a stale click can never abort an in-flight turn), with inline errors for "nothing to compact", "already compacted", or a busy broker.
+
+- **Per-model compaction trigger — choose when context is summarized:** Settings ▸ Model (Pi) now has a **Compaction** section. Pi's default (compact when the context window fills to `window − 16,384` reserved tokens, ≈91.8% on a 200k model) is shown for the selected model, and you can override the trigger as a % of that model's context window. Overrides are stored per model (switching models and back keeps each model's trigger), a **Restore default** button returns to Pi's built-in behavior, and saves apply to live sessions immediately — no broker restart. Host→broker plumbing carries the resolved reserve on every session init/switch, so each conversation's model always gets its own trigger.
+
+- **Manage providers — configure every provider from one place:** Settings ▸ Model (Pi) ▸ **Manage providers** opens a modal listing all six providers (Ollama, ChatGPT OAuth, OpenAI, Anthropic, Groq, OpenRouter) with live status — key saved + masked preview, ChatGPT sign-in state, Ollama reachability — and inline actions to save/replace/remove API keys or sign in/out, all independent of the active chat model. Saving refreshes the chat and subagent model pickers immediately, and a broker-restart shortcut applies new credentials to live sessions.
+
+- **Docs — free models for low-stakes subagent work:** guidance in docs/GETTING_STARTED.md + AGENTS.md on pinning a free model (e.g. Nemotron 3 Ultra on OpenRouter) to scout by agent name so high-volume, low-intelligence subagent tasks (websearch, doc reading, recon) run free instead of burning paid tokens.
+
+- **Queued follow-ups — inline edit:** every queued message chip now has an ✎ edit action. Enter saves, Shift+Enter adds a line, Esc cancels. The attachment paths attached to the queued message are preserved verbatim while you edit the prose; emptying the text removes the item (unless it carries attachments).
+
 - **Chat concurrency — configurable max in-flight turns:** the "Allow concurrent agent turns across conversations" setting now lets you pick how many turns may run at once (1–16, default 4) instead of a hardcoded 4. New "Max concurrent turns" number field in Settings ▸ Chat concurrency; each in-flight turn beyond the first still uses its own Pi broker process.
 
 - **Schedules — per-schedule chat mode:** every schedule can now choose between **"New chat each run"** (previous, still the default) and **"Continue in same chat"** — each fire appends the prompt turn into one persistent conversation. Selectable in the Schedules form for both new and existing schedules. Self-healing: if the target chat is missing (first run), deleted, or archived, the next fire creates a fresh chat and continues there. "Run now" and startup-catchup follow the same rule.
+
+### Changed
+
+- **Queued follow-ups survive chat switches:** the queue strip is now remembered per conversation (in-memory, same lifetime as composer drafts). Queue a message in one chat, switch to another (or to a non-chat tab), come back — the queued message is still there instead of silently disappearing. It still auto-sends when its turn finishes while you watch that chat; if you were elsewhere when the turn finished, it waits for you (Send-now ✦ or the next finished turn) rather than firing unannounced.
+
+- **Drop files anywhere in the chat transcript:** the whole chat area now accepts file drops and hands them to the composer. Previously only the small composer box accepted drops — anywhere else silently did nothing (the shell-level drop handler relied on `File.path`, which Electron 32+ removed).
+
+### Fixed
+
+- **Side chat (canvas ▸ Apps ▸ Side chat) no longer fails silently:** the send flow had five silent no-op paths — including a `sending` flag that was never reset when the parent chat changed, `createSide` failures that vanished, and ignored "deferred" turns (with concurrent turns off — the default — a side-chat send while the main chat is mid-turn is queued behind it, which looked exactly like a dead send). Every failure now shows an inline status line in the pane; a deferred send shows "Queued — it starts when the current turn in another chat finishes"; a failed send restores the typed text and resets the composer. Host side: a 5 s sweep now retries deferred turns while a broker slot is free, so a queued turn can no longer sit stuck forever if the event-driven flush loses a race.
+
+- **Dropped files are visible immediately:** dropped files/images now show placeholder chips the instant they land ("reading…" while each file resolves), instead of appearing only after per-file processing. And a sent message with attachments now appears in the timeline right away — an optimistic user bubble renders from the moment you press Send and is replaced by the real message when the host finishes preparing the turn (image encode + broker start used to leave seconds where the just-sent files were visible nowhere).
 
 ## [0.4.0] - 2026-09-10
 
