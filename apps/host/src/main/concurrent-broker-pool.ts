@@ -9,6 +9,19 @@ export type OverflowBrokerSlot = {
   ready: boolean
   spawnGeneration: number
   readyWaiters: Array<(ok: boolean) => void>
+  /**
+   * Binding the slot's Pi init loaded: conversation id, session path/cwd, and
+   * the disabled-policy + model fingerprints (same construction as
+   * ensureBrokerSessionForConversation uses at turn-start). When they all match,
+   * turn-start skips the redundant switchSession — the fork's init already
+   * loaded exactly this session. Optional fields: a slot without a recorded
+   * binding always gets the switch (safe default).
+   */
+  boundConversationId?: string
+  boundSessionAbs?: string
+  boundSessionCwd?: string
+  boundDisabledFp?: string
+  boundModelFp?: string
 }
 
 export class TurnBrokerPool {

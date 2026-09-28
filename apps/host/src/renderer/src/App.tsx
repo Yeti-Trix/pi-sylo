@@ -687,6 +687,8 @@ export function App(): React.ReactElement {
   const [activeId, setActiveId] = useState<string | undefined>()
   const activeIdRef = useRef<string | undefined>(undefined)
   activeIdRef.current = activeId
+  /** Monotonic token for refreshMessages: only the newest fetch for the still-active conversation may paint. */
+  const messagesRefreshGenRef = useRef(0)
   const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([])
   const [dragWsId, setDragWsId] = useState<string | null>(null)
   const [dropHint, setDropHint] = useState<WorkspaceDropHint | null>(null)
@@ -1724,20 +1726,28 @@ export function App(): React.ReactElement {
   }, [sidebarWorkspaceId])
 
   const refreshMessages = useCallback(async () => {
-    if (!activeId) return
-    const m = await window.sylo.messages.list(activeId)
+    const conv = activeId
+    if (!conv) return
+    // Stale-result guard: bump a generation before the await and discard the
+    // result when a newer fetch started, or when the operator switched to
+    // another conversation meanwhile. Without this, an in-flight fetch for chat
+    // A resolving after a switch could paint A's rows into chat B ("message
+    // shows in the wrong chat"), self-healing only on the next refresh.
+    const gen = ++messagesRefreshGenRef.current
+    const m = await window.sylo.messages.list(conv)
+    if (gen !== messagesRefreshGenRef.current || activeIdRef.current !== conv) return
     setMessages(m as Msg[])
     // Supersede the optimistic user bubble once the real row has landed (or
     // after the grace window — the send may have failed silently upstream).
     setOptimisticUserByConv((prev) => {
-      const op = prev[activeId]
+      const op = prev[conv]
       if (!op) return prev
       const superseded = m.some(
         (row) => row.role === 'user' && row.created_at >= op.ts - 2000,
       )
       if (superseded || Date.now() - op.ts > OPTIMISTIC_SEND_GRACE_MS) {
         const next = { ...prev }
-        delete next[activeId]
+        delete next[conv]
         return next
       }
       return prev

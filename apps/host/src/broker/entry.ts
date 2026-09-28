@@ -92,6 +92,8 @@ type BrokerInit = {
    * createRuntime factory before the session is created.
    */
   compactionReserveTokens?: number | null
+  /** Per-chat thinking-level override (off/minimal/low/medium/high/[xhigh|max]; '' = Pi default). Applied after the session exists — required so a freshly spawned overflow broker that skips switchSession still honors the chat's level. */
+  thinkingLevel?: string
   /** Sylo policy: omitted paths are treated as empty (nothing excluded). */
   disabledSkillPaths?: string[]
   disabledExtensionPaths?: string[]
@@ -1129,6 +1131,21 @@ async function handleInit(msg: BrokerInit): Promise<void> {
     runtime = rt
     await setupPiExtensionHost(rt)
     applyImplicitOutOfScopeSkillBlocks()
+    // Per-chat thinking-level override at init: publish to env (same contract as
+    // the switch path, empty means Pi default) and apply to the session so the
+    // next provider request carries it. Must run before `ready` so the resolved
+    // model reports the effective level. try/catch: an unsupported level must
+    // not fail broker init — keep Pi default.
+    if (typeof msg.thinkingLevel === 'string') {
+      process.env.SYLO_THINKING_LEVEL = msg.thinkingLevel.trim()
+    }
+    if (msg.thinkingLevel && msg.thinkingLevel.trim() !== '') {
+      try {
+        session?.setThinkingLevel(msg.thinkingLevel as Parameters<typeof session.setThinkingLevel>[0])
+      } catch {
+        /* level unsupported by this model — keep Pi default */
+      }
+    }
         const resolvedModel = serializeResolvedModel(rt.session, agentDir)
     process.send?.({ type: 'ready', resolvedModel })
         // Compute and send system prompt stats for the context-window dashboard

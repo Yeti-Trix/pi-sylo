@@ -554,6 +554,10 @@ export class BrokerSupervisor {
       modelProvider: this.cfg.modelProvider,
       modelId: this.cfg.modelId,
       compactionReserveTokens: this.cfg.compactionReserveTokens ?? null,
+      // Per-chat thinking override applied at broker init, so a freshly spawned
+      // overflow broker that skips switchSession entirely (binding match) still
+      // honors the chat's level.
+      thinkingLevel: this.cfg.thinkingLevel ?? '',
       disabledSkillPaths: this.cfg.disabledSkillPaths ?? [],
       disabledExtensionPaths: this.cfg.disabledExtensionPaths ?? [],
       disabledTools: this.cfg.disabledTools ?? [],

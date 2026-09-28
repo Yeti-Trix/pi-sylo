@@ -2650,6 +2650,25 @@ async function ensureBrokerSessionForConversation(
   ) {
     return
   }
+  // Freshly spawned overflow broker: its Pi init already loaded exactly this
+  // conversation's session/policy/model binding (recorded at spawn time). A
+  // switchSession here would re-invoke Pi's createRuntime factory — a second
+  // full init — for identical state, so skip it on an exact match. Warm reuse
+  // from a different conversation never matches, so it still switches (which is
+  // what makes reuse correct). While a turn is assigned the slot is busy, and
+  // releaseTurn kills overflow slots, so a recorded binding cannot go stale
+  // while the slot lives.
+  const overflowSlot = turnBrokerPool.overflowBrokers.find((s) => s.supervisor === supervisor)
+  if (
+    overflowSlot &&
+    overflowSlot.boundConversationId === convId &&
+    overflowSlot.boundSessionAbs === sessionAbs &&
+    overflowSlot.boundSessionCwd === sessionCwd &&
+    overflowSlot.boundDisabledFp === dfp &&
+    overflowSlot.boundModelFp === mfp
+  ) {
+    return
+  }
   await supervisor.switchSession(sessionAbs, sessionCwd, {
     disabledSkillPaths: mergedDisabled.skillPaths,
     disabledExtensionPaths: mergedDisabled.extensionPaths,
@@ -3030,6 +3049,12 @@ async function startChatTurn(
     toolFlushTimer: null,
   })
   syncTurnPowerBlocker()
+  // Show the submitted message immediately: the slot wait below can block for a
+  // long time (fresh overflow broker boot waits up to 120s for `ready`), and the
+  // composer has already cleared its input — without this refresh the chat looks
+  // idle even though the user + assistant rows exist in the DB. Reopening the
+  // chat re-reads the DB, which is why "leave and come back" used to fix it.
+  emitChatRefresh(conversationId, 'messages')
   const assignedBroker = await acquireBrokerForTurn(conversationId)
   if (!assignedBroker) {
     flushPendingTurnBuffers(pendingTurns.get(turnId)!)
@@ -4296,11 +4321,23 @@ async function spawnOverflowBroker(
   const bind = sessionBindingForConversation(conversationId)
   overflowBrokerSpawnGeneration++
   const spawnGen = overflowBrokerSpawnGeneration
+  // Record the binding this fork's Pi init loads, mirroring exactly what
+  // ensureBrokerSessionForConversation computes at turn-start. When both match,
+  // the switchSession there (a second full Pi init) can be skipped — Fix for
+  // chats starting while the primary broker is busy paying two full inits.
+  const boundAlwaysApplySkillPaths = alwaysApplySkillPathsForConversation(conversationId)
+  const boundDisabledFp = `${disabledFingerprint(bind.mergedDisabled)}\0${boundAlwaysApplySkillPaths.join('\0')}`
+  const boundModelFp = modelFingerprint(effectiveModelForConversation(conversationId))
   const slot: OverflowBrokerSlot = {
     supervisor: undefined as unknown as BrokerSupervisor,
     ready: false,
     spawnGeneration: spawnGen,
     readyWaiters: [],
+    boundConversationId: conversationId,
+    boundSessionAbs: bind.sessionAbs,
+    boundSessionCwd: bind.sessionCwd,
+    boundDisabledFp,
+    boundModelFp,
   }
   const supervisor = new BrokerSupervisor(
     buildBrokerSupervisorOptions(bind, bind.sessionCwd, {
