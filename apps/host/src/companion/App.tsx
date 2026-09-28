@@ -36,27 +36,37 @@ import {
   type Message,
   type Workspace,
 } from './api'
+import { convActivityStatus, type ConvActivityStatus } from '@renderer/chat/conv-activity'
 import { companionLocalImageUrl } from './images'
 import { BottomTabBar, type CompanionTab } from './BottomTabBar'
 import { InstallHintBanner } from './InstallHintBanner'
 import { CertificateSetupPanel } from './CertificateSetupPanel'
 import { CompanionModelBar } from './CompanionModelBar'
 import {
+  clearAskQuestionPromptsForConversation,
   ingestAskQuestionPayload,
+  pendingQuestionConversationIds,
   setAskQuestionSubmitImpl,
+    subscribeAskQuestionPrompts,
 } from '@renderer/chat/askQuestionClient'
 
 const CHAT_NEAR_BOTTOM_PX = 120
 
-type ConvActivity = 'running' | 'unread' | 'read'
-
-function convStatusDot({ running, unread }: { running: boolean; unread: boolean }): ConvActivity {
-  if (running) return 'running'
-  if (unread) return 'unread'
-  return 'read'
-}
+type ConvActivity = ConvActivityStatus
 
 function ConvStatusIndicator({ status }: { status: ConvActivity }): React.ReactElement {
+  if (status === 'question') {
+    return (
+      <span
+        className="conv-question-badge inline-flex size-3 shrink-0 items-center justify-center rounded-full bg-accent text-[0.55rem] font-bold leading-none text-bg-primary"
+        role="status"
+        aria-label="Agent is waiting for your answer"
+        title="Agent is waiting for your answer"
+      >
+        ?
+      </span>
+    )
+  }
   if (status === 'running') {
     return (
       <span
@@ -156,8 +166,10 @@ export function App(): React.ReactElement {
   const [brokerReady, setBrokerReady] = useState(false)
   const [brokerHint, setBrokerHint] = useState<string | null>(null)
   const [conversations, setConversations] = useState<Conversation[]>([])
-  const [runningIds, setRunningIds] = useState<Set<string>>(() => new Set())
+    const [runningIds, setRunningIds] = useState<Set<string>>(() => new Set())
   const [unreadIds, setUnreadIds] = useState<Set<string>>(() => new Set())
+  /** Chats with an unanswered ask-question — "?" badge + pulsing title in the chat list. */
+  const [questionIds, setQuestionIds] = useState<Set<string>>(() => new Set())
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<Conversation | null>(null)
@@ -212,9 +224,17 @@ export function App(): React.ReactElement {
     [conversations, activeId],
   )
 
-  useEffect(() => {
+    useEffect(() => {
     setAskQuestionSubmitImpl((payload) => submitAskQuestion(payload))
-    return () => setAskQuestionSubmitImpl(null)
+    // Chat-list "?" badge: mirror the desktop — the shared store notifies on every
+    // upsert/clear (question arrives, answered, or turn-boundary cleanup below).
+    const off = subscribeAskQuestionPrompts(() => {
+      setQuestionIds(pendingQuestionConversationIds())
+    })
+    return () => {
+      off()
+      setAskQuestionSubmitImpl(null)
+    }
   }, [])
 
   useEffect(() => {
@@ -245,7 +265,7 @@ export function App(): React.ReactElement {
       setRunningIds(new Set())
       return
     }
-    if (!opts?.silent) setLoadingList(true)
+        if (!opts?.silent) setLoadingList(true)
     try {
       let res = await fetchConversations(wid)
       if (res.conversations.length === 0) {
@@ -254,6 +274,10 @@ export function App(): React.ReactElement {
       }
       setConversations(res.conversations)
       setRunningIds(new Set(res.running))
+      // Reseed the ask-question store from the server: the PWA reloads often and its
+      // in-memory store is empty after that, so a still-pending question would lose
+      // its "?" badge (and answer card) until the next event. Upserts are idempotent.
+      for (const q of res.pendingQuestions) ingestAskQuestionPayload(q)
       setAuthError(null)
     } catch (e) {
       setAuthError(e instanceof Error ? e.message : String(e))
@@ -389,8 +413,11 @@ export function App(): React.ReactElement {
           if (activeId && payload.conversationId === activeId && payload.kind !== 'conversationDeleted') {
             void loadMessages(activeId)
           }
-                    if (payload.kind === 'turnFinished' && payload.conversationId !== activeId) {
+                              if (payload.kind === 'turnFinished' && payload.conversationId !== activeId) {
             void refreshPersonalLanding()
+            // Turn boundary: nothing is answerable anymore — clear pending questions so
+            // the "?" badge cannot stick on a dead turn (same as desktop).
+            clearAskQuestionPromptsForConversation(payload.conversationId)
             setUnreadIds((prev) => {
               if (prev.has(payload.conversationId)) return prev
               const next = new Set(prev)
@@ -398,13 +425,14 @@ export function App(): React.ReactElement {
               return next
             })
           }
-          if (payload.kind === 'conversationDeleted') {
+                    if (payload.kind === 'conversationDeleted') {
             if (payload.conversationId === activeId) {
               setActiveId(null)
               setMessages([])
               setLiveDelta({})
               setLiveWorkflow({})
             }
+            clearAskQuestionPromptsForConversation(payload.conversationId)
             setUnreadIds((prev) => {
               if (!prev.has(payload.conversationId)) return prev
               const next = new Set(prev)
@@ -1082,7 +1110,7 @@ export function App(): React.ReactElement {
           : conversations.length === 0 ?
             <p className="p-4 text-sm text-text-secondary">No chats in {activeWorkspaceName}.</p>
                     : (showArchived ? archivedConversations : conversations).map((c) => {
-            const status = convStatusDot({ running: runningIds.has(c.id), unread: unreadIds.has(c.id) })
+            const status = convActivityStatus(c.id, runningIds, unreadIds, questionIds)
             const archived = c.archived_at != null
             const renaming = renamingId === c.id
             return (
@@ -1126,7 +1154,14 @@ export function App(): React.ReactElement {
                       openConversation(c.id)
                     }}
                   >
-                    <span className="block truncate font-medium">{c.title || 'Untitled chat'}</span>
+                    <span
+                      className={cn(
+                        'block truncate font-medium',
+                        status === 'question' && 'conv-title-attention',
+                      )}
+                    >
+                      {c.title || 'Untitled chat'}
+                    </span>
                   </button>
                 )}
                 <button

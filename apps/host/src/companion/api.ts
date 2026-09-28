@@ -95,11 +95,21 @@ export async function setActiveWorkspace(workspaceId: string): Promise<string> {
 export async function fetchConversations(workspaceId: string, archived = false): Promise<{
   conversations: Conversation[]
   running: string[]
+  /** Unanswered ask-questions (full payloads) — callers reseed the shared store. */
+  pendingQuestions: Record<string, unknown>[]
 }> {
-  const data = await apiFetch<{ conversations: Conversation[]; running?: string[] }>(
+  const data = await apiFetch<{
+    conversations: Conversation[]
+    running?: string[]
+    pendingQuestions?: Record<string, unknown>[]
+  }>(
     `/api/conversations?workspaceId=${encodeURIComponent(workspaceId)}${archived ? '&archived=true' : ''}`,
   )
-  return { conversations: data.conversations, running: data.running ?? [] }
+  return {
+    conversations: data.conversations,
+    running: data.running ?? [],
+    pendingQuestions: data.pendingQuestions ?? [],
+  }
 }
 
 export async function createConversation(title = '', workspaceId?: string): Promise<Conversation> {

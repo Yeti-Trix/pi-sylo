@@ -68,6 +68,41 @@ textarea {
   50% { opacity: 1; }
 }
 
+/* Chat list: agent paused on an ask-question — fade the chat title in and out
+ * with an accent-tinted glow so the operator notices an answer is needed. */
+@keyframes convQuestionGlow {
+  0%, 100% {
+    opacity: 1;
+    text-shadow: 0 0 7px color-mix(in srgb, var(--color-accent) 60%, transparent);
+  }
+  50% {
+    opacity: 0.5;
+    text-shadow: 0 0 16px color-mix(in srgb, var(--color-accent) 90%, transparent);
+  }
+}
+
+/* The "?" status badge on that chat row — same rhythm as the title glow. */
+@keyframes convQuestionBadge {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(1.3); }
+}
+
+.conv-title-attention {
+  animation: convQuestionGlow 1.6s ease-in-out infinite;
+}
+
+.conv-question-badge {
+  animation: convQuestionBadge 1.6s ease-in-out infinite;
+}
+
+/* Respect the phone's reduce-motion setting: keep the "?" visible, stop looping. */
+@media (prefers-reduced-motion: reduce) {
+  .conv-title-attention,
+  .conv-question-badge {
+    animation: none;
+  }
+}
+
 @layer components {
   .chat-md {
     white-space: normal;

@@ -527,7 +527,10 @@ contextBridge.exposeInMainWorld('sylo', {
       return () => ipcRenderer.removeListener('chat:ask-question', ch)
     },
   },
-  askQuestion: {
+    askQuestion: {
+    /** Live unanswered-question payloads (renderer reload recovery). */
+    pending: () =>
+      ipcRenderer.invoke('ask-question:pending') as Promise<Record<string, unknown>[]>,
     submit: (payload: { requestId?: string; toolCallId?: string; answers: unknown }) =>
       ipcRenderer.invoke('ask-question:submit', payload) as Promise<
         { ok: true } | { ok: false; error: string }

@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Companion app shows the "answer needed" state too:** the phone chat list now shows the same pulsing **?** badge + glowing chat title when an agent is paused on a question (parity with the desktop). It also survives a PWA reload and reconnects — the desktop host serves the live unanswered-question payloads on the conversations endpoint, and the phone (and a reloaded desktop) reseed their question store from it.
+
 - **Chat list shows when an agent needs an answer:** a chat whose agent paused on a question now shows a pulsing **?** badge in the chat list instead of the running spinner, and its title gently fades and glows until you answer — visible from anywhere in the app, not just while that chat is open. The badge clears the moment you submit the answer (or when the turn ends / a new turn starts), so it never sticks on a dead turn.
 
 - **Compact now — chat footer button:** a **Compact now** button next to the context token counter (both chat layouts) runs Pi's manual compaction on the active chat on demand — like Claude's `/compact`. It summarizes older turns into a compact note and frees context space immediately; the same compaction-notice card as auto-compaction appears in the timeline (labeled "manual"), and the footer token count drops. Disabled while the chat's turn is streaming (the host re-checks too, so a stale click can never abort an in-flight turn), with inline errors for "nothing to compact", "already compacted", or a busy broker.

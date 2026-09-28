@@ -426,6 +426,7 @@ import {
   parseAskQuestionAnswers,
   parseAskQuestionSpecs,
   type AskQuestionAnswer,
+  type AskQuestionSpec,
 } from '../shared/ask-question.js'
 import {
   classifySyloOptionalPackageId,
@@ -1652,6 +1653,9 @@ type PendingAskQuestion = {
   turnId?: string
   conversationId?: string
   messageId?: string
+  /** Original ask payload — retained so companion/desktop reloads can reseed the client store. */
+  title?: string
+  questions: AskQuestionSpec[]
   replyBroker: BrokerSupervisor
 }
 
@@ -3880,12 +3884,14 @@ function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext
       return
     }
     const title = typeof msg.title === 'string' ? msg.title.trim() : ''
-    pendingAskQuestions.set(requestId, {
+        pendingAskQuestions.set(requestId, {
       requestId,
       toolCallId,
       turnId: msg.turnId,
       conversationId: pendingTurn?.convId,
       messageId: pendingTurn?.assistantId,
+      ...(title ? { title } : {}),
+      questions,
       replyBroker,
     })
     const payload = {
@@ -4647,10 +4653,21 @@ function registerIpc(): void {
       if (removed) emitChatRefresh(cid, 'conversationDeleted')
       return removed
     },
-    listRunningConversationIds: () => {
+        listRunningConversationIds: () => {
       const ids = new Set<string>()
       for (const pending of pendingTurns.values()) ids.add(pending.convId)
       return [...ids]
+    },
+    /** Live payloads of every unanswered ask-question — companion/desktop reloads reseed the client store. */
+    listPendingAskQuestions: () => {
+      return [...pendingAskQuestions.values()].map((pending) => ({
+        requestId: pending.requestId,
+        toolCallId: pending.toolCallId,
+        conversationId: pending.conversationId ?? null,
+        messageId: pending.messageId ?? null,
+        ...(pending.title ? { title: pending.title } : {}),
+        questions: pending.questions,
+      }))
     },
     sendChat: async (conversationId, text, attachments) => {
       const id = conversationId.trim()
@@ -7736,6 +7753,19 @@ function registerIpc(): void {
       )
     },
   )
+
+    ipcMain.handle('ask-question:pending', () => {
+    // Renderer reload recovery: reseed the ask-question client store from main's live
+    // pending map so the chat-list "?" badge (and answer cards) survive a reload.
+    return [...pendingAskQuestions.values()].map((pending) => ({
+      requestId: pending.requestId,
+      toolCallId: pending.toolCallId,
+      conversationId: pending.conversationId ?? null,
+      messageId: pending.messageId ?? null,
+      ...(pending.title ? { title: pending.title } : {}),
+      questions: pending.questions,
+    }))
+  })
 
   ipcMain.handle(
     'ask-question:submit',

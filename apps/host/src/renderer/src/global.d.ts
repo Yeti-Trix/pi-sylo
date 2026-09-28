@@ -707,7 +707,9 @@ declare global {
         ) => () => void
         onAskQuestion: (cb: (p: Record<string, unknown>) => void) => () => void
       }
-      askQuestion: {
+            askQuestion: {
+        /** Live unanswered-question payloads (renderer reload recovery). */
+        pending: () => Promise<Record<string, unknown>[]>
         submit: (payload: {
           requestId?: string
           toolCallId?: string

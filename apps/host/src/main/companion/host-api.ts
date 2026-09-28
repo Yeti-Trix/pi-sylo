@@ -1,3 +1,4 @@
+import type { AskQuestionPrompt } from '../../shared/ask-question.js'
 import type { ConversationRow, MessageRow, WorkspaceRow } from '../database.js'
 
 export type CompanionHostApi = {
@@ -33,8 +34,10 @@ export type CompanionHostApi = {
     chatgptModels?: { id: string; name: string; visionCapable: boolean }[]
   }>
   deleteConversation: (id: string) => boolean
-  /** Conversation ids that currently have an in-flight agent turn (for status dots). */
+    /** Conversation ids that currently have an in-flight agent turn (for status dots). */
   listRunningConversationIds: () => string[]
+  /** Live payloads of every unanswered ask-question — client reloads reseed the ask-question store from these. */
+  listPendingAskQuestions: () => AskQuestionPrompt[]
   sendChat: (
     conversationId: string,
     text: string,

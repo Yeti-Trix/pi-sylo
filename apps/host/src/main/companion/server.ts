@@ -361,6 +361,9 @@ function createCompanionHandler(opts: {
             ? api.listArchivedConversations(workspaceId)
             : api.listConversations(workspaceId),
           running: archivedOnly ? [] : api.listRunningConversationIds(),
+          // Unanswered ask-questions (full payloads) — the PWA reloads often and its
+          // in-memory ask-question store is empty after that; reseed from here.
+          pendingQuestions: archivedOnly ? [] : api.listPendingAskQuestions(),
           workspaceId,
         })
       } catch (e) {

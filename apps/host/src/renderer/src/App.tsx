@@ -2671,6 +2671,14 @@ export function App(): React.ReactElement {
     const uQ = subscribeAskQuestionPrompts(() => {
       setQuestionConvIds(pendingQuestionConversationIds())
     })
+    // Renderer reload recovery: reseed the ask-question store from main's live pending
+    // map so a question asked before the reload keeps its "?" badge / answer card.
+    void window.sylo.askQuestion
+      .pending()
+      .then((payloads) => {
+        for (const p of payloads) ingestAskQuestionPayload(p)
+      })
+      .catch(() => {})
     const u5 = window.sylo.chatEvents.onTool((x) => {
       const pending = liveWorkflowPendingRef.current
       const rows = pending.get(x.messageId)

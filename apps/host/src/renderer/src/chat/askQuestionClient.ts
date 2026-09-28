@@ -39,6 +39,10 @@ export function setAskQuestionSubmitImpl(fn: SubmitFn | null): void {
 export function upsertAskQuestionPrompt(prompt: AskQuestionPrompt): void {
   const id = prompt.toolCallId.trim()
   if (!id) return
+  // Reseeding polls (companion/desktop reload recovery) re-send identical payloads —
+  // only notify subscribers when something actually changed.
+  const prev = pendingByToolCallId.get(id)
+  if (prev && JSON.stringify(prev) === JSON.stringify(prompt)) return
   pendingByToolCallId.set(id, prompt)
   notify()
 }
