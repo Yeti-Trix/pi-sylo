@@ -28,5 +28,23 @@ export const CHAT_PANE_SIZE_DEFAULT = 600
 export const CHAT_PANE_SIZE_MIN = 380
 export const CHAT_PANE_SIZE_MAX = 960
 export function clampChatPaneSize(v: number): number {
+  // Math.min/max propagate NaN — a corrupt stored pref must fall back to the
+  // default, not paint `flex: 0 0 NaNpx` (invalid → class basis-0 → 50/50 again).
+  if (!Number.isFinite(v)) return CHAT_PANE_SIZE_DEFAULT
   return Math.min(CHAT_PANE_SIZE_MAX, Math.max(CHAT_PANE_SIZE_MIN, Math.round(v)))
+}
+
+/**
+ * Render-time size for the workbench chat pane. The pane is a fixed flex-basis
+ * (flex: 0 0 Xpx — an inherited flex-1/basis-0% would otherwise ignore `width`),
+ * so also cap it at 75% of the actual window: a window that shrank since the
+ * operator last dragged must never starve the canvas below a usable strip.
+ * The operator's persisted preference is stored/clamped unperturbed —
+ * this only bounds what is PAINTED this render.
+ */
+export function chatPaneSizeForWindow(size: number, innerWidth: number): number {
+  const clamped = clampChatPaneSize(size)
+  if (!Number.isFinite(innerWidth) || innerWidth <= 0) return clamped
+  const cap = Math.max(CHAT_PANE_SIZE_MIN, Math.round(innerWidth * CANVAS_MAX_FRACTION))
+  return clampChatPaneSize(Math.min(clamped, cap))
 }

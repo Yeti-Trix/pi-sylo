@@ -53,6 +53,7 @@ import { APP_TAB_KIND_LABEL, tabKind } from './components/canvas/canvasTypes'
 import { storedSrcForTab } from './components/canvas/BrowserPane'
 import {
   CHAT_PANE_SIZE_DEFAULT,
+  chatPaneSizeForWindow,
   clampChatPaneSize,
 } from './components/canvas/canvasLayout'
 import { SYLO_SKILL_SURFACE_CAPABILITY_DESCRIPTOR } from './skill-surface/hostCapabilityDescriptor'
@@ -4826,7 +4827,19 @@ export function App(): React.ReactElement {
           <>
             {canvasOpen ?
                             <div className={chatWorkbench}>
-                <div className={cn(chatPane, 'min-w-0 shrink-0')} style={{ width: chatPaneSize }}>
+                {/* Fixed-width side: explicit flex shorthand so the pane keeps a REAL
+                    main-axis size. The chatPane class carries flex-1 (flex-basis 0%),
+                    which overrides inline `width` in the flex-row — with it, the pane
+                    sat at ~50/50 forever and the resize handle did nothing. The inline
+                    style wins the cascade, the canvas (flex-1) takes what's left, and
+                    the window-aware cap keeps a shrunken window from starving it. */}
+                <div
+                  className={cn(chatPane, 'min-w-0 shrink-0')}
+                  style={{
+                    width: chatPaneSizeForWindow(chatPaneSize, window.innerWidth),
+                    flex: `0 0 ${chatPaneSizeForWindow(chatPaneSize, window.innerWidth)}px`,
+                  }}
+                >
                   <div
                     ref={chatAreaRef}
                     className={chatArea}
