@@ -1867,6 +1867,23 @@ type DeferredChatTurn = {
 /** Turns waiting for a free broker slot while at max concurrency. */
 const deferredChatTurns: DeferredChatTurn[] = []
 
+/**
+ * True while a manual compaction ("Compact now") is streaming an LLM summarize request
+ * through the primary broker. Pi's session.compact() aborts in-flight agent operations,
+ * so a turn assigned to the primary mid-compaction would be killed — route it to the
+ * overflow pool instead and flush queued turns when it finishes.
+ */
+let primaryCompactionInFlight = false
+
+/**
+ * Conversations with a compaction request in flight right now ("Compact now", on the
+ * primary or a dedicated overflow broker). New turns for these conversations defer until
+ * the compaction finishes — two processes editing one Pi session file concurrently is
+ * not safe. Overflow-broker compaction sets it too, because a follow-up send would
+ * otherwise stream on the primary against the session the compactor is rewriting.
+ */
+const compactingConversations = new Set<string>()
+
 function concurrentTurnsEnabled(): boolean {
   return db.getPref<boolean>('sylo.chat.concurrent_turns', false)
 }
@@ -1962,7 +1979,11 @@ function deferChatTurn(
 async function flushDeferredTurns(): Promise<void> {
   if (deferredChatTurns.length === 0) return
   if (pendingTurns.size >= maxConcurrentTurns()) return
-  const next = deferredChatTurns.shift()
+  const next = deferredChatTurns[0]
+  // The queued turn's conversation has a compaction in flight right now — wait; the
+  // compaction finish path (and the 5s sweep) flushes again when it is done.
+  if (next && compactingConversations.has(next.conversationId)) return
+  deferredChatTurns.shift()
   if (!next) return
   const result = await startChatTurn(next.conversationId, '', undefined, {
     skipUserInsert: true,
@@ -2613,10 +2634,16 @@ function modelFingerprint(m: {
 
 async function ensureBrokerSessionForConversation(
   convId: string,
-  options?: { phase?: EnsureBrokerSessionPhase },
+  options?: {
+    phase?: EnsureBrokerSessionPhase
+    /** Compact-now path: target an explicit supervisor (e.g. a dedicated overflow broker) instead of inferring it from the turn map. */
+    supervisor?: BrokerSupervisor
+    /** Its pool slot, when detached from turnBrokerPool (compaction brokers) — enables the exact-binding switchSession skip. */
+    overflowSlot?: OverflowBrokerSlot
+  },
 ): Promise<void> {
   const phase = options?.phase ?? 'turn-start'
-  const supervisor = brokerForConversationActiveTurn(convId) ?? broker
+  const supervisor = options?.supervisor ?? (brokerForConversationActiveTurn(convId) ?? broker)
   if (!supervisor || !isSupervisorReady(supervisor)) {
     if (phase === 'turn-start') {
       throw new Error('Broker is not ready yet. Wait a moment or use Developer → Restart broker.')
@@ -2658,7 +2685,8 @@ async function ensureBrokerSessionForConversation(
   // what makes reuse correct). While a turn is assigned the slot is busy, and
   // releaseTurn kills overflow slots, so a recorded binding cannot go stale
   // while the slot lives.
-  const overflowSlot = turnBrokerPool.overflowBrokers.find((s) => s.supervisor === supervisor)
+  const overflowSlot =
+    options?.overflowSlot ?? turnBrokerPool.overflowBrokers.find((s) => s.supervisor === supervisor)
   if (
     overflowSlot &&
     overflowSlot.boundConversationId === convId &&
@@ -2993,7 +3021,18 @@ async function startChatTurn(
     return { ok: false, assistantMessageId: assistant.id, error: 'broker_not_ready' }
   }
 
-  if (!options?.skipUserInsert && shouldDeferCrossConversationTurn(conversationId)) {
+  // A flushed queued turn raced a compaction claim that landed between the flush's
+  // queue-head check and this call. Return deferred so flushDeferredTurns re-queues
+  // the untouched entry — deferChatTurn here would duplicate the user message, and
+  // proceeding would stream against the session the compactor is rewriting. The
+  // compaction finish path (and the 5s sweep) starts it right after.
+  if (compactingConversations.has(conversationId) && options?.skipUserInsert) {
+    return { ok: true, assistantMessageId: '', deferred: true }
+  }
+  if (
+    (!options?.skipUserInsert && shouldDeferCrossConversationTurn(conversationId)) ||
+    compactingConversations.has(conversationId)
+  ) {
     return await deferChatTurn(conversationId, text, attachments, {
       prepared: options?.prepared,
       noticeAfterUser: options?.noticeAfterUser,
@@ -4375,7 +4414,12 @@ async function spawnOverflowBroker(
 }
 
 async function acquireBrokerForTurn(conversationId: string): Promise<BrokerSupervisor | null> {
-  if (broker && brokerAgentReady && !turnBrokerPool.isSupervisorBusy(broker, hasPendingTurn)) {
+  if (
+    broker &&
+    brokerAgentReady &&
+    !primaryCompactionInFlight &&
+    !turnBrokerPool.isSupervisorBusy(broker, hasPendingTurn)
+  ) {
     return broker
   }
   if (!concurrentTurnsEnabled()) {
@@ -7047,6 +7091,82 @@ function registerIpc(): void {
     }
   })
 
+  /**
+   * "Compact now" while the primary broker is bound to another conversation (usually a
+   * mid-turn chat elsewhere). With concurrent turns on, spawn a dedicated overflow broker
+   * bound to THIS conversation, compact on it, then kill it — a streaming chat elsewhere
+   * never blocks the button. The slot is detached from the pool immediately (synchronous,
+   * before its first await) so no turn acquisition can ever rebind it mid-compaction.
+   */
+  const compactViaOverflowBroker = async (
+    convId: string,
+  ): Promise<
+    { ok: true; summary?: string; tokensBefore?: number; tokensAfter?: number } | { ok: false; error: string }
+  > => {
+    let spawned: BrokerSupervisor | null = null
+    try {
+      spawned = await spawnOverflowBroker(convId)
+      if (!spawned) return { ok: false, error: 'overflow_broker_unavailable' }
+      // Detach immediately after spawn resolves (synchronous, before this function's
+      // next await): no turn acquisition can pick this slot up mid-compaction. The
+      // microtask continuation cannot interleave with an IPC turn request before we
+      // splice — JS flushes the microtask queue first.
+      const slotIdx = turnBrokerPool.overflowBrokers.findIndex((s) => s.supervisor === spawned)
+      const slot = slotIdx >= 0 ? turnBrokerPool.overflowBrokers[slotIdx] : undefined
+      if (slotIdx >= 0) turnBrokerPool.overflowBrokers.splice(slotIdx, 1)
+      // The spawned fork's init already loaded exactly this binding — the exact-match
+      // checks inside make this a no-op (no second full Pi init).
+      await ensureBrokerSessionForConversation(convId, {
+        phase: 'ui-focus',
+        supervisor: spawned,
+        overflowSlot: slot,
+      })
+      const result = await spawned.compactNow()
+      if (result.ok) {
+        persistCompactionChatNotice(convId, {
+          reason: 'manual',
+          summary: result.summary,
+          tokensBefore: result.tokensBefore,
+          tokensAfter: result.tokensAfter,
+        })
+      }
+      return result
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    } finally {
+      spawned?.kill()
+      // If the primary rebound to this conversation while the detached compactor ran
+      // (idle primary + ui-focus switch), its binding cache still matches — without
+      // this, the next turn would skip switchSession and stream the PRE-compaction
+      // session the primary holds in memory instead of the compacted file on disk.
+      if (brokerFocusedConversationId === convId) brokerLastSessionAbs = undefined
+    }
+  }
+
+  const compactOnPrimary = async (
+    convId: string,
+  ): Promise<
+    { ok: true; summary?: string; tokensBefore?: number; tokensAfter?: number } | { ok: false; error: string }
+  > => {
+    primaryCompactionInFlight = true
+    try {
+      const r = await broker!.compactNow()
+      if (r.ok) {
+        // Same timeline notice auto-compaction produces, with the manual trigger label.
+        persistCompactionChatNotice(convId, {
+          reason: 'manual',
+          summary: r.summary,
+          tokensBefore: r.tokensBefore,
+          tokensAfter: r.tokensAfter,
+        })
+      }
+      return r
+    } finally {
+      primaryCompactionInFlight = false
+      void flushDeferredTurns()
+    }
+  }
+
   // Operator "Compact now" (chat footer): manually compact the active conversation's
   // context. The renderer disables the button while this chat's turn is streaming; the
   // host re-checks so a stale click can never abort an in-flight turn.
@@ -7059,28 +7179,47 @@ function registerIpc(): void {
     if (findPendingTurnForConversation(id)) {
       return { ok: false as const, error: 'turn_in_progress' }
     }
-    // Make sure the primary broker has this conversation's session bound (no-op when
-    // it already does). A mid-turn other chat keeps the broker busy — refuse rather
-    // than compacting whatever session happens to be bound.
+    // Claim the conversation synchronously (before any await below) so a follow-up
+    // send in this chat defers instead of streaming against the session the
+    // compactor is summarizing, and a second compact click can't stack up.
+    if (compactingConversations.has(id)) {
+      return { ok: false as const, error: 'compaction_in_progress' }
+    }
+    compactingConversations.add(id)
     try {
-      await ensureBrokerSessionForConversation(id, { phase: 'ui-focus' })
-    } catch {
-      /* fall through — the binding check below decides */
-    }
-    if (brokerFocusedConversationId !== id) {
+      // While a manual compaction streams through the primary, don't touch the
+      // primary at all (Pi's session.compact() aborts in-flight operations).
+      if (
+        !primaryCompactionInFlight &&
+        brokerFocusedConversationId === id &&
+        !supervisorHasInFlightTurn(broker)
+      ) {
+        return await compactOnPrimary(id)
+      }
+      // Primary is bound elsewhere (or mid-turn / mid-compaction there). A ui-focus
+      // switch must not disturb work in flight, so this only rebinds when idle.
+      if (!primaryCompactionInFlight) {
+        try {
+          await ensureBrokerSessionForConversation(id, { phase: 'ui-focus' })
+        } catch {
+          /* fall through — the binding check below decides */
+        }
+        if (brokerFocusedConversationId === id && !supervisorHasInFlightTurn(broker)) {
+          return await compactOnPrimary(id)
+        }
+      }
+      // Concurrent turns on: run the compaction on a dedicated overflow broker so a
+      // mid-turn chat elsewhere never blocks "Compact now".
+      if (concurrentTurnsEnabled()) {
+        return await compactViaOverflowBroker(id)
+      }
+      // Single-broker mode: only one agent exists and it is busy elsewhere.
       return { ok: false as const, error: 'broker_busy' }
+    } finally {
+      compactingConversations.delete(id)
+      // Compaction done → any turn deferred for this conversation can start now.
+      void flushDeferredTurns()
     }
-    const result = await broker.compactNow()
-    if (result.ok) {
-      // Same timeline notice auto-compaction produces, with the manual trigger label.
-      persistCompactionChatNotice(id, {
-        reason: 'manual',
-        summary: result.summary,
-        tokensBefore: result.tokensBefore,
-        tokensAfter: result.tokensAfter,
-      })
-    }
-    return result
   })
 
     ipcMain.handle('broker:status:get', () => {

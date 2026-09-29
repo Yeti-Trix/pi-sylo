@@ -330,12 +330,16 @@ function compactNowErrorText(error: string): string {
   switch (error) {
     case 'turn_in_progress':
       return 'Finish the current turn first.'
+    case 'compaction_in_progress':
+      return 'Compaction is already running in this chat.'
     case 'missing_conversation_id':
       return 'No active chat.'
     case 'broker_not_ready':
       return 'Agent broker is not ready yet.'
     case 'broker_busy':
       return 'The agent is busy in another chat — try again in a moment.'
+    case 'overflow_broker_unavailable':
+      return 'Could not spawn a second agent to compact this chat — try again in a moment.'
     default:
       return error
     }
