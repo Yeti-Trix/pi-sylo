@@ -7,6 +7,7 @@ import {
   CHAT_PANE_SIZE_MIN,
   clampChatPaneSize,
   chatPaneSizeForWindow,
+  chatPaneSizeFromDrag,
 } from './canvasLayout.ts'
 
 test('clampChatPaneSize', () => {
@@ -46,4 +47,16 @@ test('chatPaneSizeForWindow — degenerate innerWidth falls back to the clamp', 
   assert.equal(chatPaneSizeForWindow(700, 0), 700)
   assert.equal(chatPaneSizeForWindow(700, -5), 700)
   assert.equal(chatPaneSizeForWindow(Number.NaN, 1000), CHAT_PANE_SIZE_DEFAULT)
+})
+
+test('chatPaneSizeFromDrag — pane edge tracks the cursor (handle = chat right edge)', () => {
+  // Drag RIGHT of the start point (< cursor > start) → chat pane widens.
+  assert.equal(chatPaneSizeFromDrag(500, 900, 950), 550)
+  // Drag LEFT → chat pane narrows, so the canvas widens.
+  assert.equal(chatPaneSizeFromDrag(500, 900, 860), 460)
+  // No movement → unchanged.
+  assert.equal(chatPaneSizeFromDrag(500, 900, 900), 500)
+  // Clamped both ways.
+  assert.equal(chatPaneSizeFromDrag(CHAT_PANE_SIZE_MIN, 900, 100), CHAT_PANE_SIZE_MIN)
+  assert.equal(chatPaneSizeFromDrag(CHAT_PANE_SIZE_MAX, 900, 2000), CHAT_PANE_SIZE_MAX)
 })

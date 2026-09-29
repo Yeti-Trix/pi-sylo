@@ -48,3 +48,17 @@ export function chatPaneSizeForWindow(size: number, innerWidth: number): number 
   const cap = Math.max(CHAT_PANE_SIZE_MIN, Math.round(innerWidth * CANVAS_MAX_FRACTION))
   return clampChatPaneSize(Math.min(clamped, cap))
 }
+
+/**
+ * Workbench resize drag math. The handle is the CHAT pane's right edge, so the
+ * pane edge tracks the cursor exactly: hand right → chat widens (canvas
+ * narrows), hand left → canvas widens. Same convention as the sidebar
+ * splitter. (The old canvas-size drag used the opposite sign because there the
+ * handle sat on the CANVAS's left edge — dragging left widened the canvas;
+ * 2df9343 repointed that formula at the chat size without flipping it, which
+ * made the pane move opposite the mouse.)
+ */
+export function chatPaneSizeFromDrag(startSize: number, startX: number, clientX: number): number {
+  const d = (clientX - startX)
+  return clampChatPaneSize(startSize + d)
+}

@@ -54,6 +54,7 @@ import { storedSrcForTab } from './components/canvas/BrowserPane'
 import {
   CHAT_PANE_SIZE_DEFAULT,
   chatPaneSizeForWindow,
+  chatPaneSizeFromDrag,
   clampChatPaneSize,
 } from './components/canvas/canvasLayout'
 import { SYLO_SKILL_SURFACE_CAPABILITY_DESCRIPTOR } from './skill-surface/hostCapabilityDescriptor'
@@ -4026,7 +4027,7 @@ export function App(): React.ReactElement {
     const endCanvasResize = useCallback((clientX: number) => {
     const drag = canvasResizeRef.current
     if (!drag) return
-    const next = clampChatPaneSize(drag.startSize + (drag.startX - clientX))
+    const next = chatPaneSizeFromDrag(drag.startSize, drag.startX, clientX)
     setChatPaneSize(next)
     void window.sylo.prefs.set('sylo.chat.workbench_width', next)
     canvasResizeRef.current = null
@@ -4049,7 +4050,7 @@ export function App(): React.ReactElement {
   const onCanvasResizePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const drag = canvasResizeRef.current
     if (!drag || e.pointerId !== drag.pointerId) return
-    setChatPaneSize(clampChatPaneSize(drag.startSize + (drag.startX - e.clientX)))
+    setChatPaneSize(chatPaneSizeFromDrag(drag.startSize, drag.startX, e.clientX))
   }
 
   const onCanvasResizePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
