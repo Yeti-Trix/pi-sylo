@@ -1456,6 +1456,11 @@ contextBridge.exposeInMainWorld('sylo', {
     },
     clearForNewChat: (workspaceId: string) =>
       ipcRenderer.invoke('plan:clearForNewChat', workspaceId) as Promise<{ ok: true }>,
+    hide: (conversationId: string) =>
+      ipcRenderer.invoke('plan:hide', conversationId) as Promise<
+        | { ok: true }
+        | { ok: false; reason: 'subagents_running' | 'no_plan' }
+      >,
   },
   tasks: {
     list: (conversationId: string) => ipcRenderer.invoke('tasks:list', conversationId),

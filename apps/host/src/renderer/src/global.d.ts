@@ -1765,6 +1765,10 @@ declare global {
         }>
         onChanged: (cb: () => void) => () => void
         clearForNewChat: (workspaceId: string) => Promise<{ ok: true }>
+        hide: (conversationId: string) => Promise<
+          | { ok: true }
+          | { ok: false; reason: 'subagents_running' | 'no_plan' }
+        >
       }
       tasks: {
         list: (conversationId: string) => Promise<

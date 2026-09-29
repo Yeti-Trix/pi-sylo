@@ -23,6 +23,7 @@ import {
   resolveRunGoals,
   restorePlan,
   retractForeignCurrentPlan,
+  rewritePlanMeta,
   tickReviewedGoals,
   writeCurrentPlan,
 } from './plan-file.ts'
@@ -168,6 +169,30 @@ describe('conversation-scoped plan file', () => {
     )
     assert.equal(restorePlan(cwd, 'conv-1'), false, 'a visible plan needs no restore')
     assert.equal(restorePlan(cwd, 'conv-2'), false, 'other chats have nothing to restore')
+  })
+
+  test('the goals-bar X hides an active plan by hand, frontmatter only', () => {
+    // Hiding an unfinished plan is an operator choice, not a review outcome: the
+    // same frontmatter-only patch as hideFinishedPlan, minus the finished check,
+    // still fully reversible by the restore path.
+    const cwd = scratch()
+    writeCurrentPlan(cwd, '# A\n\n## [ ] One\nOpen.\n\n## [ ] Two\nOpen.\n', {
+      conversationId: 'conv-1',
+    })
+    assert.equal(hideFinishedPlan(cwd, 'conv-1'), false, 'the automatic path refuses unfinished plans')
+    assert.equal(rewritePlanMeta(cwd, 'conv-1', { hidden: true }), true)
+    const text = readPlanMarkdown(cwd, 'conv-1') ?? ''
+    assert.equal(parsePlanHidden(text), true)
+    assert.match(text, /status: active/, 'the plan itself stays active, just off the bar')
+    assert.match(text, /## \[ \] One/, 'frontmatter patch only — the goals are intact')
+    assert.deepEqual(
+      parsePlanTodos(text).map((t) => t.done),
+      [false, false],
+      'checkbox meaning is untouched',
+    )
+    assert.equal(rewritePlanMeta(cwd, 'conv-1', { hidden: true }), false, 'hiding twice is a no-op')
+    assert.equal(rewritePlanMeta(cwd, 'conv-2', { hidden: true }), false, "other chats' plans are unreachable")
+    assert.equal(restorePlan(cwd, 'conv-1'), true, 'the X stays reversible via the restore path')
   })
 
   test('a passing per-section review closes just that goal', () => {
@@ -316,6 +341,20 @@ describe('conversation-scoped plan file', () => {
       hideFinishedPlan(cwd, 'conv-1')
       assert.deepEqual(resolveRunGoals(cwd, 'conv-1', 'worker'), [])
       assert.deepEqual(resolveRunGoals(cwd, 'conv-1', 'reviewer'), [])
+    })
+
+    test('a plan hidden mid-run feeds no goals, and comes back after the run', () => {
+      // The host skips an operator X-hide while subagent runs are active. If a
+      // hide ever slips through at the file layer anyway, a run in that window
+      // gets no goal list at all — never a stale or guessed one — and the
+      // restore path puts the goals back once the run ends.
+      const cwd = plan()
+      markGoalsBuilt(cwd, 'conv-1', ['One'])
+      rewritePlanMeta(cwd, 'conv-1', { hidden: true })
+      assert.deepEqual(resolveRunGoals(cwd, 'conv-1', 'worker'), [], 'a mid-run hide feeds no goals')
+      assert.deepEqual(resolveRunGoals(cwd, 'conv-1', 'reviewer'), [])
+      restorePlan(cwd, 'conv-1')
+      assert.deepEqual(resolveRunGoals(cwd, 'conv-1', 'reviewer'), ['One'], 'goals flow again after restore')
     })
   })
 

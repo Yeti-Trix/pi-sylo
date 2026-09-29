@@ -8,6 +8,7 @@ import { join } from 'node:path'
 
 import {
   snapshotPlanMarkdown,
+  parsePlanHidden,
   type PlanStatus,
   type PlanTodo,
 } from '../../../../packages/sylo-subagents/extensions/plan-checklist.ts'
@@ -18,6 +19,7 @@ import {
   removeCurrentPlan,
   restorePlan,
   retractForeignCurrentPlan,
+  rewritePlanMeta,
 } from '../../../../packages/sylo-subagents/extensions/plan-file.ts'
 import type { PlanScope } from '../shared/orchestrator-resume.js'
 import { getConversation, getWorkspace } from './database.js'
@@ -106,6 +108,37 @@ export function readPlanTodos(conversationId: string): PlanTodosSnapshot {
 
 export function notifyPlanTodosChanged(): void {
   emitChanged()
+}
+
+export type PlanHideResult =
+  | { ok: true }
+  | { ok: false; reason: 'subagents_running' | 'no_plan' }
+
+/**
+ * The operator clicked the X on the goals bar: take this chat's plan off the bar
+ * while it is still active — the same frontmatter-only patch as
+ * `hideFinishedPlan`, minus the finished check. The file stays on disk so a
+ * later "continue" brings it back (`restorePlan`), ticks and all.
+ *
+ * Blocked while a subagent run is active (same guard as `clearPlanForNewChat`):
+ * a mid-run hide starves `resolveRunGoals`, so the orchestrator loses its goal
+ * dispatch and the worker improvises. The UI may surface the reason as a
+ * tooltip.
+ */
+export function hidePlanTodos(conversationId: string): PlanHideResult {
+  if (!conversationId.trim()) return { ok: false, reason: 'no_plan' }
+  const cwd = cwdForConversation(conversationId)
+  if (!cwd) return { ok: false, reason: 'no_plan' }
+  const raw = readPlanMarkdown(cwd, conversationId)
+  if (!raw) return { ok: false, reason: 'no_plan' }
+  if (subagentsRunning()) return { ok: false, reason: 'subagents_running' }
+  // Already off the bar — a doubled click should not read as “blocked”.
+  if (parsePlanHidden(raw)) return { ok: true }
+  if (!rewritePlanMeta(cwd, conversationId, { hidden: true })) {
+    return { ok: false, reason: 'no_plan' }
+  }
+  emitChanged()
+  return { ok: true }
 }
 
 /** New chat: drop a leftover workspace current.md. Other chats' scoped files stay. */

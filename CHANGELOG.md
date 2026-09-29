@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Plan goals bar close button:** an ✕ at the top-right of the plan-goals bar above the composer hides that chat's plan on demand. It patches the same frontmatter `hidden` flag the finished-plan path uses — nothing is deleted, ticks and the Reviewed badge keep their meaning, and saying "continue" in that chat puts the plan back with its goals intact. While a subagent run is active the hide is refused (the orchestrator still needs its goal dispatch) and the ✕'s tooltip explains that for a few seconds.
+
+### Fixed
+
+- **A question pending in one chat no longer freezes sends in every other chat:** a turn parked on an unanswered question counted as a busy slot, so outside concurrent turns mode every other chat's message queued behind it indefinitely — looking exactly like a dead send, with no explanation anywhere. Questions now hold only their own chat: while the primary broker waits for your answer, other chats' turns start on a temporary overflow broker (the same lifecycle concurrent mode already uses) and the app returns to its normal concurrency rules once you answer. Queued turns also flush as soon as the only remaining in-flight turn is question-parked.
+
+### Added
+
 - **Companion app shows the "answer needed" state too:** the phone chat list now shows the same pulsing **?** badge + glowing chat title when an agent is paused on a question (parity with the desktop). It also survives a PWA reload and reconnects — the desktop host serves the live unanswered-question payloads on the conversations endpoint, and the phone (and a reloaded desktop) reseed their question store from it.
 
 - **Chat list shows when an agent needs an answer:** a chat whose agent paused on a question now shows a pulsing **?** badge in the chat list instead of the running spinner, and its title gently fades and glows until you answer — visible from anywhere in the app, not just while that chat is open. The badge clears the moment you submit the answer (or when the turn ends / a new turn starts), so it never sticks on a dead turn.

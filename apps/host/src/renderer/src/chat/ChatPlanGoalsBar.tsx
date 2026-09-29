@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 
 import { cn } from '../lib/cn'
 import { chatPlanGoals, chatPlanGoalsHead, chatPlanGoalsItem, chatPlanGoalsList } from '../panels/ui-classes'
@@ -28,6 +28,29 @@ export function ChatPlanGoalsBar({
   conversationId: string | undefined
 }): React.ReactElement | null {
   const [snap, setSnap] = useState<PlanSnapshot>(EMPTY)
+
+  // The bar refuses to hide mid-run (the orchestrator still needs its goals);
+  // surface that refusal as the button's tooltip for a few seconds.
+  const [hideBlocked, setHideBlocked] = useState(false)
+  const hideHintTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(
+    () => () => {
+      if (hideHintTimer.current) clearTimeout(hideHintTimer.current)
+    },
+    [],
+  )
+
+  const hidePlan = useCallback(() => {
+    if (!conversationId) return
+    void window.sylo.plan.hide(conversationId).then((res) => {
+      if (!res.ok && res.reason === 'subagents_running') {
+        setHideBlocked(true)
+        if (hideHintTimer.current) clearTimeout(hideHintTimer.current)
+        hideHintTimer.current = setTimeout(() => setHideBlocked(false), 3500)
+      }
+    })
+  }, [conversationId])
 
   const load = useCallback(async () => {
     if (!conversationId) {
@@ -73,6 +96,19 @@ export function ChatPlanGoalsBar({
           {done}/{snap.todos.length}
           {built > 0 ? ` (+${built})` : ''}
         </span>
+        <button
+          type="button"
+          aria-label="Hide plan goals"
+          title={
+            hideBlocked
+              ? "Can't hide while a subagent run is active"
+              : 'Hide plan goals — reappears if you continue this plan'
+          }
+          className="shrink-0 cursor-pointer text-[0.8rem] leading-none opacity-60 hover:opacity-100"
+          onClick={hidePlan}
+        >
+          ✕
+        </button>
       </div>
       <ul className={chatPlanGoalsList}>
         {snap.todos.map((todo) => (

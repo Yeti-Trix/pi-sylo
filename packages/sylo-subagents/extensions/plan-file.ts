@@ -244,8 +244,14 @@ export function reopenFailedGoals(
   return writeGoalStates(cwd, conversationId, goals, 'open')
 }
 
-/** Rewrite only the frontmatter, carrying over whatever the patch does not set. */
-function rewritePlanMeta(
+/**
+ * Rewrite only the frontmatter, carrying over whatever the patch does not set.
+ *
+ * Exported for the host's operator-side hide (`hidePlanTodos`): the goals-bar X
+ * takes a still-active plan off the bar with the same frontmatter-only patch as
+ * `hideFinishedPlan` — no body edits, fully reversible by `restorePlan`.
+ */
+export function rewritePlanMeta(
   cwd: string,
   conversationId: string,
   patch: { status?: PlanStatus; hidden?: boolean },

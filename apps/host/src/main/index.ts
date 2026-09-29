@@ -302,6 +302,7 @@ import {
 } from './subagent-tasks-service.js'
 import {
   clearPlanForNewChat,
+  hidePlanTodos,
   isolatePlanForConversation,
   readPlanTodos,
   setPlanTodosListener,
@@ -1899,10 +1900,49 @@ function hasPendingTurn(turnId: string): boolean {
   return pendingTurns.has(turnId)
 }
 
+/**
+ * Conversation ids with a pending ask-question right now. Their pending turns
+ * are parked mid-tool waiting for an operator answer — doing no agent work —
+ * so they must not eat the concurrency budget other chats queue behind (see
+ * `shouldDeferCrossConversationTurn` / `acquireBrokerForTurn`).
+ */
+function askQuestionHeldConversationIds(): Set<string> {
+  const held = new Set<string>()
+  for (const pending of pendingAskQuestions.values()) {
+    const convId = pending.conversationId?.trim()
+    if (convId) held.add(convId)
+  }
+  return held
+}
+
+/**
+ * In-flight turns that are actually working. Without a scan of
+ * `pendingAskQuestions` the budget sees a parked question as a busy slot and
+ * serialized setups (concurrent off, or max reached) queue real work behind
+ * an answer nobody has typed yet.
+ */
+function activeWorkingTurnCount(excludeConversationId?: string): number {
+  const held = askQuestionHeldConversationIds()
+  let count = 0
+  for (const turn of pendingTurns.values()) {
+    if (excludeConversationId && turn.convId === excludeConversationId) continue
+    if (held.has(turn.convId)) continue
+    count++
+  }
+  return count
+}
+
 function shouldDeferCrossConversationTurn(conversationId: string): boolean {
-  if (!findPendingTurnForOtherConversation(conversationId)) return false
-  if (!concurrentTurnsEnabled()) return true
-  return pendingTurns.size >= maxConcurrentTurns()
+  const held = askQuestionHeldConversationIds()
+  let blocking = 0
+  for (const turn of pendingTurns.values()) {
+    if (turn.convId === conversationId) continue
+    // A turn parked on an unanswered ask-question is waiting for the operator,
+    // not working — on its own it does not hold other chats back.
+    if (held.has(turn.convId)) continue
+    blocking++
+  }
+  return blocking >= maxConcurrentTurns()
 }
 
 function isSupervisorReady(supervisor: BrokerSupervisor): boolean {
@@ -1978,7 +2018,7 @@ function deferChatTurn(
 
 async function flushDeferredTurns(): Promise<void> {
   if (deferredChatTurns.length === 0) return
-  if (pendingTurns.size >= maxConcurrentTurns()) return
+  if (activeWorkingTurnCount() >= maxConcurrentTurns()) return
   const next = deferredChatTurns[0]
   // The queued turn's conversation has a compaction in flight right now — wait; the
   // compaction finish path (and the 5s sweep) flushes again when it is done.
@@ -2012,7 +2052,7 @@ function scheduleDeferredFlushSweep(): void {
   deferredFlushSweepTimer = setTimeout(() => {
     deferredFlushSweepTimer = null
     if (deferredChatTurns.length === 0) return
-    if (pendingTurns.size < maxConcurrentTurns()) void flushDeferredTurns()
+    if (activeWorkingTurnCount() < maxConcurrentTurns()) void flushDeferredTurns()
     if (deferredChatTurns.length > 0) scheduleDeferredFlushSweep()
   }, 5_000)
   deferredFlushSweepTimer.unref?.()
@@ -4422,12 +4462,20 @@ async function acquireBrokerForTurn(conversationId: string): Promise<BrokerSuper
   ) {
     return broker
   }
-  if (!concurrentTurnsEnabled()) {
+  // The working-turn budget, not raw pendingTurns.size: a turn parked on an
+  // unanswered ask-question occupies the primary mid-tool but waits for operator
+  // input, so in a serialized setup (concurrent turns off, or max reached) it
+  // used to queue every other chat behind an answer nobody had typed. Let those
+  // chats run a temporary overflow broker — the same lifecycle concurrent mode
+  // already uses — and everything returns to normal once the answer lands and
+  // the parked turn finishes.
+  const working = activeWorkingTurnCount()
+  if (!concurrentTurnsEnabled() && working >= maxConcurrentTurns()) {
     return null
   }
   const idleOverflow = turnBrokerPool.findIdleOverflow(hasPendingTurn)
   if (idleOverflow) return idleOverflow
-  if (pendingTurns.size >= maxConcurrentTurns()) {
+  if (working >= maxConcurrentTurns()) {
     return null
   }
   return spawnOverflowBroker(conversationId)
@@ -5947,6 +5995,11 @@ function registerIpc(): void {
     const wid = typeof workspaceId === 'string' ? workspaceId.trim() : ''
     if (wid) clearPlanForNewChat(wid)
     return { ok: true as const }
+  })
+  ipcMain.handle('plan:hide', (_e, conversationId: unknown) => {
+    const id = typeof conversationId === 'string' ? conversationId.trim() : ''
+    if (!id) return { ok: false as const, reason: 'no_plan' as const }
+    return hidePlanTodos(id)
   })
 
   ipcMain.handle('tasks:list', (_e, conversationId: unknown) => {
