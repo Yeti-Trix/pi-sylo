@@ -2,13 +2,17 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { createPortal } from 'react-dom'
 import { ChatConversationMessageRow, type ChatMessageRowModel } from './chat/ConversationMessage'
 import {
+  clearAskQuestionPrompt,
   clearAskQuestionPromptsForConversation,
+  conversationPauseSnapshot,
   ingestAskQuestionPayload,
+  NO_QUESTION_PAUSE,
   pendingQuestionConversationIds,
   subscribeAskQuestionPrompts,
 } from './chat/askQuestionClient'
 import { convActivityStatus, type ConvActivityStatus } from './chat/conv-activity'
 import { ChatComposer, type ChatComposerHandle } from './chat/ChatComposer'
+import { PLAN_MODE_NOTICE, planModePrefKey } from '../../shared/plan-mode.js'
 import { forwardDroppedFiles } from './chat/chatDropBus'
 import { ChatPlanGoalsBar } from './chat/ChatPlanGoalsBar'
 import { ChatModelBar } from './chat/ChatModelBar'
@@ -49,7 +53,8 @@ import { CanvasResizeHandle } from './components/canvas/CanvasResizeHandle'
 import { useCanvasTabs } from './components/canvas/useCanvasTabs'
 import { useTerminalSessions } from './components/canvas/useTerminalSessions'
 import type { AppTabKind } from './components/canvas/canvasTypes'
-import { APP_TAB_KIND_LABEL, tabKind } from './components/canvas/canvasTypes'
+import { APP_TAB_KIND_LABEL, canvasTabLabel, tabKind } from './components/canvas/canvasTypes'
+import type { AtRefCanvasItem, AtRefTerminalItem } from './chat/ChatComposer'
 import { storedSrcForTab } from './components/canvas/BrowserPane'
 import {
   CHAT_PANE_SIZE_DEFAULT,
@@ -63,6 +68,8 @@ import { CapabilityManagerPanel } from './panels/capability'
 import { EvalDashboardPanel } from './panels/EvalDashboardPanel'
 import { ProposalsPanel } from './panels/ProposalsPanel'
 import { SchedulesPanel } from './panels/schedules/SchedulesPanel'
+import { CheckpointsPanel } from './panels/checkpoints/CheckpointsPanel'
+import { RulesPanel } from './panels/rules/RulesPanel'
 import { useSubagentTasks } from './panels/tasks/useSubagentTasks'
 import { SubagentRunsStrip } from './components/subagent/SubagentRunsStrip'
 import {
@@ -141,7 +148,6 @@ import {
   chatTurnActions,
   chatStopBtn,
   chatStopBtnCompact,
-  agentWidgetHost,
   chatWorkbench,
   showAppsStrip,
   showAppsStripLabel,
@@ -174,7 +180,6 @@ import {
   routePopoutRoot,
   settingsCaption,
   errorText,
-  toolLogPre,
   workspaceEditDisclosure,
   workspaceEditDisclosureInner,
   workspaceEditDisclosureOpen,
@@ -575,7 +580,7 @@ function detailsOpenFromToggleEvent(e: React.SyntheticEvent<HTMLDetailsElement>)
   return false
 }
 
-type Tab = 'chat' | 'schedules' | 'evals' | 'proposals' | 'skills' | 'settings' | 'skill-route'
+type Tab = 'chat' | 'schedules' | 'checkpoints' | 'rules' | 'evals' | 'proposals' | 'skills' | 'settings' | 'skill-route'
 
 type SkillRouteRow = {
   skillName: string
@@ -820,6 +825,19 @@ export function App(): React.ReactElement {
     }
     return null
   }, [activeSending, messages])
+  /**
+   * Pause ledger snapshot for the active turn's timers: while a question is owed (the
+   * conversation shows in questionConvIds) the "Turn ·" / reply elapsed labels freeze
+   * and, once answered, resume from the frozen value (each paused interval is
+   * subtracted rather than absorbed). `questionConvIds` doubles as the store change
+   * tick — pause ledger mutations ride the same notify, so this identity only moves
+   * when the snapshot should refresh (the stable value keeps memoized chat rows from
+   * re-rendering otherwise).
+   */
+  const activeTurnPause = useMemo(
+    () => (activeId ? conversationPauseSnapshot(activeId) : NO_QUESTION_PAUSE),
+    [activeId, questionConvIds],
+  )
 
   const markOptimisticSending = useCallback((conversationId: string) => {
     optimisticSendingRef.current.set(conversationId, Date.now())
@@ -1067,6 +1085,27 @@ export function App(): React.ReactElement {
   const [systemPromptStatsOpen, setSystemPromptStatsOpen] = useState(false)
   /** "Compact now" (chat footer): conversation id with a manual compaction in flight. */
   const [compactNowBusyId, setCompactNowBusyId] = useState<string | null>(null)
+  // ── Composer quick commands (tasks 09/10): /clear modal + /model flash ──
+  const [clearChatModal, setClearChatModal] = useState<{ id: string; title: string } | null>(null)
+  const [modelBarFlash, setModelBarFlash] = useState(false)
+  // Plan mode (task 11): per-chat toggle, persisted as a per-conversation pref.
+  const [planModeByConv, setPlanModeByConv] = useState<Record<string, boolean>>({})
+  useEffect(() => {
+    if (!activeId) return
+    let dead = false
+    void (async () => {
+      try {
+        const v = await window.sylo.prefs.get(planModePrefKey(activeId), false)
+        if (!dead) setPlanModeByConv((prev) => ({ ...prev, [activeId]: v === true }))
+      } catch {
+        /* plan mode is optional */
+      }
+    })()
+    return () => {
+      dead = true
+    }
+  }, [activeId])
+  const modelBarFlashTimerRef = useRef<number | null>(null)
   /** Transient inline error from the last manual compaction attempt (footer status). */
   const [compactNowError, setCompactNowError] = useState<string | null>(null)
   const [actualContextByConv, setActualContextByConv] = useState<Record<string, {
@@ -1138,6 +1177,40 @@ export function App(): React.ReactElement {
       window.setTimeout(() => setCompactNowError((cur) => (cur ? null : cur)), 8000)
     }
   }, [compactNowBusyId])
+
+  /** Composer quick commands (task 10): /compact /clear /model. */
+  const handleSlashCommand = useCallback(
+    (name: string) => {
+      if (name === 'compact') {
+        if (!activeId) return
+        void requestCompactNow(activeId)
+        return
+      }
+      if (name === 'clear') {
+        if (!activeId) return
+        const conv = conversations.find((x) => x.id === activeId)
+        setClearChatModal({ id: activeId, title: conv?.title ?? '' })
+        return
+      }
+      if (name === 'model') {
+        setModelBarFlash(true)
+        if (modelBarFlashTimerRef.current) window.clearTimeout(modelBarFlashTimerRef.current)
+        modelBarFlashTimerRef.current = window.setTimeout(() => setModelBarFlash(false), 3500)
+        return
+      }
+    },
+    [activeId, conversations, requestCompactNow],
+  )
+
+  const togglePlanMode = useCallback(() => {
+    if (!activeId) return
+    const next = !(planModeByConv[activeId] === true)
+    setPlanModeByConv((prev) => ({ ...prev, [activeId]: next }))
+    void window.sylo.chat.setPlanMode(activeId, next).catch(() => {
+      /* pref write failed — optimistic state reverts on next reload */
+    })
+  }, [activeId, planModeByConv])
+  const planModeOn = activeId ? planModeByConv[activeId] === true : false
   const [diagnostics, setDiagnostics] = useState({
     userData: '',
     db: '',
@@ -1162,14 +1235,6 @@ export function App(): React.ReactElement {
   const [archiveSelected, setArchiveSelected] = useState<Set<string>>(() => new Set())
   /** Bulk confirm dialog: 'all' = Delete all…, 'selected' = Delete (n)…. */
   const [bulkDeleteKind, setBulkDeleteKind] = useState<null | 'all' | 'selected'>(null)
-
-  const [agentWidgetPayload, setAgentWidgetPayload] = useState<{
-    toolCallId: string
-    html?: string
-    path?: string
-    data: unknown
-  } | null>(null)
-  const [agentWidgetLog, setAgentWidgetLog] = useState<string[]>([])
 
   const [canvasOpen, setCanvasOpen] = useState(false)
   // Tab state for the docked canvas (one CanvasTab per view, keyed per
@@ -1700,6 +1765,10 @@ export function App(): React.ReactElement {
     }
 
     setConversations(list)
+    // Archived multi-select (task 15a): the selection mirrors what was on
+    // screen — a data refresh re-bases the visible list, so stale picks (rows
+    // restored/deleted elsewhere since) must not survive it.
+    setArchiveSelected(new Set())
 
     // Archived (retention v2): kept chats idle past the retention window.
     try {
@@ -1969,6 +2038,8 @@ export function App(): React.ReactElement {
         label: 'Tools',
         items: [
           tabItem('schedules', 'Schedules'),
+          tabItem('checkpoints', 'Checkpoints'),
+          tabItem('rules', 'Rules'),
           ...routeItems('tools'),
           ...routeItems('library').map((it, i) => ({ ...it, sep: i === 0 })),
         ],
@@ -2067,6 +2138,8 @@ export function App(): React.ReactElement {
     closeTab: closeCanvasTab,
     updateActiveSnapshot: updateActiveCanvasSnapshot,
     openAppTab: openAppsPaneTab,
+    openWidgetTab,
+    openDiffTab,
   } = useCanvasTabs({
     workspaceId: sidebarWorkspaceId,
     conversationId: activeId,
@@ -2519,6 +2592,9 @@ export function App(): React.ReactElement {
         setRenameConvModal(null)
         setDeleteConvModal(null)
         setBulkDeleteKind(null)
+        // Archived multi-select (task 15a): Esc exits the mode and clears it.
+        setArchiveSelectMode(false)
+        setArchiveSelected(new Set())
       }
     }
     document.addEventListener('keydown', onKey)
@@ -2542,12 +2618,15 @@ export function App(): React.ReactElement {
   }, [convContextMenu])
 
   useEffect(() => {
+    // Agent `show_widget` payloads route to the CANVAS (widget app-pane tab),
+    // never chat — the chat-column widget host was removed (show_widget must
+    // not render UI in the transcript; dashboards keep their sandbox path). openWidgetTab applies the per-workspace gate +
+    // opens the panel itself.
     const u = window.sylo.skillSurface.onShow((p) => {
-      setAgentWidgetPayload(p)
-      setAgentWidgetLog([])
+      openWidgetTab(p)
     })
     return u
-  }, [])
+  }, [openWidgetTab])
 
   // Keep the active-workspace-cwd ref current for the canvas show gates inside
   // useCanvasTabs (those listeners are registered once, so they read this
@@ -2700,6 +2779,14 @@ export function App(): React.ReactElement {
       const rows = pending.get(x.messageId)
       if (rows) pushCoalescedTelemetry(rows, { ts: x.ts, event: x.event })
       else pending.set(x.messageId, [{ ts: x.ts, event: x.event }])
+      // The ask-question tool ended — the answer landed (possibly from the companion)
+      // or the wait was cancelled. Drop the pending prompt: the answered card collapses,
+      // the "?" badge clears, and the turn timer's pause closes even if the submit did
+      // not happen in this renderer. No-op for every non-question tool.
+      if (x.event && typeof x.event === 'object' && (x.event as Record<string, unknown>).type === 'tool_execution_end') {
+        const toolCallId = (x.event as Record<string, unknown>).toolCallId
+        if (typeof toolCallId === 'string') clearAskQuestionPrompt(toolCallId)
+      }
       if (liveWorkflowFlushTimerRef.current == null) {
         liveWorkflowFlushTimerRef.current = setTimeout(flushLiveWorkflow, streamFlushMs(liveDeltaTotalLenRef.current))
       }
@@ -3002,16 +3089,23 @@ export function App(): React.ReactElement {
 
   // ── Agent checkpoints (per-turn undo; storage in app data only) ───────────
   // Assistant replies with a pre-turn workspace snapshot get a hover "Undo".
+  // Task 07: the same list also carries per-turn change stats → file-change
+  // review cards + read-only diff panes.
   const [undoableTurnIds, setUndoableTurnIds] = useState<Set<string>>(new Set())
+  const [turnChangesById, setTurnChangesById] = useState<Record<string, { modified: string[]; added: string[]; deleted: string[] }>>({})
   useEffect(() => {
     let dead = false
     setUndoableTurnIds(new Set())
+    setTurnChangesById({})
     if (!activeId) return
     void (async () => {
       try {
         const entries = await window.sylo.checkpoints.list(activeId)
         if (dead) return
         setUndoableTurnIds(new Set(entries.map((e) => e.assistantMessageId)))
+        const nextChanges: Record<string, { modified: string[]; added: string[]; deleted: string[] }> = {}
+        for (const e of entries) if (e.changes) nextChanges[e.assistantMessageId] = e.changes
+        setTurnChangesById(nextChanges)
       } catch {
         /* checkpoints are optional */
       }
@@ -3046,6 +3140,231 @@ export function App(): React.ReactElement {
     },
     [activeId],
   )
+  const handleEditAndResendFinal = useCallback(
+    (
+      conversationId: string,
+      messageId: string,
+      text: string,
+      attachments: { path: string; name: string }[],
+      restoreAssistantId: string | null,
+    ) => {
+      void (async () => {
+        const r = await window.sylo.chat.editAndResend(
+          conversationId,
+          messageId,
+          text,
+          attachments,
+          restoreAssistantId ?? undefined,
+        )
+        if (!r.ok) {
+          window.alert(`Edit & resend failed: ${r.error}`)
+        }
+      })()
+    },
+    [],
+  )
+
+  /** Edit & resend (Claude parity, tasks 01+02): the row hands up the edited text
+   *  + the original message's attachments; main truncates after the message,
+   *  rewrites it, and reruns the turn. When the turn that followed the message
+   *  has a revertable checkpoint, an App-level confirm modal first offers
+   *  "Restore workspace to state before that turn" (checked by default) with
+   *  the file-change preview — exactly Claude's edit-undoes-work. */
+  const [editResendModal, setEditResendModal] = useState<{
+    conversationId: string
+    userMessageId: string
+    assistantId: string
+    text: string
+    attachments: { path: string; name: string }[]
+    preview: { modified: string[]; added: string[]; deleted: string[] }
+  } | null>(null)
+  useEffect(() => {
+    if (!clearChatModal) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setClearChatModal(null)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [clearChatModal])
+  // /clear confirm: archive (nothing deleted) + drop the operator into a fresh
+  // chat of the same workspace. Delete-forever routes through the EXISTING
+  // guarded delete modal (count + warnings + checkpoint/session purge).
+  const confirmClearChatArchive = async () => {
+    if (!clearChatModal) return
+    const id = clearChatModal.id
+    setClearChatModal(null)
+    await performArchiveConversation(id)
+    const next = await window.sylo.conversations.create('', sidebarWorkspaceId)
+    activeIdRef.current = next.id
+    setActiveId(next.id)
+    setTab('chat')
+    await refreshConversations()
+  }
+  const confirmClearChatDelete = () => {
+    if (!clearChatModal) return
+    const id = clearChatModal.id
+    setClearChatModal(null)
+    setDeleteConvModal({ id, title: clearChatModal.title })
+  }
+
+  // "Restore workspace" defaults ON every time the modal opens (Claude parity:
+  // editing a message undoes the work that turn did — unless deselected).
+  const [editResendModalRestoreDefault, setEditResendModalRestoreDefault] = useState(true)
+  useEffect(() => {
+    if (editResendModal) setEditResendModalRestoreDefault(true)
+  }, [editResendModal])
+  useEffect(() => {
+    if (!editResendModal) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setEditResendModal(null)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [editResendModal])
+
+  const startEditAndResend = useCallback(
+    (
+      messageId: string,
+      text: string,
+      attachments: { path: string; name: string }[],
+    ) => {
+      if (!activeId) return
+      void (async () => {
+        // The turn that FOLLOWED the edited message: first assistant row after
+        // it on the timeline. If it has a checkpoint, route through the
+        // revert-confirm modal instead of silently truncating chat history.
+        const idx = chatTimeline.findIndex(
+          (row) => row.kind === 'message' && row.message.id === messageId,
+        )
+        let nextAssistantId: string | null = null
+        if (idx >= 0) {
+          for (let i = idx + 1; i < chatTimeline.length; i++) {
+            const row = chatTimeline[i]!
+            if (row.kind === 'message' && row.message.role === 'assistant') {
+              nextAssistantId = row.message.id
+              break
+            }
+          }
+        }
+        if (
+          nextAssistantId &&
+          undoableTurnIds.has(nextAssistantId)
+        ) {
+          const r = await window.sylo.checkpoints.preview(activeId, nextAssistantId)
+          if (r.ok) {
+            setEditResendModal({
+              conversationId: activeId,
+              userMessageId: messageId,
+              assistantId: nextAssistantId,
+              text,
+              attachments,
+              preview: r.preview,
+            })
+            return
+          }
+          // Checkpoint exists in the list but preview failed (retention edge) —
+          // fall through to conversation-only edit; files untouched.
+        }
+        await handleEditAndResendFinal(activeId, messageId, text, attachments, null)
+      })()
+    },
+    [activeId, chatTimeline, undoableTurnIds, handleEditAndResendFinal],
+  )
+
+  const confirmEditAndResend = useCallback(
+    (restoreWorkspace: boolean) => {
+      const modal = editResendModal
+      if (!modal) return
+      setEditResendModal(null)
+      void handleEditAndResendFinal(
+        modal.conversationId,
+        modal.userMessageId,
+        modal.text,
+        modal.attachments,
+        restoreWorkspace ? modal.assistantId : null,
+      )
+    },
+    [editResendModal, handleEditAndResendFinal],
+  )
+
+  /** Retry (Claude parity, task 03): rerun the last turn from the same user
+   *  message. Only offered on the timeline's last assistant row; guard when a
+   *  turn is currently streaming (stop + rewind is the point, but ask). */
+  const handleRetryLastReply = useCallback(() => {
+    if (!activeId) return
+    if (activeSending && !window.confirm('A turn is streaming — stop it and retry from the same message?')) {
+      return
+    }
+    void (async () => {
+      const r = await window.sylo.chat.retryLastReply(activeId)
+      if (!r.ok) {
+        window.alert(`Retry failed: ${r.error}`)
+      }
+    })()
+  }, [activeId, activeSending])
+
+  /** Retry (task 03) hover target: the timeline's LAST assistant row only. */
+  /** @-reference sources (task 06): open canvas tabs (sketches/widgets/boards
+   *  — files/boards the agent can look at) + terminal panes with pick-time
+   *  buffer reads. Recomputed on canvas tab / session changes. */
+  const atCanvasItems = useMemo<AtRefCanvasItem[]>(
+    () =>
+      canvasTabs
+        .map((t): AtRefCanvasItem | null => {
+          const k = tabKind(t)
+          if (k !== 'canvas' && k !== 'widget') return null
+          const label = canvasTabLabel(t.view, k, t.title)
+          const snap = t.view.mode === 'snapshot' ? t.view.payload : null
+          const kindLabel = k === 'widget' ? 'skill widget' : snap ? snap.kind : 'canvas'
+          const backing = snap?.sourcePath?.trim() || (snap?.kind === 'svg' ? snap.filePath?.trim() : undefined) || undefined
+          return {
+            title: label,
+            detail: kindLabel + (backing ? ` · ${backing}` : ''),
+            refText: `\n\n[Canvas: ${label} (${kindLabel}${backing ? `, file: ${backing}` : ''})]\n`,
+          }
+        })
+        .filter((x): x is AtRefCanvasItem => x !== null),
+    [canvasTabs],
+  )
+  const atTerminalItems = useMemo<AtRefTerminalItem[]>(
+    () => {
+      const titleByTab = new Map(canvasTabs.map((t) => [t.id, t.title || APP_TAB_KIND_LABEL.terminal]))
+      return terminals.list().map((s) => ({
+        tabId: s.tabId,
+        title: titleByTab.get(s.tabId) ?? 'Terminal',
+        readBuffer: () => terminals.get(s.tabId)?.buffer ?? '',
+      }))
+    },
+    // terminals is a stable registry object; canvasTabs changes re-derive
+    // titles. readBuffer always reads live state at pick time.
+    [canvasTabs],
+  )
+
+  /** Review diff (task 07): fetch the turn's per-file unified diffs (pre-image
+   *  vs current disk) and open them as a read-only 'diff' canvas tab. */
+  const handleReviewDiff = useCallback(
+    (assistantId: string) => {
+      if (!activeId) return
+      void (async () => {
+        const r = await window.sylo.checkpoints.diff(activeId, assistantId)
+        if (!r.ok) {
+          window.alert(`Could not build the diff: ${r.error}`)
+          return
+        }
+        openDiffTab({ assistantMessageId: assistantId, files: r.diffs }, 'Diff review')
+      })()
+    },
+    [activeId, openDiffTab],
+  )
+
+  const lastAssistantRowId = useMemo(() => {
+    for (let i = chatTimeline.length - 1; i >= 0; i--) {
+      const row = chatTimeline[i]!
+      if (row.kind === 'message' && row.message.role === 'assistant') return row.message.id
+    }
+    return null
+  }, [chatTimeline])
+
   const confirmUndoTurn = async () => {
     if (!undoTurnModal || !activeId) return
     setUndoTurnModal({ ...undoTurnModal, busy: true })
@@ -3064,6 +3383,47 @@ export function App(): React.ReactElement {
     }
   }
 
+  // ── Plan mode Approve & execute (task 11) ────────────────────────────────
+  // A plan turn's reply = an assistant row whose immediately preceding message
+  // row is the shared PLAN_MODE_NOTICE system row. When that reply is the
+  // timeline's LAST assistant row (and idle), it gets Approve & execute +
+  // Discard actions.
+  const planApprovableReplyId = useMemo(() => {
+    if (activeSending) return null
+    const rows = chatTimeline
+    const lastAssistantIdx = (() => {
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const row = rows[i]!
+        if (row.kind === 'message' && row.message.role === 'assistant') return i
+      }
+      return -1
+    })()
+    if (lastAssistantIdx < 0) return null
+    // preceding message row = the plan notice?
+    for (let i = lastAssistantIdx - 1; i >= 0; i--) {
+      const row = rows[i]!
+      if (row.kind !== 'message') continue
+      if (row.message.role === 'system' && row.message.content.trim() === PLAN_MODE_NOTICE) {
+        return (rows[lastAssistantIdx]! as { message: { id: string } }).message.id
+      }
+      return null // another message row sits between the notice and the reply
+    }
+    return null
+  }, [chatTimeline, activeSending])
+
+  const handleApprovePlan = useCallback(
+    (assistantMessageId: string) => {
+      if (!activeId) return
+      void (async () => {
+        const r = await window.sylo.chat.approvePlan(activeId, assistantMessageId)
+        if (!r.ok) {
+          window.alert(`Could not execute the plan: ${r.error}`)
+        }
+      })()
+    },
+    [activeId],
+  )
+
   const renderChatTimelineRow = useCallback(
     (row: ChatTimelineRow) => {
       if (row.kind === 'message') {
@@ -3081,6 +3441,14 @@ export function App(): React.ReactElement {
             workspaceId={sidebarWorkspaceId}
             canUndoTurn={m.role === 'assistant' && undoableTurnIds.has(m.id)}
             onUndoTurn={() => void openUndoTurnModal(m.id)}
+            onEditMessage={m.role === 'user' ? (t, atts) => startEditAndResend(m.id, t, atts) : undefined}
+            canRetryTurn={m.role === 'assistant' && m.id === lastAssistantRowId}
+            onRetryTurn={m.role === 'assistant' && m.id === lastAssistantRowId ? handleRetryLastReply : undefined}
+            turnChanges={m.role === 'assistant' ? turnChangesById[m.id] : undefined}
+            onReviewDiff={m.role === 'assistant' && turnChangesById[m.id] ? () => handleReviewDiff(m.id) : undefined}
+            planApprovable={m.role === 'assistant' && m.id === planApprovableReplyId}
+            onApprovePlan={() => handleApprovePlan(m.id)}
+            turnPause={activeTurnPause}
           />
         )
       }
@@ -3118,6 +3486,7 @@ export function App(): React.ReactElement {
       thinkTankUiBySession,
       sidebarWorkspaceId,
       undoableTurnIds,
+      activeTurnPause,
       openUndoTurnModal,
     ],
   )
@@ -3335,7 +3704,7 @@ export function App(): React.ReactElement {
     })
     if (!p?.trim()) return
     prefillChatPrompt(
-      `/skill:sylo-attach-ui Attach this folder to Sylo GUI (sidebar route or chat widget).\n\nFolder path: ${p.trim()}`,
+      `/skill:sylo-attach-ui Attach this folder to Sylo GUI (sidebar route or canvas viewer).\n\nFolder path: ${p.trim()}`,
     )
   }, [prefillChatPrompt])
 
@@ -4860,77 +5229,12 @@ export function App(): React.ReactElement {
                       pinToEndRef={stickToBottomRef}
                     />
                   </div>
-                  {agentWidgetPayload ?
-                    <details className={agentWidgetHost}>
-                      <summary className={cn(mutedText, 'cursor-pointer text-[0.8rem]')}>
-                        <span className="flex items-center justify-between gap-2">
-                          <span className="min-w-0 truncate">
-                            Ecosystem widget (show_widget) ·{' '}
-                            <code>{agentWidgetPayload.toolCallId.slice(0, 8)}…</code>
-                          </span>
-                          <button
-                            type="button"
-                            className={cn(convActionBtn, 'shrink-0 px-1.5 py-0.5 text-[0.85rem]')}
-                            title="Close widget"
-                            aria-label="Close widget"
-                            onClick={(e) => {
-                              e.preventDefault()
-                              e.stopPropagation()
-                              setAgentWidgetPayload(null)
-                              setAgentWidgetLog([])
-                            }}
-                          >
-                            ×
-                          </button>
-                        </span>
-                      </summary>
-                      {agentWidgetPayload.html && agentWidgetPayload.path ?
-                        <p className={cn(mutedText, 'text-[0.8rem]')}>Invalid payload: both html and path set.</p>
-                      : !agentWidgetPayload.html && !agentWidgetPayload.path ?
-                        <p className={cn(mutedText, 'text-[0.8rem]')}>Invalid payload: missing html and path.</p>
-                      : (
-                        <SkillSurfaceSandbox
-                          key={agentWidgetPayload.toolCallId}
-                          {...(agentWidgetPayload.html ?
-                            { inlineHtmlFragment: agentWidgetPayload.html }
-                          : { fixturePath: agentWidgetPayload.path! })}
-                          widgetData={agentWidgetPayload.data}
-                          title="Agent-driven widget"
-                          onBridge={(m) => {
-                            setAgentWidgetLog((prev) => {
-                              const line = `[${m.op}] ${JSON.stringify(m.payload)}`
-                              const next = [...prev, line]
-                              return next.length > 20 ? next.slice(-20) : next
-                            })
-                            if (m.op === 'sendToAgent') {
-                              void window.sylo.skillSurface
-                                .injectFollowUp(
-                                  `[Sylo widget sendToAgent] toolCallId=${agentWidgetPayload.toolCallId} payload=${JSON.stringify(m.payload)}`,
-                                )
-                                .then((inj) => {
-                                  if (!inj.ok) {
-                                    setAgentWidgetLog((prev) => [...prev, `[inject] ${inj.error}`])
-                                  }
-                                })
-                            }
-                          }}
-                          onBridgeReject={() => {
-                            setAgentWidgetLog((prev) => [...prev, '[rejected: nonce_mismatch]'])
-                          }}
-                          onError={(err) => {
-                            setAgentWidgetLog((prev) => [...prev, `[error] ${err}`])
-                          }}
-                        />
-                      )}
-                      {agentWidgetLog.length > 0 ?
-                        <pre className={cn(toolLogPre, 'max-h-[100px] text-[0.78rem]')}>
-                          {agentWidgetLog.join('\n')}
-                        </pre>
-                      : null}
-                    </details>
-                  : null}
                   <div className={chatStatusSubfoot}>
+                    <div className={cn('min-w-0 flex-1', modelBarFlash && 'rounded-md ring-1 ring-accent/70 bg-accent/5')}>
+                      <div className={cn('min-w-0 flex-1', modelBarFlash && 'rounded-md ring-1 ring-accent/70 bg-accent/5')}>
                     <ChatModelBar conversationId={activeId} agentReady={agentReady} />
+                  </div>
+                    </div>
                     {contextStats.totalTokens > 0 ?
                       <button
                         type="button"
@@ -5000,6 +5304,7 @@ export function App(): React.ReactElement {
                           className={chatTurnElapsed}
                           prefix="Turn · "
                           title="Elapsed since this assistant reply started"
+                          pause={activeTurnPause}
                         />
                       : null}
                       {showComposerStop ?
@@ -5068,75 +5373,6 @@ export function App(): React.ReactElement {
                     pinToEndRef={stickToBottomRef}
                   />
                 </div>
-                {agentWidgetPayload ?
-                  <details className={agentWidgetHost}>
-                    <summary className={cn(mutedText, 'cursor-pointer text-[0.8rem]')}>
-                      <span className="flex items-center justify-between gap-2">
-                        <span className="min-w-0 truncate">
-                          Ecosystem widget (show_widget) ·{' '}
-                          <code>{agentWidgetPayload.toolCallId.slice(0, 8)}…</code>
-                        </span>
-                        <button
-                          type="button"
-                          className={cn(convActionBtn, 'shrink-0 px-1.5 py-0.5 text-[0.85rem]')}
-                          title="Close widget"
-                          aria-label="Close widget"
-                          onClick={(e) => {
-                            e.preventDefault()
-                            e.stopPropagation()
-                            setAgentWidgetPayload(null)
-                            setAgentWidgetLog([])
-                          }}
-                        >
-                          ×
-                        </button>
-                      </span>
-                    </summary>
-                    {agentWidgetPayload.html && agentWidgetPayload.path ?
-                      <p className={cn(mutedText, 'text-[0.8rem]')}>Invalid payload: both html and path set.</p>
-                    : !agentWidgetPayload.html && !agentWidgetPayload.path ?
-                      <p className={cn(mutedText, 'text-[0.8rem]')}>Invalid payload: missing html and path.</p>
-                    : (
-                      <SkillSurfaceSandbox
-                        key={agentWidgetPayload.toolCallId}
-                        {...(agentWidgetPayload.html ?
-                          { inlineHtmlFragment: agentWidgetPayload.html }
-                        : { fixturePath: agentWidgetPayload.path! })}
-                        widgetData={agentWidgetPayload.data}
-                        title="Agent-driven widget"
-                        onBridge={(m) => {
-                          setAgentWidgetLog((prev) => {
-                            const line = `[${m.op}] ${JSON.stringify(m.payload)}`
-                            const next = [...prev, line]
-                            return next.length > 20 ? next.slice(-20) : next
-                          })
-                          if (m.op === 'sendToAgent') {
-                            void window.sylo.skillSurface
-                              .injectFollowUp(
-                                `[Sylo widget sendToAgent] toolCallId=${agentWidgetPayload.toolCallId} payload=${JSON.stringify(m.payload)}`,
-                              )
-                              .then((inj) => {
-                                if (!inj.ok) {
-                                  setAgentWidgetLog((prev) => [...prev, `[inject] ${inj.error}`])
-                                }
-                              })
-                          }
-                        }}
-                        onBridgeReject={() => {
-                          setAgentWidgetLog((prev) => [...prev, '[rejected: nonce_mismatch]'])
-                        }}
-                        onError={(err) => {
-                          setAgentWidgetLog((prev) => [...prev, `[error] ${err}`])
-                        }}
-                      />
-                    )}
-                    {agentWidgetLog.length > 0 ?
-                      <pre className={cn(toolLogPre, 'max-h-[100px] text-[0.78rem]')}>
-                        {agentWidgetLog.join('\n')}
-                      </pre>
-                    : null}
-                  </details>
-                : null}
                 <div className={chatStatusSubfoot}>
                   <ChatModelBar conversationId={activeId} agentReady={agentReady} />
                   {contextStats.totalTokens > 0 ?
@@ -5208,6 +5444,7 @@ export function App(): React.ReactElement {
                         className={chatTurnElapsed}
                         prefix="Turn · "
                         title="Elapsed since this assistant reply started"
+                        pause={activeTurnPause}
                       />
                     : null}
                     {showComposerStop ?
@@ -5256,8 +5493,34 @@ export function App(): React.ReactElement {
               onOptimisticUserMessageFailed={() => {
                 if (activeId) clearOptimisticUser(activeId)
               }}
+              atCanvasItems={atCanvasItems}
+              atTerminalItems={atTerminalItems}
+              onSlashCommand={handleSlashCommand}
+              atProjectDir={activeWorkspaceForSettings.resolvedPiCwd ?? ''}
+              atAgentDir={diagnostics.resolvedPiAgentDir}
+              planModeOn={planModeOn}
+              onTogglePlanMode={togglePlanMode}
             />
           </>
+        )}
+
+        {tab === 'rules' && (
+          <div className={panelShell}>
+            <RulesPanel
+              workspaceId={sidebarWorkspaceId}
+              workspaces={workspaces.map((w) => ({ id: w.id, name: w.name }))}
+            />
+          </div>
+        )}
+
+        {tab === 'checkpoints' && (
+          <div className={panelShell}>
+            <CheckpointsPanel
+              conversationId={activeId}
+              conversationTitle={conversations.find((c) => c.id === activeId)?.title ?? ''}
+              onPreviewRestore={(assistantMessageId) => void openUndoTurnModal(assistantMessageId)}
+            />
+          </div>
         )}
 
         {tab === 'schedules' && (
@@ -5269,7 +5532,15 @@ export function App(): React.ReactElement {
                 setActiveId(conversationId)
                 setTab('chat')
               }}
-            />
+            
+              onPinOutput={(conversationId, schedule) => {
+                setActiveId(conversationId)
+                setTab('chat')
+                const when = schedule.last_run_at ? new Date(schedule.last_run_at).toLocaleString() : 'recent run'
+                prefillChatPrompt(
+                  `Continue from the scheduled run of "${schedule.title?.trim() || 'this schedule'}" (${when}): the run's output is the latest assistant reply in this conversation`,
+                )
+              }} />
           </div>
         )}
 
@@ -6512,6 +6783,128 @@ export function App(): React.ReactElement {
         )
       : null}
 
+      {clearChatModal ?
+        createPortal(
+          <div
+            className={modalOverlay}
+            role="presentation"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) setClearChatModal(null)
+            }}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="sylo-clear-chat-title"
+              className={modalShell}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <h3 id="sylo-clear-chat-title" className={modalTitle}>
+                Clear this chat?
+              </h3>
+              <p className={modalBody}>
+                <strong>
+                  {clearChatModal.title.trim() || 'This chat'}
+                </strong>{' '}
+                moves to Archived — nothing is deleted and nothing on disk changes — and a brand-new
+                chat opens in its place. Deleting permanently is a separate, guarded choice.
+              </p>
+              <div className={modalActions}>
+                <button type="button" className={btnGhost} onClick={() => setClearChatModal(null)}>
+                  Cancel
+                </button>
+                <button type="button" className={btnDanger} onClick={() => void confirmClearChatDelete()}>
+                  Delete forever…
+                </button>
+                <button type="button" className={btnPrimary} onClick={() => void confirmClearChatArchive()}>
+                  Archive & start fresh
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )
+      : null}
+      {editResendModal ?
+        createPortal(
+          <div
+            className={modalOverlay}
+            role="presentation"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) setEditResendModal(null)
+            }}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="sylo-edit-resend-title"
+              className={cn(modalShell, modalShellWide)}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <h3 id="sylo-edit-resend-title" className={modalTitle}>
+                Save edit &amp; resend?
+              </h3>
+              <p className={modalBody}>
+                Everything after your edited message is removed from the conversation and the turn
+                runs again with the new text. The deleted turn's work can be restored from the
+                checkpoint below.
+              </p>
+              <label className="mb-1 flex items-center gap-2 text-[0.82rem] text-text-primary">
+                <input
+                  type="checkbox"
+                  checked={editResendModalRestoreDefault}
+                  onChange={(e) => setEditResendModalRestoreDefault(e.target.checked)}
+                />
+                <span>
+                  Restore workspace to the state <em>before</em> that turn
+                  <span className={cn(mutedText, 'ml-1 text-[0.74rem]')}>
+                    (undoes the files that turn changed — current state is safety-captured first)
+                  </span>
+                </span>
+              </label>
+              {editResendModalRestoreDefault ?
+                <div className="max-h-56 overflow-auto rounded-md border border-border bg-bg-secondary p-2 font-mono text-[0.72rem] leading-[1.5]">
+                  <p className="m-0 text-text-primary">
+                    {editResendModal.preview.modified.length} modified ·{' '}
+                    {editResendModal.preview.added.length} added ·{' '}
+                    {editResendModal.preview.deleted.length} deleted
+                  </p>
+                  {[
+                    ...editResendModal.preview.modified.map((p) => `M ${p}`),
+                    ...editResendModal.preview.added.map((p) => `+ ${p}`),
+                    ...editResendModal.preview.deleted.map((p) => `- ${p}`),
+                  ]
+                    .slice(0, 200)
+                    .map((line) => (
+                      <div
+                        key={line}
+                        className={cn(
+                          'whitespace-pre',
+                          line.startsWith('- ') ? 'text-[#f6b3a4]' : 'text-text-secondary',
+                        )}
+                      >
+                        {line}
+                      </div>
+                    ))}
+                </div>
+              : null}
+              <div className={modalActions}>
+                <button type="button" className={btnGhost} onClick={() => setEditResendModal(null)}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className={btnPrimary}
+                  onClick={() => confirmEditAndResend(editResendModalRestoreDefault)}
+                >
+                  {editResendModalRestoreDefault ? 'Save, restore & resend' : 'Save & resend'}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )
+      : null}
       {undoTurnModal ?
         createPortal(
           <div

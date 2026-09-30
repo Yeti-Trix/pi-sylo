@@ -10,6 +10,7 @@ import { LogicForgeIoReviewAction } from '../components/logicforge/LogicForgeIoR
 import { logicForgeMatchRunDir } from '../components/logicforge/logicForgeMatchRunDir'
 import { mapSubagentBatchesToMessage } from '../components/subagent/matchSubagentBatches'
 import { UserMessageBody } from '../UserMessageBody'
+import { splitUserMessageAttachments } from '../chatUserAttachments'
 import { cn } from '../lib/cn'
 import { detailsOpenFromToggleEvent } from '../panels/capability/helpers'
 import {
@@ -26,6 +27,8 @@ import {
   chatMsgRowUser,
   chatMsgStatusMuted,
   chatMsgUser,
+  chatQueueEdit,
+  chatQueueEditBtn,
   chatSegmentArgs,
   chatSegmentBody,
   chatSegmentChevron,
@@ -66,6 +69,7 @@ import {
 } from '../workflowTimeline'
 import { LiveElapsedLabel } from './LiveElapsedLabel'
 import { CompactionNotice } from './CompactionNotice'
+import type { ConversationPauseSnapshot } from './askQuestionClient'
 import { compactionTriggerLabel } from '../../../shared/compaction-notice'
 import {
   thinkTankSeatBubbleClass,
@@ -90,6 +94,9 @@ export type ChatMessageRowModel = {
   tool_calls_json: string | null
   status: 'streaming' | 'complete' | 'failed' | 'cancelled'
   created_at: number
+  /** Edit-resend (Claude parity): original text + timestamp for edited user messages. */
+  original_text?: string | null
+  edited?: number | null
 }
 
 export type ThinkTankBubbleMeta = {
@@ -118,6 +125,31 @@ type ChatMessageRowProps = {
    *  snapshot, so the operator can restore the workspace to before it. */
   canUndoTurn?: boolean
   onUndoTurn?: () => void
+  /** Ask-question pause state for this conversation's turn (from the
+   *  askQuestionClient ledger): live turn timers freeze while an answer is owed
+   *  and resume from the frozen value after. `undefined`/NO_QUESTION_PAUSE when
+   *  nothing is pending — identity-stable so memoized rows do not re-render. */
+  turnPause?: ConversationPauseSnapshot
+  /** Edit & resend (Claude parity, user rows only): the row renders an inline
+   *  editor; on save, the edited text + the original message's attachments are
+   *  handed up (App routes them to `chat.editAndResend`, which truncates after
+   *  the message and reruns the turn). */
+  onEditMessage?: (newText: string, attachments: { path: string; name: string }[]) => void
+  /** Retry (Claude parity, task 03): true ONLY for the timeline's last
+   *  assistant row; click reruns that turn from the same user message. */
+  canRetryTurn?: boolean
+  onRetryTurn?: () => void
+  /** Per-turn file-change card (task 07, Cursor/Claude-Code parity): stats
+   *  from the turn's checkpoint manifest diff. Rendered only when the turn
+   *  actually changed files. */
+  turnChanges?: { modified: string[]; added: string[]; deleted: string[] }
+  /** Opens the read-only diff side pane for this turn (checkpoint diff IPC). */
+  onReviewDiff?: () => void
+  /** Plan mode (task 11): this plan-mode reply is the timeline's last and idle
+   *  — renders Approve & execute / Discard under the reply. Discard is a NO-OP
+   *  (nothing to undo — the plan turn cannot mutate the workspace). */
+  planApprovable?: boolean
+  onApprovePlan?: () => void
 }
 
 function segmentOverridesEqualForMessage(
@@ -164,7 +196,9 @@ function messageRowPropsEqual(prev: ChatMessageRowProps, next: ChatMessageRowPro
     pm.content !== nm.content ||
     pm.status !== nm.status ||
     pm.tool_calls_json !== nm.tool_calls_json ||
-    pm.created_at !== nm.created_at
+    pm.created_at !== nm.created_at ||
+    pm.original_text !== nm.original_text ||
+    pm.edited !== nm.edited
   ) {
     return false
   }
@@ -174,6 +208,14 @@ function messageRowPropsEqual(prev: ChatMessageRowProps, next: ChatMessageRowPro
   if (prev.workspaceId !== next.workspaceId) return false
   if (prev.canUndoTurn !== next.canUndoTurn) return false
   if (prev.onUndoTurn !== next.onUndoTurn) return false
+  if (prev.turnPause !== next.turnPause) return false
+  if (prev.onEditMessage !== next.onEditMessage) return false
+  if (prev.canRetryTurn !== next.canRetryTurn) return false
+  if (prev.onRetryTurn !== next.onRetryTurn) return false
+  if (prev.turnChanges !== next.turnChanges) return false
+  if (prev.onReviewDiff !== next.onReviewDiff) return false
+  if (prev.planApprovable !== next.planApprovable) return false
+  if (prev.onApprovePlan !== next.onApprovePlan) return false
   if (prev.onSegmentToggle !== next.onSegmentToggle) return false
   if (prev.subagentTasks !== next.subagentTasks) return false
   if (prev.onSubagentNotice !== next.onSubagentNotice) return false
@@ -462,12 +504,15 @@ function InlineTimingGap({
   ms,
   liveStartTs,
   turnStartTs,
+  turnPause,
 }: {
   label: string
   ms?: number
   liveStartTs?: number
   /** Assistant message created_at — shows live turn total when step timer is a sub-span. */
   turnStartTs?: number
+  /** Ask-question turn pause: totals freeze while an answer is owed. */
+  turnPause?: ConversationPauseSnapshot
 }): React.ReactElement {
   const isLive = liveStartTs !== undefined
   const [now, setNow] = useState(() => Date.now())
@@ -479,8 +524,18 @@ function InlineTimingGap({
   const displayMs = isLive ? Math.max(0, now - liveStartTs) : (ms ?? 0)
   const showTurnTotal =
     isLive && turnStartTs !== undefined && liveStartTs !== undefined && turnStartTs < liveStartTs
-  const turnTotalMs = showTurnTotal ? Math.max(0, now - turnStartTs) : 0
+  // While the turn is parked on an unanswered question the turn total freezes at
+  // the pause start (operator wait is not agent run time); after the answer it
+  // resumes from that frozen value because each pause interval is subtracted.
+  const turnPaused = turnPause?.paused === true && turnPause?.pausedSinceTs != null
+  const turnAnchorTs = turnPaused ? turnPause!.pausedSinceTs! : now
+  const turnTotalMs =
+    showTurnTotal ? Math.max(0, turnAnchorTs - turnStartTs - (turnPause?.pausedTotalMs ?? 0)) : 0
   const hint = BETWEEN_GAP_HINT[label] ?? 'Untracked wall time between stamped events.'
+  const turnTotalTitle =
+    turnPaused ?
+      'Elapsed since this assistant reply started (paused — waiting for your answer)'
+    : 'Elapsed since this assistant reply started'
   const ariaLabel =
     showTurnTotal ?
       `${label}: ${formatDurationMs(displayMs)}, ${formatDurationMs(turnTotalMs)} total`
@@ -499,8 +554,8 @@ function InlineTimingGap({
       </span>
       {showTurnTotal ?
         <span
-          className={cn(chatSegmentGapTotal, chatSegmentPulse)}
-          title="Elapsed since this assistant reply started"
+          className={cn(chatSegmentGapTotal, !turnPaused && chatSegmentPulse)}
+          title={turnTotalTitle}
         >
           · {formatDurationMs(turnTotalMs)} total
         </span>
@@ -523,6 +578,7 @@ function InterleavedAssistantBody({
   onSubagentNotice,
   onOpenLogicForgeIoReview,
   workspaceId,
+  turnPause,
 }: {
   messageId: string
   body: string
@@ -536,6 +592,8 @@ function InterleavedAssistantBody({
   onSubagentNotice?: (message: string) => void
   onOpenLogicForgeIoReview?: (runDir: string) => void
   workspaceId?: string
+  /** Ask-question turn pause: live turn totals freeze while an answer is owed. */
+  turnPause?: ConversationPauseSnapshot
 }): React.ReactElement {
   const subagentBatchBySegment = useMemo(
     () => mapSubagentBatchesToMessage(segments, subagentTasks ?? [], assistantCreatedAt),
@@ -709,6 +767,7 @@ function InterleavedAssistantBody({
         label={openGap.label}
         liveStartTs={openGap.startTs}
         turnStartTs={assistantCreatedAt}
+        turnPause={turnPause}
       />,
     )
   }
@@ -721,6 +780,7 @@ function InterleavedAssistantBody({
             label={openGap.label}
             liveStartTs={openGap.startTs}
             turnStartTs={assistantCreatedAt}
+            turnPause={turnPause}
           />
         </div>
       )
@@ -791,6 +851,14 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
   workspaceId,
   canUndoTurn,
   onUndoTurn,
+  turnPause,
+  onEditMessage,
+  canRetryTurn,
+  onRetryTurn,
+  turnChanges,
+  onReviewDiff,
+  planApprovable,
+  onApprovePlan,
 }: ChatMessageRowProps): React.ReactElement {
   const liveWorkflowMap =
     liveWorkflowForMessage.length > 0 ? { [m.id]: liveWorkflowForMessage } : {}
@@ -812,6 +880,27 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
 
   const showInterleavedWorkflow = segments.length > 0 || isStreaming
   const [copied, setCopied] = useState(false)
+  // Edit-resend (user rows): inline editor state. Attachments are parsed from
+  // the persisted row and re-sent verbatim — v1 edits text only.
+  const [editDraft, setEditDraft] = useState('')
+  const [editing, setEditing] = useState(false)
+  const editAttsRef = useRef<{ path: string; name: string }[]>([])
+  const [editingAtts, setEditingAtts] = useState<{ path: string; name: string }[]>([])
+  const startEdit = () => {
+    const { text, attachments } = splitUserMessageAttachments(m.content)
+    editAttsRef.current = attachments
+    setEditingAtts(attachments)
+    setEditDraft(text)
+    setEditing(true)
+  }
+  const cancelEdit = () => setEditing(false)
+  const saveEdit = () => {
+    const newText = editDraft.trim()
+    const originalSplit = splitUserMessageAttachments(m.content).text
+    setEditing(false)
+    if (!newText || newText === originalSplit.trim() || !onEditMessage) return
+    onEditMessage(newText, editAttsRef.current)
+  }
   const finalDurationMs = useMemo(
     () => (m.role === 'assistant' ? assistantTurnDurationMs(telemetryRows, m.created_at) : null),
     [m.role, m.created_at, telemetryRows],
@@ -858,6 +947,7 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
                 className={chatMsgStatusMuted}
                 prefix=" · "
                 title="Elapsed for this reply"
+                pause={turnPause}
               />
             : m.role === 'assistant' && m.status === 'cancelled' ?
               <span className={chatMsgStatusMuted}> · stopped</span>
@@ -881,6 +971,41 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
           >
             {copied ? 'Copied' : 'Copy'}
           </button>
+          {m.role === 'user' && !editing && onEditMessage ?
+            <button
+              type="button"
+              title="Edit & resend — rewinds the conversation after this message and reruns the turn"
+              aria-label="Edit and resend this message"
+              className="shrink-0 cursor-pointer rounded border-none bg-transparent px-1 py-0.5 text-[0.66rem] leading-none text-text-muted opacity-0 transition-opacity group-hover:opacity-100 hover:text-text-primary focus:opacity-100"
+              onClick={startEdit}
+            >
+              Edit
+            </button>
+          : null}
+          {m.role === 'user' && m.edited ?
+            <span
+              className="shrink-0 rounded bg-[rgb(255_255_255/0.08)] px-1.5 py-0.5 text-[0.64rem] leading-none text-text-secondary"
+              title={
+                m.original_text ?
+                  `Edited ${new Date(m.edited).toLocaleString()}\n
+Original:\n${m.original_text}`
+                : `Edited ${new Date(m.edited).toLocaleString()}`
+              }
+            >
+              edited
+            </span>
+          : null}
+          {m.role === 'assistant' && canRetryTurn ?
+            <button
+              type="button"
+              title="Retry — discard this reply and rerun the turn from the same message"
+              aria-label="Retry this reply"
+              className="shrink-0 cursor-pointer rounded border-none bg-transparent px-1 py-0.5 text-[0.66rem] leading-none text-text-muted opacity-0 transition-opacity group-hover:opacity-100 hover:text-text-primary focus:opacity-100"
+              onClick={() => onRetryTurn?.()}
+            >
+              Retry
+            </button>
+          : null}
           {m.role === 'assistant' && canUndoTurn ?
             <button
               type="button"
@@ -901,7 +1026,40 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
           </span>
         </div>
         <div className={cn(chatMsgBody, m.role === 'user' && chatMsgBodyUser)}>
-          {showTyping ?
+          {editing && m.role === 'user' ?
+            <>
+              <textarea
+                value={editDraft}
+                autoFocus
+                rows={Math.min(12, Math.max(3, editDraft.split('\n').length))}
+                spellCheck={false}
+                className={chatQueueEdit}
+                onChange={(e) => setEditDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape' && !e.nativeEvent.isComposing) {
+                    e.preventDefault()
+                    cancelEdit()
+                  } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault()
+                    saveEdit()
+                  }
+                }}
+              />
+              <div className="mt-1.5 flex items-center gap-2">
+                <button type="button" className={chatQueueEditBtn} onClick={saveEdit} title="Save & resend — rewinds the conversation after this message and reruns the turn (Ctrl/Cmd+Enter)">
+                  Save & resend
+                </button>
+                <button type="button" className={chatQueueEditBtn} onClick={cancelEdit} title="Discard the edit (Esc)">
+                  Cancel
+                </button>
+                {editingAtts.length > 0 ?
+                  <span className={cn(mutedText, 'truncate text-[0.72rem]')} title={editingAtts.map((a) => a.path).join('\n')}>
+                    {editingAtts.length} attachment{editingAtts.length === 1 ? '' : 's'} kept
+                  </span>
+                : null}
+              </div>
+            </>
+          : showTyping ?
             <InlineTimingGap label={labelLeadChatGap()} liveStartTs={m.created_at} />
           : m.role === 'assistant' ?
             showInterleavedWorkflow ?
@@ -918,6 +1076,7 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
                 onSubagentNotice={onSubagentNotice}
                 onOpenLogicForgeIoReview={onOpenLogicForgeIoReview}
                 workspaceId={workspaceId}
+                turnPause={turnPause}
               />
             : <ChatMarkdown text={body} resolveImageUrl={localImageUrl} workspaceId={workspaceId} />
           : m.role === 'user' ?
@@ -925,6 +1084,95 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
           : body
           }
         </div>
+        {m.role === 'assistant' && turnChanges &&
+         (turnChanges.modified.length + turnChanges.added.length + turnChanges.deleted.length > 0) ?
+          <div className="mt-1 flex flex-wrap items-center gap-2 rounded-md border border-border px-2 py-1 text-[0.72rem]">
+            <span className={cn(mutedText, 'whitespace-nowrap')} title="Files this turn changed (checkpoint manifest diff — Undo restores all of them)">
+              <span className="text-[#e2c08d]">{turnChanges.modified.length} modified</span>
+              {' · '}
+              <span className="text-[#9ece6a]">{turnChanges.added.length} added</span>
+              {' · '}
+              <span className="text-[#f6b3a4]">{turnChanges.deleted.length} deleted</span>
+            </span>
+            {onReviewDiff ?
+              <button
+                type="button"
+                className={chatQueueEditBtn}
+                title="Open the read-only before/after diff (canvas pane)"
+                onClick={() => onReviewDiff()}
+              >
+                Review diff
+              </button>
+            : null}
+            {canUndoTurn && onUndoTurn ?
+              <button
+                type="button"
+                className={chatQueueEditBtn}
+                title="Restore the workspace to before this turn (same as hover Undo — safety-captured first)"
+                onClick={() => onUndoTurn?.()}
+              >
+                Undo
+              </button>
+            : null}
+            <details className="min-w-0">
+              <summary className={cn(mutedText, 'cursor-pointer select-none')} title="Files changed by this turn">
+                files
+              </summary>
+              <div className="mt-1 flex flex-col gap-0.5 font-mono text-[0.7rem]">
+                {[
+                  ...turnChanges.modified.map((rel) => ({ rel, cls: 'text-[#e2c08d]' })),
+                  ...turnChanges.added.map((rel) => ({ rel, cls: 'text-[#9ece6a]' })),
+                  ...turnChanges.deleted.map((rel) => ({ rel, cls: 'text-[#f6b3a4]' })),
+                ]
+                  .slice(0, 12)
+                  .map(({ rel, cls }) => (
+                    <span key={rel} className={cn('break-all', cls)}>{rel}</span>
+                  ))}
+                {turnChanges.modified.length + turnChanges.added.length + turnChanges.deleted.length > 12 ?
+                  <span className={mutedText}>
+                    +{turnChanges.modified.length + turnChanges.added.length + turnChanges.deleted.length - 12} more
+                  </span>
+                : null}
+              </div>
+            </details>
+          </div>
+        : null}
+        {planApprovable && onApprovePlan ?
+          <div className="mt-2 flex items-center gap-2 rounded-md border border-accent/40 bg-accent/5 px-2 py-1.5">
+            <span className={cn(mutedText, 'min-w-0 flex-1 text-[0.72rem]')}>
+              Plan mode — nothing executed yet.
+            </span>
+            <button
+              type="button"
+              className={cn(chatQueueEditBtn, 'border-accent text-accent')}
+              title="Run this plan again with full tools (a new agent turn; never text-as-commands)"
+              onClick={() => onApprovePlan()}
+            >
+              Approve & execute
+            </button>
+            <button
+              type="button"
+              className={chatQueueEditBtn}
+              title="Do nothing — the plan turn could not change anything"
+              onClick={() => undefined}
+            >
+              Discard
+            </button>
+          </div>
+        : null}
+        {m.role === 'assistant' && m.original_text ?
+          <details className="mt-1">
+            <summary
+              className={cn(mutedText, 'cursor-pointer text-[0.72rem] select-none')}
+              title={`Discarded attempt stored on retry — original reply from ${m.edited ? new Date(m.edited).toLocaleString() : 'the retried turn'}`}
+            >
+              Previous attempt
+            </summary>
+            <pre className={cn(mutedText, 'mt-1 max-h-64 overflow-auto whitespace-pre-wrap text-[0.76rem] leading-snug')}>
+              {m.original_text}
+            </pre>
+          </details>
+        : null}
       </div>
     </div>
   )

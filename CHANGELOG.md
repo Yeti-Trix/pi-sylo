@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Turn timer pauses while an agent waits on your answer:** the live "Turn ·" / reply elapsed timers now count agent run time, not wall-clock — when a turn parks on an ask-question, the timer freezes at the pause start (and stops pulsing, with a "paused — waiting for your answer" tooltip), and when you answer (here or from the companion) it resumes from the frozen value because every paused interval is subtracted. Multiple questions in one turn bank separate waits; a turn boundary resets the accounting so the next turn counts from zero. The host stamps each question's open time, so even a desktop reload mid-wait re-anchors the pause correctly.
+
+### Added
+
 - **Plan goals bar close button:** an ✕ at the top-right of the plan-goals bar above the composer hides that chat's plan on demand. It patches the same frontmatter `hidden` flag the finished-plan path uses — nothing is deleted, ticks and the Reviewed badge keep their meaning, and saying "continue" in that chat puts the plan back with its goals intact. While a subagent run is active the hide is refused (the orchestrator still needs its goal dispatch) and the ✕'s tooltip explains that for a few seconds.
 
 ### Fixed

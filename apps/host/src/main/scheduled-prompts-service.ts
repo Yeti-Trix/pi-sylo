@@ -6,7 +6,9 @@ import {
   listDueScheduledPrompts,
   getScheduledPrompt,
   recordScheduledPromptConversation,
+  listScheduledPromptRuns,
   recordScheduledPromptRun,
+  recordScheduledPromptRunHistory,
   skipMissedScheduledPrompt,
 } from './scheduled-prompts-db.js'
 
@@ -86,17 +88,33 @@ async function fireScheduledPrompt(
   if (!fireFn) return
   if (!schedule.enabled) return
 
+  const startedAt = Date.now()
   let result: { conversationId: string; status: 'started' | 'failed' | 'broker_unavailable' }
   try {
     result = await fireFn(schedule)
   } catch {
     result = { conversationId: '', status: 'failed' }
   }
+  const durationMs = Date.now() - startedAt
 
   recordScheduledPromptRun(schedule.id, {
     conversationId: result.conversationId || '',
     status: result.status,
   })
+  // Run history (task 14): the fire loop's observable log. status→fire started
+  // (the model may still be running) — 'ok' = the turn was handed off; the
+  // chat itself shows the actual outcome. Recording must never disturb the
+  // fire loop (catchup + reuse semantics untouched).
+  try {
+    recordScheduledPromptRunHistory(schedule.id, {
+      status: result.status === 'started' ? 'ok' : 'error',
+      conversationId: result.conversationId || undefined,
+      brief: schedule.prompt_text,
+      durationMs,
+    })
+  } catch {
+    /* history is best-effort */
+  }
 
   mainWindowRef?.()?.webContents.send('schedules:changed', {
     workspaceId: schedule.workspace_id,
@@ -114,6 +132,7 @@ export async function fireScheduledPromptNow(id: string): Promise<
   const schedule = getScheduledPrompt(id)
   if (!schedule) return { ok: false, error: 'not_found' }
   if (!fireFn) return { ok: false, error: 'scheduler_not_ready' }
+  const startedAt = Date.now()
   let result: { conversationId: string; status: 'started' | 'failed' | 'broker_unavailable' }
   try {
     result = await fireFn(schedule)
@@ -124,6 +143,17 @@ export async function fireScheduledPromptNow(id: string): Promise<
   // recordScheduledPromptConversation): a later fire — manual or scheduled —
   // continues in this conversation when the schedule's chat mode says so.
   if (result.conversationId) recordScheduledPromptConversation(schedule.id, result.conversationId)
+  // Manual fires are observable activity too — record a (non-accounting) run row.
+  try {
+    recordScheduledPromptRunHistory(schedule.id, {
+      status: result.status === 'started' ? 'ok' : 'error',
+      conversationId: result.conversationId || undefined,
+      brief: schedule.prompt_text,
+      durationMs: Date.now() - startedAt,
+    })
+  } catch {
+    /* history is best-effort */
+  }
   mainWindowRef?.()?.webContents.send('schedules:changed', {
     workspaceId: schedule.workspace_id,
     scheduleId: schedule.id,

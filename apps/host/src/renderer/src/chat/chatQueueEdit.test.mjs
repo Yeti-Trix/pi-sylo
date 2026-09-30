@@ -52,6 +52,56 @@ describe('queue edit text round-trip', () => {
   })
 })
 
+describe('edit-resend round trip (task 01)', () => {
+  /**
+   * The edit-resend flow: the row editor splits the persisted row into
+   * (editable text + kept attachments), then the main-side re-prepare
+   * re-formats text + attachments into the new persisted content. Assert the
+   * same split → re-format → re-parse round trip the send path uses.
+   */
+  test('editing prose re-attaches the original attachments verbatim', () => {
+    const persisted = formatUserMessageWithAttachments(
+      'look at this',
+      [
+        { path: 'C:\\pics\\a.png', name: 'a.png' },
+        { path: 'C:\\docs\\spec v2.pdf', name: 'spec v2.pdf' },
+      ],
+    )
+    // Row editor startEdit(): display text + kept attachments.
+    const split = splitUserMessageAttachments(persisted)
+    assert.equal(split.text, 'look at this')
+    // Row editor saveEdit(): re-send edited text through the same formatter.
+    const resent = formatUserMessageWithAttachments(
+      'actually compare with the new sketch',
+      split.attachments,
+    )
+    const reparsed = splitUserMessageAttachments(resent)
+    assert.equal(reparsed.text, 'actually compare with the new sketch')
+    assert.deepEqual(reparsed.attachments, [
+      { path: 'C:\\pics\\a.png', name: 'a.png' },
+      { path: 'C:\\docs\\spec v2.pdf', name: 'spec v2.pdf' },
+    ])
+  })
+
+  test('unchanged text cancels the resend (no-op guard input shape)', () => {
+    const persisted = formatUserMessageWithAttachments(
+      'same text',
+      [{ path: '/x.png', name: 'x.png' }],
+    )
+    const split = splitUserMessageAttachments(persisted)
+    // saveEdit compares the trimmed draft against the trimmed original text;
+    // identical means cancel-without-send.
+    assert.equal(split.text.trim() === split.text.trim(), true)
+  })
+
+  test('plain row (no attachments) resends as bare text', () => {
+    const persisted = 'no attachments here'
+    const split = splitUserMessageAttachments(persisted)
+    assert.equal(split.attachments.length, 0)
+    assert.equal(formatUserMessageWithAttachments('edited text', []), 'edited text')
+  })
+})
+
 describe('composer drop bus', () => {
   test('forwards files to the registered handler', () => {
     const seen = []

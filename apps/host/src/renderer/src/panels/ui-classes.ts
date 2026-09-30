@@ -897,11 +897,6 @@ export const ctxMenuBackdrop = 'fixed inset-0 z-[11999]'
 export const ctxMenuShell =
   'fixed z-[12000] min-w-[208px] rounded-lg border border-border bg-bg-secondary p-1.5 shadow-[0_10px_36px_rgb(0_0_0/0.45)]'
 
-/** Agent show_widget panel below chat transcript (ecosystem / legacy) */
-export const agentWidgetHost = 'mt-1 border-t border-border py-2'
-
-export const agentWidgetHostHeader = 'mb-2 flex items-center justify-between gap-3'
-
 /** Chat + right-docked canvas */
 export const chatWorkbench = 'flex min-h-0 min-w-0 flex-1 flex-row'
 

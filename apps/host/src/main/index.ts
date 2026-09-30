@@ -25,15 +25,18 @@ import {
 import {
   captureDeferredStart,
   captureTurnStart,
+  diffTurn,
   listForConversation as listCheckpointsForConversation,
   previewRestore,
   pruneAll as pruneCheckpoints,
     purgeConversation as purgeConversationCheckpoints,
   reconcileDeferredCapture,
   restoreTurn,
+  turnChangesForConversation,
 } from './checkpoint-store.js'
 import { writeTerminalBridge, terminalBridgeFile } from './terminal-bridge.js'
 import { formatCompactionNoticeContent, type CompactionReason } from '../shared/compaction-notice.js'
+import { PLAN_MODE_NOTICE, PLAN_MODE_PI_BUILTIN_TOOLS, planModePrefKey } from '../shared/plan-mode.js'
 import { execFile } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
@@ -51,7 +54,7 @@ import {
 } from 'electron'
 import { BUILD_INFO } from '../generated/build-info.js'
 
-import { DefaultPackageManager, SettingsManager } from '@earendil-works/pi-coding-agent'
+import { DefaultPackageManager, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent'
 import { SYLO_MODEL_PROVIDERS, CHATGPT_CODEX_MODELS } from '../shared/chatgpt-codex.js'
 import {
   API_PROVIDER_ENV_VARS,
@@ -202,9 +205,12 @@ import { encodeImageAttachmentsForPi } from './image-attachments.js'
 import {
   USER_ATTACHMENT_HINT,
   IMAGE_TOOL_HINT_TEXTONLY,
+  USER_ATTACHMENT_PREAMBLE,
+  TEXT_AFTER_ATTACHMENTS_SEP,
 } from '../shared/chat-user-attachment-prompt.js'
 import {
   appendImageDeliveryMetadata,
+  stripImageDeliveryBlock,
   type ImageDeliverySummary,
 } from '../shared/chat-image-delivery.js'
 import {
@@ -233,6 +239,7 @@ import {
   type SyloDisabledCapabilities,
 } from './disabled-capabilities-store.js'
 import * as db from './database.js'
+import { searchWorkspaceRefs } from './workspace-ref-search.js'
 import { publishNtfyNotification, isNtfyConfigured } from './ntfy/service.js'
 import {
   linkWorkspaceGitRepo,
@@ -457,6 +464,7 @@ import {
   createScheduledPrompt,
   deleteScheduledPrompt,
   getScheduledPrompt,
+  listScheduledPromptRuns,
   listScheduledPrompts,
   normalizeRecurrenceValue,
   updateScheduledPrompt,
@@ -1657,6 +1665,8 @@ type PendingAskQuestion = {
   /** Original ask payload — retained so companion/desktop reloads can reseed the client store. */
   title?: string
   questions: AskQuestionSpec[]
+  /** Tool-start stamp — renderer turn timers freeze from here while the question is owed. */
+  createdAt: number
   replyBroker: BrokerSupervisor
 }
 
@@ -1840,6 +1850,8 @@ type ForcedChainResult =
 type ChatTurnOptions = {
   skipUserInsert?: boolean
   prepared?: PreparedUserMessage
+  /** Plan mode (task 11): explicit; undefined = read the chat's pref. */
+  planMode?: boolean
   /** Transcript row between the user message and the reply (forced-run notice). */
   noticeAfterUser?: string
   /** Auto-title source when the raw body is a poor label (e.g. an `@agent` prefix). */
@@ -2587,6 +2599,82 @@ function sessionBindingForConversation(convId: string): {
   return { sessionAbs, sessionCwd, mergedDisabled }
 }
 
+/**
+ * Edit-resend session rewind (task 01 primitive, host-side offline).
+ *
+ * Creates a copy of the conversation's pi session that contains ONLY the path
+ * from root to the entry BEFORE the `userIndex`-th real user entry on the
+ * active branch (pi SessionManager is a branch tree; `createBranchedSession`
+ * writes the prefix to a fresh file in the same session dir).
+ *
+ * Why OFFLINE (a SessionManager file op in the main process) instead of a
+ * broker op: fork-before-last-user exists broker-side, but an edit can target
+ * a MID-history message while the primary broker is bound to a different
+ * conversation's turn — forking the live child there would snapshot the WRONG
+ * session. The file-level copy is exact, synchronous, and safe: the old file
+ * stays on disk (nothing with content destroyed), the child keeps appending to
+ * its bound file (never to the prefix copy we read), and the conversation is
+ * rebound via `setConversationSessionRelPath` so the next
+ * `ensureBrokerSessionForConversation` switchSessions to the forked file.
+ * Returns the new session's abs path, or null when the conversation's session
+ * file is missing (fresh chat) or the user index is out of range (session and
+ * DB have diverged) — callers must NOT truncate the DB in those cases.
+ */
+function forkSessionBeforeUserIndex(
+  conversationId: string,
+  userIndex: number,
+): Promise<string | null> {
+  const { sessionAbs, sessionCwd } = sessionBindingForConversation(conversationId)
+  if (!existsSync(sessionAbs)) {
+    // Fresh conversation: no session file yet — nothing to rewind; the next
+    // turn's switchSession builds a new session whose first content will be
+    // the edited turn itself. Return the (future) abs path so the caller
+    // binds it explicitly.
+    return Promise.resolve(sessionAbs)
+  }
+  const attemptFork = async (attempt: number): Promise<string | null> => {
+    // Abort of a live turn may still be flushing the last jsonl line; give a
+    // torn read one short retry.
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 250 * attempt))
+    try {
+      const sm = SessionManager.open(sessionAbs)
+      const branchEntries = sm.getBranch() as Array<{
+        id: string
+        parentId: string | null
+        type: string
+        message?: { role: string }
+      }>
+      let seen = 0
+      let targetId: string | undefined
+      let parentId: string | null = null
+      for (const e of branchEntries) {
+        if (e.type === 'message' && e.message?.role === 'user') {
+          if (seen === userIndex) {
+            targetId = e.id
+            parentId = e.parentId
+            break
+          }
+          seen++
+        }
+      }
+      if (!targetId) return null
+      if (parentId) {
+        const file = sm.createBranchedSession(parentId)
+        return file ?? null
+      }
+      // Theoretically unreachable in Sylo sessions (the header entry always
+      // precedes the first user entry) — fall back to a fresh empty session.
+      const fresh = SessionManager.create(sessionCwd, dirname(sessionAbs))
+      return fresh.getSessionFile() ?? null
+    } catch {
+      // Torn/partial jsonl read (rare abort-flush race) — retry briefly, then
+      // give up: the caller must not truncate the DB on a failed rewind.
+      if (attempt < 2) return attemptFork(attempt + 1)
+      return null
+    }
+  }
+  return attemptFork(0)
+}
 function getInitialBrokerConversationId(): string {
   const prefRaw = db.getPref('sylo.ui.active_conversation_id', '') as string
   const pref = typeof prefRaw === 'string' ? prefRaw.trim() : ''
@@ -2680,6 +2768,8 @@ async function ensureBrokerSessionForConversation(
     supervisor?: BrokerSupervisor
     /** Its pool slot, when detached from turnBrokerPool (compaction brokers) — enables the exact-binding switchSession skip. */
     overflowSlot?: OverflowBrokerSlot
+    /** Plan mode (task 11): read-only builtin allowlist + every discovered extension tool blocked for the switched-to session. */
+    planMode?: boolean
   },
 ): Promise<void> {
   const phase = options?.phase ?? 'turn-start'
@@ -2704,6 +2794,28 @@ async function ensureBrokerSessionForConversation(
   // Pinned skills change the system prompt, so they belong in the fingerprint that
   // decides whether a switchSession can be skipped.
   const dfp = `${disabledFingerprint(mergedDisabled)}\0${alwaysApplySkillPaths.join('\0')}`
+  // Plan mode (task 11): the switched-to session gets a READ-ONLY builtin
+  // allowlist + every discovered extension tool blocked. Extension tools are
+  // enumerated LIVE (requestCapabilities answers from the child that owns the
+  // session), so nothing with tools survives the plan switch; the builtin side
+  // is a true allowlist and bash is fully omitted (cannot be tamed mid-turn —
+  // documented trade-off, not hidden). Approve & execute restores the normal
+  // prefs with a plain switch. Enumeration failure fails OPEN (plan turn runs
+  // with operator prefs — never silently pretend).
+  let planModeBlock: { extensionPath: string; toolName: string }[] = []
+  if (options?.planMode === true) {
+    try {
+      const snap = await supervisor.requestCapabilities()
+      planModeBlock = snap.extensions.flatMap((ext) =>
+        ext.tools
+          .filter((t) => !t.excludedFromAgent)
+          .map((t) => ({ extensionPath: ext.path, toolName: t.name })),
+      )
+    } catch {
+      planModeBlock = []
+    }
+  }
+  const planEnabled = options?.planMode === true && planModeBlock.length > 0
   const eff = effectiveModelForConversation(convId)
   ensureOllamaMaxTokensOnce(eff.provider, eff.modelId)
   const mfp = modelFingerprint(eff)
@@ -2740,8 +2852,11 @@ async function ensureBrokerSessionForConversation(
   await supervisor.switchSession(sessionAbs, sessionCwd, {
     disabledSkillPaths: mergedDisabled.skillPaths,
     disabledExtensionPaths: mergedDisabled.extensionPaths,
-    disabledTools: mergedDisabled.disabledTools,
+    disabledTools: planModeBlock.length > 0 ? [...mergedDisabled.disabledTools, ...planModeBlock] : mergedDisabled.disabledTools,
     includeCursorSkills: readIncludeCursorSkillsPref(),
+    // Plan turns override the session tool policy; normal turns pass nothing
+    // (undefined = keep current) so operator prefs set at spawn keep holding.
+    ...(planEnabled ? { piBuiltinTools: PLAN_MODE_PI_BUILTIN_TOOLS } : {}),
     alwaysApplySkillPaths,
         modelProvider: eff.provider,
     modelId: eff.modelId,
@@ -2776,6 +2891,45 @@ async function ensureBrokerSessionForConversation(
 
 /** Renderer-supplied attachment descriptor (mirrors chip list). */
 type RawAttachment = { path: string; name?: string }
+
+/**
+ * Main-side twin of the renderer's `splitUserMessageAttachments` (task 03
+ * retry): split a PERSISTED user row into the raw send text + the attachment
+ * descriptors it was persisted with (delivery block stripped — it is re-derived
+ * on the resend with the current model's vision capability).
+ */
+function splitUserMessageAttachmentsForMain(content: string): {
+  text: string
+  attachments: { path: string; name: string }[]
+} {
+  const { text: stripped } = stripImageDeliveryBlock(content)
+  const idxSep = stripped.indexOf(TEXT_AFTER_ATTACHMENTS_SEP)
+  let head = ''
+  let text = stripped
+  if (idxSep !== -1 && stripped.slice(0, idxSep).startsWith(USER_ATTACHMENT_PREAMBLE)) {
+    head = stripped.slice(0, idxSep)
+    text = stripped.slice(idxSep + TEXT_AFTER_ATTACHMENTS_SEP.length).trimEnd()
+  } else if (stripped.startsWith(USER_ATTACHMENT_PREAMBLE)) {
+    head = stripped
+    text = ''
+  } else {
+    return { text, attachments: [] }
+  }
+  const attachments: { path: string; name: string }[] = []
+  for (const line of head.split('\n')) {
+    const t = line.trim()
+    if (!t.startsWith('- ')) continue
+    // `- <path>  (name: <name>)` — split on the LAST `  (name: ` so paths with
+    // spaces stay intact (same rule as the renderer parser).
+    const marker = '  (name: '
+    const mi = t.lastIndexOf(marker)
+    if (mi < 2 || !t.endsWith(')')) continue
+    const p = t.slice(2, mi)
+    const n = t.slice(mi + marker.length, -1)
+    if (p && n) attachments.push({ path: p, name: n })
+  }
+  return { text, attachments }
+}
 
 /** Trim and drop empty-path entries from an IPC-supplied attachment list. */
 function normalizeAttachments(raw: readonly RawAttachment[] | undefined): RawAttachment[] {
@@ -2956,14 +3110,17 @@ async function startChatTurnHonoringMentions(
   conversationId: string,
   body: string,
   attachments: readonly RawAttachment[] | undefined,
+  /** Edit-resend: pass `{ skipUserInsert: true, prepared }` — the user row already exists. */
+  options?: ChatTurnOptions,
 ): Promise<
   | { ok: true; assistantMessageId: string; deferred?: false }
   | { ok: true; assistantMessageId: string; deferred: true }
   | { ok: false; assistantMessageId: string; error: string }
 > {
   const forced = forcedMentionRequest(body)
-  if (!forced) return await startChatTurn(conversationId, body, attachments)
+  if (!forced) return await startChatTurn(conversationId, body, attachments, options)
   return await startChatTurn(conversationId, body, attachments, {
+    ...options,
     noticeAfterUser: formatForcedSubagentNotice(forced.agents),
     // Title from the request, not the `@agent` prefix, or every forced chat is
     // labelled with the persona instead of the work.
@@ -3092,13 +3249,27 @@ async function startChatTurn(
 
   finalizeOrphanStreamingAssistants(conversationId)
 
+  // Plan mode (task 11): the toggle state is resolved here (explicit options
+  // win; queued/deferred turns read the chat's pref at THEIR send time, which
+  // is exactly "inherit the toggle state at send time").
+  const planMode = options?.planMode ?? (db.getPref(planModePrefKey(conversationId), false) as unknown) === true
   const prepared = options?.prepared ?? (await prepareUserMessageWithImages(text, attachments))
   if (!options?.skipUserInsert) {
     db.insertMessage(conversationId, 'user', prepared.text, 'complete')
     maybeAutoTitleFromFirstUserMessage(conversationId, options?.titleText ?? text)
   }
-  if (options?.noticeAfterUser) {
-    db.insertMessage(conversationId, 'system', options.noticeAfterUser, 'complete')
+  {
+    // Plan notice rides the established noticeAfterUser channel so the turn is
+    // visibly plan-only AND the reply below it can carry Approve & execute.
+    let notice = options?.noticeAfterUser
+    if (planMode) {
+      notice = notice ? `${notice}
+
+${PLAN_MODE_NOTICE}` : PLAN_MODE_NOTICE
+    }
+    if (notice) {
+      db.insertMessage(conversationId, 'system', notice, 'complete')
+    }
   }
   const assistant = db.insertMessage(conversationId, 'assistant', '', 'streaming')
   const turnId = randomUUID()
@@ -3145,7 +3316,7 @@ async function startChatTurn(
   }
   turnBrokerPool.assignTurn(turnId, assignedBroker)
   try {
-    await ensureBrokerSessionForConversation(conversationId)
+    await ensureBrokerSessionForConversation(conversationId, { planMode })
   } catch (e) {
     flushPendingTurnBuffers(pendingTurns.get(turnId)!)
     dropPendingTurn(turnId)
@@ -3988,6 +4159,7 @@ function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext
       return
     }
     const title = typeof msg.title === 'string' ? msg.title.trim() : ''
+    const askedAt = Date.now()
         pendingAskQuestions.set(requestId, {
       requestId,
       toolCallId,
@@ -3996,6 +4168,7 @@ function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext
       messageId: pendingTurn?.assistantId,
       ...(title ? { title } : {}),
       questions,
+      createdAt: askedAt,
       replyBroker,
     })
     const payload = {
@@ -4005,6 +4178,7 @@ function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext
       messageId: pendingTurn?.assistantId ?? null,
       ...(title ? { title } : {}),
       questions,
+      createdAt: askedAt,
     }
     mainWindow?.webContents.send('chat:ask-question', payload)
     emitCompanionEvent({ channel: 'chat:ask-question', payload })
@@ -4796,6 +4970,7 @@ function registerIpc(): void {
         messageId: pending.messageId ?? null,
         ...(pending.title ? { title: pending.title } : {}),
         questions: pending.questions,
+        createdAt: pending.createdAt,
       }))
     },
     sendChat: async (conversationId, text, attachments) => {
@@ -5377,7 +5552,23 @@ function registerIpc(): void {
   // ── Agent checkpoints (per-turn undo; storage in app data only) ──────────
   ipcMain.handle('checkpoints:list', (_e, conversationId: string) => {
     if (typeof conversationId !== 'string' || !conversationId.trim()) return []
-    return listCheckpointsForConversation(conversationId.trim())
+    // Per-turn change stats (tasks 07/13): computed from stored manifests
+    // (hash-diffed against the previous turn) — never against current disk,
+    // so panel/card opens stay cheap; preview/restore diff live state only
+    // when invoked.
+    const cid = conversationId.trim()
+    const changes = turnChangesForConversation(cid)
+    return listCheckpointsForConversation(cid).map((e) => ({
+      ...e,
+      changes: changes.get(e.assistantMessageId),
+    }))
+  })
+  ipcMain.handle('checkpoints:diff', (_e, conversationId: string, assistantMessageId: string) => {
+    if (typeof conversationId !== 'string' || typeof assistantMessageId !== 'string') {
+      return { ok: false as const, error: 'bad_args' }
+    }
+    const diffs = diffTurn(conversationId.trim(), assistantMessageId.trim())
+    return diffs ? { ok: true as const, diffs } : { ok: false as const, error: 'checkpoint_not_found' }
   })
   ipcMain.handle('checkpoints:preview', (_e, conversationId: string, assistantMessageId: string) => {
     if (typeof conversationId !== 'string' || typeof assistantMessageId !== 'string') {
@@ -5393,6 +5584,25 @@ function registerIpc(): void {
     return restoreTurn(conversationId.trim(), assistantMessageId.trim())
   })
   ipcMain.handle('messages:list', (_e, conversationId: string) => db.listMessages(conversationId))
+  // ── @-references in the composer (task 06, Cursor parity) ────────────────
+  // Main-side walk of the workspace cwd (renderer must not scan the disk).
+  // Exclusions + caps mirror the checkpoint capture; hits are ordered
+  // (exact-name > prefix > contains > path-contains, shallow-first).
+  ipcMain.handle(
+    'workspace:refSearch',
+    (_e, conversationId: string, query: string) => {
+      const cid = typeof conversationId === 'string' ? conversationId.trim() : ''
+      const q = typeof query === 'string' ? query : ''
+      if (!cid) return { ok: false as const, error: 'missing_conversation_id', hits: [] as ReturnType<typeof searchWorkspaceRefs> }
+      // A conversation without a workspace (or missing cwd) returns an EMPTY
+      // hit list (ok) — the picker hides its files/folders section, canvas /
+      // terminal / subagent sections still work.
+      const conv = db.getConversation(cid)
+      const cwd = conv?.workspace_id ? effectivePiCwdForWorkspace(conv.workspace_id) : ''
+      if (!cwd) return { ok: true as const, hits: [] as ReturnType<typeof searchWorkspaceRefs> }
+      return { ok: true as const, hits: searchWorkspaceRefs(cwd, q) }
+    },
+  )
   ipcMain.handle('prefs:get', (_e, key: string, fallback: unknown) => db.getPref(key, fallback))
   ipcMain.handle('prefs:set', (_e, key: string, value: unknown) => db.setPref(key, value))
   ipcMain.handle('updates:status', () => getAppUpdateStatus())
@@ -6162,6 +6372,13 @@ function registerIpc(): void {
     const rowId = typeof id === 'string' ? id.trim() : ''
     if (!rowId) return { ok: false as const, error: 'missing_id' as const }
     return fireScheduledPromptNow(rowId)
+  })
+  // Task 14: recent fire history for one schedule (newest first, capped 20;
+  // trims are written on record — this channel is read-only).
+  ipcMain.handle('schedules:listRuns', (_e, id: unknown, limit: unknown) => {
+    const rowId = typeof id === 'string' ? id.trim() : ''
+    const cap = typeof limit === 'number' && Number.isFinite(limit) ? Math.min(200, Math.max(1, Math.floor(limit))) : 20
+    return listScheduledPromptRuns(rowId, cap)
   })
 
   ipcMain.handle('evals:loadDashboard', () => loadEvalDashboard(SYLO_REPO_ROOT))
@@ -7836,6 +8053,47 @@ function registerIpc(): void {
     }
   })
 
+  // ── Rules / AGENTS.md manager (task 12) ──────────────────────────────────
+  // Strict path scoping: reads/writes ONLY `<workspace pi cwd>/AGENTS.md` —
+  // the panel resolves the workspace id, so the renderer can never aim this
+  // at an arbitrary file. Global AGENTS.md management stays on the existing
+  // globalAgents:* bridge (Settings' Global AI instructions editor).
+  ipcMain.handle('rules:workspaceAgentsRead', (_e, workspaceId: string) => {
+    const wid = typeof workspaceId === 'string' ? workspaceId.trim() : ''
+    if (!wid) return { ok: false as const, error: 'missing_workspace_id' }
+    const cwd = effectivePiCwdForWorkspace(wid)
+    if (!cwd) return { ok: false as const, error: 'no_workspace_folder' }
+    const abs = join(cwd, 'AGENTS.md')
+    try {
+      if (!existsSync(abs)) {
+        return { ok: true as const, path: abs, exists: false as const, content: '', bytes: 0, modifiedAt: null as number | null }
+      }
+      const buf = readFileSync(abs, 'utf8')
+      const st = statSync(abs)
+      return { ok: true as const, path: abs, exists: true as const, content: buf, bytes: Buffer.byteLength(buf, 'utf8'), modifiedAt: st.mtimeMs }
+    } catch (e) {
+      return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+  ipcMain.handle(
+    'rules:workspaceAgentsWrite',
+    (_e, workspaceId: string, content: string) => {
+      const wid = typeof workspaceId === 'string' ? workspaceId.trim() : ''
+      const body = typeof content === 'string' ? content : ''
+      if (!wid) return { ok: false as const, error: 'missing_workspace_id' }
+      if (!body.trim()) return { ok: false as const, error: 'refusing_to_write_empty_file' }
+      const cwd = effectivePiCwdForWorkspace(wid)
+      if (!cwd) return { ok: false as const, error: 'no_workspace_folder' }
+      const abs = join(cwd, 'AGENTS.md')
+      try {
+        writeFileSync(abs, body, 'utf8')
+        return { ok: true as const, path: abs, bytes: Buffer.byteLength(body, 'utf8') }
+      } catch (e) {
+        return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
+      }
+    },
+  )
+
   ipcMain.handle('git:restore', async (_e, repoRoot: string, fileRel: string) => {
     return await new Promise<{ ok: boolean; err?: string }>((resolve) => {
       execFile(
@@ -7983,6 +8241,263 @@ function registerIpc(): void {
     },
   )
 
+  // ── Edit a sent user message & resend (Claude parity; tasks 01/02) ────────
+  // Stops any in-flight turn, rewinds BOTH the pi session (offline fork of the
+  // session file before the edited message's user entry) and the DB timeline
+  // (everything after the message is deleted), rewrites the message text
+  // (original preserved in `original_text`), then starts a fresh turn from the
+  // edited message. The workspace itself is NOT touched here — that is the
+  // optional checkpoint restore layered on top (task 02) via
+  // `restoreCheckpointBeforeEdit` in the edit payload below.
+  ipcMain.handle(
+    'chat:editAndResend',
+    async (
+      _e,
+      conversationId: string,
+      userMessageId: string,
+      text: string,
+      attachments?: RawAttachment[],
+      /** Task 02 (Claude "edit → the AI's work is undone"): assistant message id
+       *  of the turn that FOLLOWED the edited message. When set, the workspace
+       *  is restored to the pre-turn checkpoint (existing restoreTurn path incl
+       *  safety capture) BEFORE anything is truncated — a failed restore aborts
+       *  the whole edit, so there is never a state where the conversation is
+       *  rewound but the files are not. */
+      restoreAssistantMessageId?: string,
+    ): Promise<{ ok: true; assistantMessageId: string } | { ok: false; error: string }> => {
+      const id = typeof conversationId === 'string' ? conversationId.trim() : ''
+      const mid = typeof userMessageId === 'string' ? userMessageId.trim() : ''
+      const body = typeof text === 'string' ? text.trim() : ''
+      if (!id) return { ok: false, error: 'missing_conversation_id' }
+      if (!mid) return { ok: false, error: 'missing_message_id' }
+      if (!body) return { ok: false, error: 'empty_message' }
+      return chainConversationChatOp(id, async () => {
+        // Retention v2: editing into an archived chat unarchives it (same as
+        // chat:send) instead of silently updating a hidden conversation.
+        if (db.getConversation(id)?.archived_at != null) {
+          db.setConversationArchived(id, false)
+        }
+        const original = db.getMessage(mid)
+        if (!original || original.conversation_id !== id) {
+          return { ok: false, error: 'message_not_found' }
+        }
+        if (original.role !== 'user') {
+          return { ok: false, error: 'not_a_user_message' }
+        }
+
+        // 1. Stop any in-flight turn on this chat first (mirrors chat:abort).
+        const active = findPendingTurnForConversation(id)
+        if (active) {
+          const [turnId, pending] = active
+          pending.aborted = true
+          const assigned = turnBrokerPool.supervisorForTurn(turnId) ?? broker
+          finalizePendingTurn(turnId, pending, 'cancelled')
+          assigned?.abort()
+        }
+
+        // 2. Where the edited message sits among user sends — the boundary the
+        //    session rewind (and the DB truncate) are anchored to.
+        const userIndex = db.userMessageIndex(id, mid)
+        if (userIndex < 0) return { ok: false, error: 'message_not_found' }
+
+        // 2b. Optional workspace revert (task 02): the store is manifest-keyed
+        //     (conversationId + assistantMessageId) and message-row deletion
+        //     does NOT purge it, so restoring works even mid-truncation. Doing
+        //     it FIRST means restore failure aborts with nothing truncated.
+        const restoreId = typeof restoreAssistantMessageId === 'string' ? restoreAssistantMessageId.trim() : ''
+        if (restoreId) {
+          const rv = restoreTurn(id, restoreId)
+          if (!rv.ok) {
+            return { ok: false, error: `workspace_restore_failed: ${rv.error}` }
+          }
+        }
+
+        // 3. Rewind the pi session BEFORE any destructive DB write. The fork
+        //    prefixes the kept history into a fresh session file; only after
+        //    this succeeds do we delete rows, so a failed rewind leaves the
+        //    conversation + session consistent (session_rewind_* errors).
+        const rewound = await forkSessionBeforeUserIndex(id, userIndex)
+        if (!rewound) {
+          return { ok: false, error: 'session_rewind_failed: could not fork the session history' }
+        }
+        const agentDir = hostAgentDir()
+        db.setConversationSessionRelPath(
+          id,
+          relativeSessionPathFromAbsolute(agentDir, rewound),
+        )
+
+        // 4. Truncate the DB timeline after the edited row, rewrite its text.
+        const removed = db.deleteMessagesAfter(id, { id: original.id, created_at: original.created_at })
+        const prepared = await prepareUserMessageWithImages(body, normalizeAttachments(attachments))
+        db.editUserMessageContent(original.id, prepared.text)
+        emitChatRefresh(id, 'messages')
+        if (removed > 0) {
+          console.log(
+            `[chat:editAndResend] conv=${id.slice(0, 8)} removed=${removed} session_fork=${rewound.slice(-24)}`,
+          )
+        }
+
+        // 5. Run the redo turn from the edited message (fresh checkpoint
+        //    capture + broker slot happen in startChatTurn as with any send;
+        //    skipUserInsert — the edited row already exists).
+        const started = await startChatTurnHonoringMentions(id, body, normalizeAttachments(attachments), {
+          skipUserInsert: true,
+          prepared,
+        })
+        if (!started.ok) {
+          return { ok: false, error: started.error }
+        }
+        return { ok: true, assistantMessageId: started.assistantMessageId }
+      })
+    },
+  )
+
+  // ── Retry the last assistant reply (Claude parity; task 03) ───────────────
+  // Rewinds session + timeline to the last user message (unchanged) and reruns
+  // the turn. The discarded attempt is stored on the NEW assistant row's
+  // original_text and rendered as a collapsed "previous attempt" expander.
+  ipcMain.handle(
+    'chat:retryLastReply',
+    async (
+      _e,
+      conversationId: string,
+    ): Promise<{ ok: true; assistantMessageId: string } | { ok: false; error: string }> => {
+      const id = typeof conversationId === 'string' ? conversationId.trim() : ''
+      if (!id) return { ok: false, error: 'missing_conversation_id' }
+      return chainConversationChatOp(id, async () => {
+        if (db.getConversation(id)?.archived_at != null) {
+          db.setConversationArchived(id, false)
+        }
+        const rows = db.listMessages(id)
+        // Last assistant row (skip trailing system notices) + its preceding
+        // user anchor — both by (created_at, rowid).
+        let lastAssistant: typeof rows[number] | undefined
+        for (let i = rows.length - 1; i >= 0; i--) {
+          if (rows[i]!.role === 'assistant') {
+            lastAssistant = rows[i]!
+            break
+          }
+        }
+        if (!lastAssistant) return { ok: false, error: 'no_assistant_reply' }
+        let anchor: typeof rows[number] | undefined
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i]!
+          if (r.id === lastAssistant.id) break
+          if (r.role === 'user') anchor = r
+        }
+        if (!anchor) return { ok: false, error: 'no_user_message' }
+
+        // Stop any in-flight turn on this chat (a retried partial row is the
+        // common case — Stop + rewind, content finalized as cancelled).
+        const active = findPendingTurnForConversation(id)
+        if (active) {
+          const [turnId, pending] = active
+          pending.aborted = true
+          const assigned = turnBrokerPool.supervisorForTurn(turnId) ?? broker
+          finalizePendingTurn(turnId, pending, 'cancelled')
+          assigned?.abort()
+        }
+
+        const userIndex = db.userMessageIndex(id, anchor.id)
+        if (userIndex < 0) return { ok: false, error: 'message_not_found' }
+        const prevAttempt = lastAssistant.content
+
+        // Rewind FIRST (same ordering guard as edit-resend: a failed rewind
+        // leaves everything untouched).
+        const rewound = await forkSessionBeforeUserIndex(id, userIndex)
+        if (!rewound) {
+          return { ok: false, error: 'session_rewind_failed: could not fork the session history' }
+        }
+        db.setConversationSessionRelPath(
+          id,
+          relativeSessionPathFromAbsolute(hostAgentDir(), rewound),
+        )
+
+        const removed = db.deleteMessagesAfter(id, { id: anchor.id, created_at: anchor.created_at })
+        emitChatRefresh(id, 'messages')
+        if (removed > 0) {
+          console.log(`[chat:retryLastReply] conv=${id.slice(0, 8)} removed=${removed} session_fork=${rewound.slice(-24)}`)
+        }
+
+        // Re-send the SAME message: re-prepare from the persisted row so the
+        // delivery metadata matches the CURRENT model (attachments re-encoded).
+        const split = splitUserMessageAttachmentsForMain(anchor.content)
+        const prepared = await prepareUserMessageWithImages(split.text, split.attachments)
+        const started = await startChatTurnHonoringMentions(id, split.text, normalizeAttachments(split.attachments), {
+          skipUserInsert: true,
+          prepared,
+        })
+        if (!started.ok) {
+          return { ok: false, error: started.error }
+        }
+        // Retention: the discarded attempt rides the new row's original_text.
+        if (prevAttempt.trim()) {
+          try {
+            db.setMessageOriginal(started.assistantMessageId, prevAttempt)
+          } catch {
+            /* retention is best-effort */
+          }
+        }
+        return { ok: true, assistantMessageId: started.assistantMessageId }
+      })
+    },
+  )
+
+  // ── Plan mode toggle (task 11) ───────────────────────────────────────────
+  // Per-chat pref; the next turn's startChatTurn resolves it (queued turns
+  // inherit the pref at their own send time). Schedule-fired prompts run with
+  // their own conversation prefs by design.
+  ipcMain.handle(
+    'chat:setPlanMode',
+    (_e, conversationId: string, enabled: boolean) => {
+      const id = typeof conversationId === 'string' ? conversationId.trim() : ''
+      if (!id) return { ok: false as const, error: 'missing_conversation_id' }
+      db.setPref(planModePrefKey(id), enabled === true)
+      return { ok: true as const }
+    },
+  )
+
+  /** Approve & execute: rerun the plan-authored turn with full tools. The plan
+   *  text (the assistant row content) is composed into a NORMAL user turn —
+   *  the model executes it as an agent, never text-as-commands. Nothing
+   *  auto-executes: this runs only when the operator clicks Approve. */
+  ipcMain.handle(
+    'chat:approvePlan',
+    async (
+      _e,
+      conversationId: string,
+      assistantMessageId: string,
+    ): Promise<{ ok: true; assistantMessageId: string } | { ok: false; error: string }> => {
+      const id = typeof conversationId === 'string' ? conversationId.trim() : ''
+      const aid = typeof assistantMessageId === 'string' ? assistantMessageId.trim() : ''
+      if (!id) return { ok: false, error: 'missing_conversation_id' }
+      if (!aid) return { ok: false, error: 'missing_message_id' }
+      return chainConversationChatOp(id, async () => {
+        const plan = db.getMessage(aid)
+        if (!plan || plan.conversation_id !== id || plan.role !== 'assistant') {
+          return { ok: false, error: 'message_not_found' }
+        }
+        const planText = plan.content.trim()
+        if (!planText) return { ok: false, error: 'empty_plan' }
+        // Normal send (own user row + checkpoint capture + the chat's normal
+        // tool prefs — the plan-session restriction does not survive: this
+        // turn re-resolves the session without the plan override).
+        const composePrompt = (raw: string): string =>
+          `Approved plan — execute it now with your normal tools:\n\n${raw}`
+        const started = await startChatTurnHonoringMentions(id, '', undefined, {
+          skipUserInsert: false,
+          prepared: {
+            text: composePrompt(planText),
+            promptText: composePrompt(planText),
+            images: [],
+          },
+        })
+        if (!started.ok) return { ok: false, error: started.error }
+        return { ok: true, assistantMessageId: started.assistantMessageId }
+      })
+    },
+  )
+
     ipcMain.handle('ask-question:pending', () => {
     // Renderer reload recovery: reseed the ask-question client store from main's live
     // pending map so the chat-list "?" badge (and answer cards) survive a reload.
@@ -7993,6 +8508,7 @@ function registerIpc(): void {
       messageId: pending.messageId ?? null,
       ...(pending.title ? { title: pending.title } : {}),
       questions: pending.questions,
+      createdAt: pending.createdAt,
     }))
   })
 

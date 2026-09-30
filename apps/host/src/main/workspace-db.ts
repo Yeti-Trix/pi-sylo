@@ -62,6 +62,22 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_prompts_workspace ON scheduled_prompts(
 CREATE INDEX IF NOT EXISTS idx_scheduled_prompts_next_run ON scheduled_prompts(enabled, next_run_at);
 `)
 
+  // Run history (task 14): small capped per-schedule fire log. Additive;
+  // created on every workspace DB open (guarded by IF NOT EXISTS).
+  d.exec(`
+CREATE TABLE IF NOT EXISTS scheduled_prompt_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  schedule_id TEXT NOT NULL,
+  fired_at INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  conversation_id TEXT,
+  brief TEXT,
+  duration_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_scheduled_prompt_runs_schedule
+  ON scheduled_prompt_runs(schedule_id, fired_at DESC);
+`)
+
   // Column migration for pre-existing per-workspace DBs (runs on every open, guarded).
   const columns = d.prepare(`PRAGMA table_info(scheduled_prompts)`).all() as Array<{ name: string }>
   if (!columns.some((c) => c.name === 'reuse_conversation')) {

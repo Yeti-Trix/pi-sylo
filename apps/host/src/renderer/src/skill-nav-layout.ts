@@ -30,6 +30,8 @@ export function skillRouteRowKey(r: SkillRouteRowLite): string {
 /** Builtin Tools/Developer tabs that can be pinned next to skill routes. */
 export const PINNABLE_BUILTIN_TABS = [
   { tab: 'schedules', title: 'Schedules' },
+  { tab: 'checkpoints', title: 'Checkpoints' },
+  { tab: 'rules', title: 'Rules' },
   { tab: 'proposals', title: 'Proposals' },
   { tab: 'evals', title: 'Testing' },
   { tab: 'skills', title: 'Capability manager' },

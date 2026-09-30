@@ -98,6 +98,38 @@ function runsLabel(row: ScheduledPromptRow): string {
   return `Runs ${row.run_count}${max}`
 }
 
+type ScheduleRunRow = {
+  id: number
+  fired_at: number
+  status: 'ok' | 'error'
+  conversation_id: string | null
+  brief: string | null
+  duration_ms: number | null
+}
+
+/** Countdown-only next-fire label for an enabled schedule (history context). */
+function runsWhen(ts: number): string {
+  const d = new Date(ts)
+  const now = new Date()
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+  if (sameDay) return time
+  return `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}, ${time}`
+}
+function nextFireLabel(row: ScheduledPromptRow): string | null {
+  if (!row.enabled) return null
+  const ms = row.next_run_at - Date.now()
+  if (ms <= 0) return 'due now'
+  const min = Math.round(ms / 60_000)
+  if (min < 60) return `next: in ${min} min`
+  const hr = Math.round(min / 60)
+  if (hr < 48) return `next: in ${hr} h`
+  return `next: in ${Math.round(hr / 24)} d`
+}
+
 function ScheduleRow({
   row,
   busy,
@@ -105,6 +137,7 @@ function ScheduleRow({
   onFireNow,
   onDelete,
   onOpenConversation,
+  onPinOutput,
 }: {
   row: ScheduledPromptRow
   busy: boolean
@@ -112,7 +145,34 @@ function ScheduleRow({
   onFireNow: () => void
   onDelete: () => void
   onOpenConversation?: (conversationId: string) => void
+  /** Pin a run's output: open the conversation in chat + prefill the composer. */
+  onPinOutput?: (conversationId: string) => void
 }): React.ReactElement {
+  const [runs, setRuns] = useState<ScheduleRunRow[]>([])
+
+  // History loads (and RE-loads) whenever the row is OPEN (details) — cheap
+  // (single indexed select, cap 20) and always fresh per expand.
+  useEffect(() => {
+    let dead = false
+    const load = () => {
+      void window.sylo.schedules
+        .listRuns(row.id)
+        .then((r) => {
+          if (!dead) setRuns([...r])
+        })
+        .catch(() => {
+          /* history is optional */
+        })
+    }
+    load()
+    const u = window.sylo.schedules.onChanged((p) => {
+      if (p?.workspaceId === row.workspace_id) load()
+    })
+    return () => {
+      dead = true
+      u()
+    }
+  }, [row.id, row.workspace_id])
   return (
     <details className={cn(card, 'group/schedule')}>
       <summary
@@ -179,14 +239,59 @@ function ScheduleRow({
         </div>
         <p className="m-0 whitespace-pre-wrap text-[0.82rem] text-text-secondary">{row.prompt_text}</p>
         {row.last_conversation_id ?
-          <button
-            type="button"
-            className={cn(btnGhostSm, 'self-start text-[0.75rem]')}
-            onClick={() => onOpenConversation?.(row.last_conversation_id!)}
-          >
-            Open last run chat
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className={cn(btnGhostSm, 'self-start text-[0.75rem]')}
+              onClick={() => onOpenConversation?.(row.last_conversation_id!)}
+            >
+              Open last run chat
+            </button>
+            {onPinOutput ?
+              <button
+                type="button"
+                className={cn(btnGhostSm, 'self-start text-[0.75rem]')}
+                title="Jump to the last run's conversation and prefill the composer to continue from its output"
+                onClick={() => onPinOutput?.(row.last_conversation_id!)}
+              >
+                Pin last output
+              </button>
+            : null}
+          </div>
         : null}
+        {/* Recent runs (task 14): capped log (20/schedule), survives restart. */}
+        <div className="mt-1 border-t border-border pt-2">
+          <div className={cn(mutedText, 'flex items-center justify-between gap-2 text-[0.74rem]')}>
+            <span>{nextFireLabel(row) ?? 'not scheduled'}</span>
+            <span>{runs.length > 0 ? `${runs.length} recent${runs.length >= 20 ? '+' : ''}` : 'no runs recorded yet'}</span>
+          </div>
+          {runs.length > 0 ?
+            <div className="mt-1 flex flex-col gap-0.5">
+              {runs.slice(0, 5).map((r) => (
+                <button
+                  key={r.id}
+                  type="button"
+                  className="flex cursor-pointer items-center gap-2 rounded border-none bg-transparent px-1 py-0.5 text-left text-[0.74rem] hover:bg-bg-tertiary"
+                  {...(r.conversation_id ? { onClick: () => onOpenConversation?.(r.conversation_id!) } : {})}
+                  title={r.conversation_id ? 'Open the run conversation' : 'No conversation recorded'}
+                  style={r.conversation_id ? undefined : { cursor: 'default' }}
+                >
+                  <span
+                    aria-hidden
+                    className="size-1.5 shrink-0 rounded-full"
+                    style={{ background: r.status === 'ok' ? '#9ece6a' : '#f6553d' }}
+                    title={r.status === 'ok' ? 'Fired' : 'Failed'}
+                  />
+                  <span className={mutedText}>{runsWhen(r.fired_at)}</span>
+                  <span className={cn(mutedText, 'truncate')}>
+                    {r.status === 'error' ? 'error' : 'fired'}
+                    {r.duration_ms != null ? ` · ${r.duration_ms < 1000 ? `${r.duration_ms}ms` : `${Math.round(r.duration_ms / 1000)}s`}` : ''}
+                  </span>
+                </button>
+              ))}
+            </div>
+          : null}
+        </div>
       </div>
     </details>
   )
@@ -196,10 +301,13 @@ export function SchedulesPanel({
   workspaceId,
   workspaceName,
   onOpenConversation,
+  onPinOutput,
 }: {
   workspaceId: string
   workspaceName: string
   onOpenConversation?: (conversationId: string) => void
+  /** Task 14: open the run conversation + prefill the composer with a usable reference (App owns prefillChatPrompt). */
+  onPinOutput?: (conversationId: string, schedule: ScheduledPromptRow) => void
 }): React.ReactElement {
   const [rows, setRows] = useState<ScheduledPromptRow[]>([])
   const [loading, setLoading] = useState(false)
@@ -511,7 +619,7 @@ export function SchedulesPanel({
             onEdit={() => startEdit(row)}
             onFireNow={() => void fireNow(row.id)}
             onDelete={() => void remove(row.id)}
-            onOpenConversation={onOpenConversation}
+            onOpenConversation={onOpenConversation} onPinOutput={(cid) => onPinOutput?.(cid, row!)}
           />
         ))}
         </div>

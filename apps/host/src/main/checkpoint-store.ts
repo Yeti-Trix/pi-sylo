@@ -559,3 +559,281 @@ export function purgeConversation(convId: string): void {
 export function relOf(cwd: string, abs: string): string {
   return relative(cwd, abs).replace(/\\/g, '/')
 }
+// ── Per-turn change review (task 07 diff cards) + per-turn diff (task 13 panel)
+// Stats for a turn come from diffing its manifest against the PREVIOUS kept
+// manifest in the conversation — pure hash math over stored manifests, no
+// current-disk reads (only `previewRestore` diffs against the live tree).
+
+export type CheckpointTurnChanges = {
+  modified: string[]
+  added: string[]
+  deleted: string[]
+}
+
+/** All real (non-safety, non-deferred) manifests for a conversation, oldest first. */
+function realManifestsOldestFirst(convId: string): { dir: string; m: CheckpointManifest }[] {
+  const root = convDir(convId)
+  if (!existsSync(root)) return []
+  const out: { dir: string; m: CheckpointManifest }[] = []
+  try {
+    for (const entry of readdirSync(root)) {
+      const dir = join(root, entry)
+      const m = readManifest(dir)
+      if (m && !m.safety && !m.deferred && m.assistantMessageId) out.push({ dir, m })
+    }
+  } catch {
+    return []
+  }
+  return out.sort((a, b) => a.m.started_at - b.m.started_at)
+}
+
+/**
+ * Per-turn change counts + file lists for every kept checkpoint in a
+ * conversation, keyed by assistant message id. Each entry diffs the turn's
+ * manifest against the previous turn's manifest (same rel and a different
+ * hash = modified; only in this manifest = added; only in the previous =
+ * deleted), so the numbers describe what THAT TURN did — matching the Undo
+ * semantics. v1 manifests carry no hashes: only added/deleted are provable.
+ */
+export function turnChangesForConversation(
+  convId: string,
+): Map<string, CheckpointTurnChanges> {
+  const out = new Map<string, CheckpointTurnChanges>()
+  const manifests = realManifestsOldestFirst(convId)
+  let prevFiles: string[] = []
+  let prevHashes: Record<string, string> = {}
+  for (const { m } of manifests) {
+    const changes: CheckpointTurnChanges = { modified: [], added: [], deleted: [] }
+    const set = new Set(m.files)
+    for (const rel of m.files) {
+      const knownBefore = prevFiles.includes(rel)
+      const hash = m.v >= 2 ? (m.hashes ?? {})[rel] : undefined
+      const prevHash = m.v >= 2 ? prevHashes[rel] : undefined
+      if (!knownBefore) changes.added.push(rel)
+      else if (hash && prevHash && hash !== prevHash) changes.modified.push(rel)
+    }
+    for (const rel of prevFiles) {
+      if (!set.has(rel)) changes.deleted.push(rel)
+    }
+    changes.modified.sort()
+    changes.added.sort()
+    changes.deleted.sort()
+    if (m.assistantMessageId) out.set(m.assistantMessageId, changes)
+    prevFiles = m.files
+    prevHashes = m.v >= 2 ? (m.hashes ?? {}) : {}
+  }
+  return out
+}
+
+export type CheckpointFileDiff = {
+  rel: string
+  status: 'modified' | 'added' | 'deleted'
+  /** Unified-style diff text (added/deleted render as all +/− lines). */
+  diff: string
+  /** When diffing was skipped for this file. */
+  skipped?: 'size' | 'binary'
+}
+
+const DIFF_MAX_FILE_BYTES = 300 * 1024
+const DIFF_MAX_TOTAL_BYTES = 1024 * 1024
+const DIFF_BINARY_CHECK_BYTES = 8192
+
+function splitLines(text: string): string[] {
+  return text.length === 0 ? [] : text.split('\n')
+}
+
+/** LCS-based op list (keep/add/del) for two line arrays; bounded middle. */
+function lcsOps(a: string[], b: string[]): Array<{ op: 'keep' | 'add' | 'del'; line: string }> {
+  const n = a.length
+  const m = b.length
+  if (n === 0) return b.map((line) => ({ op: 'add' as const, line }))
+  if (m === 0) return a.map((line) => ({ op: 'del' as const, line }))
+  if (n * m > 4_000_000) {
+    // Pathological middle: replace-all style (still correct, just coarse).
+    return [
+      ...a.map((line) => ({ op: 'del' as const, line })),
+      ...b.map((line) => ({ op: 'add' as const, line })),
+    ]
+  }
+  const dp = new Uint32Array((n + 1) * (m + 1))
+  const at = (i: number, j: number): number => i * (m + 1) + j
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[at(i, j)] = a[i] === b[j] ? dp[at(i + 1, j + 1)] + 1 : Math.max(dp[at(i + 1, j)], dp[at(i, j + 1)])
+    }
+  }
+  const ops: Array<{ op: 'keep' | 'add' | 'del'; line: string }> = []
+  let i = 0
+  let j = 0
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      ops.push({ op: 'keep', line: a[i]! })
+      i++
+      j++
+    } else if (dp[at(i + 1, j)] >= dp[at(i, j + 1)]) {
+      ops.push({ op: 'del', line: a[i]! })
+      i++
+    } else {
+      ops.push({ op: 'add', line: b[j]! })
+      j++
+    }
+  }
+  while (i < n) {
+    ops.push({ op: 'del', line: a[i]! })
+    i++
+  }
+  while (j < m) {
+    ops.push({ op: 'add', line: b[j]! })
+    j++
+  }
+  return ops
+}
+
+/**
+ * Compact unified diff for the read-only diff side pane. Display aid, not
+ * patch format: hunks with ≤3 context lines; hunks merge when the gap is
+ * ≤6 keep lines.
+ */
+function renderUnified(rel: string, ops: Array<{ op: 'keep' | 'add' | 'del'; line: string }>): string {
+  let hasChange = false
+  for (const op of ops) {
+    if (op.op !== 'keep') {
+      hasChange = true
+      break
+    }
+  }
+  if (!hasChange) return ''
+
+  const body: string[] = []
+  let ai = 0 // lines of A consumed (keeps + dels)
+  let bi = 0 // lines of B consumed (keeps + adds)
+  let hunkLines: string[] | null = null
+  let hunkAStart = 0
+  let hunkBStart = 0
+  let hunkA = 0
+  let hunkB = 0
+  let pendingCtx: string[] = [] // trailing keeps while a hunk is open (≤3 kept)
+  let lastKeeps: string[] = [] // rolling last 3 keeps before the first hunk
+
+  for (const op of ops) {
+    if (op.op === 'keep') {
+      ai++
+      bi++
+      if (hunkLines === null) {
+        lastKeeps.push(` ${op.line}`)
+        if (lastKeeps.length > 3) lastKeeps.shift()
+        continue
+      }
+      pendingCtx.push(` ${op.line}`)
+      if (pendingCtx.length >= 4) {
+        // Gap too big to merge: first 3 pending keeps become trailing context
+        // and the hunk closes; the current keep leads the NEXT hunk instead.
+        hunkLines!.push(...pendingCtx.slice(0, 3))
+        hunkA += 3
+        hunkB += 3
+        body.push(`@@ -${hunkAStart},${hunkA} +${hunkBStart},${hunkB} @@`, ...hunkLines)
+        hunkLines = null
+        pendingCtx = []
+        lastKeeps.push(` ${op.line}`)
+        if (lastKeeps.length > 3) lastKeeps.shift()
+      }
+      continue
+    }
+    // Change op: reopen or extend the hunk, absorbing pending trailing keeps.
+    if (hunkLines === null) {
+      const lead = lastKeeps.slice(-3)
+      hunkLines = [...lead]
+      hunkAStart = ai - lead.length + 1
+      hunkBStart = bi - lead.length + 1
+      hunkA = lead.length
+      hunkB = lead.length
+    } else {
+      hunkLines.push(...pendingCtx)
+      hunkA += pendingCtx.length
+      hunkB += pendingCtx.length
+      pendingCtx = []
+    }
+    if (op.op === 'del') {
+      hunkLines!.push(`-${op.line}`)
+      hunkA++
+      ai++
+    } else {
+      hunkLines!.push(`+${op.line}`)
+      hunkB++
+      bi++
+    }
+  }
+  if (hunkLines !== null) {
+    const tail = pendingCtx.slice(0, 3)
+    hunkLines.push(...tail)
+    hunkA += tail.length
+    hunkB += tail.length
+    body.push(`@@ -${hunkAStart},${hunkA} +${hunkBStart},${hunkB} @@`, ...hunkLines)
+  }
+  return `--- a/${rel}\n+++ b/${rel}\n${body.join('\n')}`
+}
+
+function isBinary(buf: Buffer): boolean {
+  const head = buf.length > DIFF_BINARY_CHECK_BYTES ? buf.subarray(0, DIFF_BINARY_CHECK_BYTES) : buf
+  return head.includes(0)
+}
+
+function safeRead(abs: string): Buffer | null {
+  try {
+    if (!existsSync(abs) || !statSync(abs).isFile()) return null
+    return readFileSync(abs)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Unified diffs for a turn's changed files: pre-image from the checkpoint's
+ * `files/` copy vs the CURRENT disk content (same basis as Undo preview).
+ * Only files the turn itself touched get diffed (modified/added/deleted
+ * relative to the previous kept manifest — see turnChangesForConversation).
+ * Files >300KB (either side) or binary are flagged `skipped` — placeholders,
+ * never failures; total output is capped at 1MB (the overflow marker row is
+ * appended). Read-only: nothing here writes files.
+ */
+export function diffTurn(convId: string, assistantMessageId: string): CheckpointFileDiff[] | null {
+  const dir = findDirForAssistant(convId, assistantMessageId)
+  const m = dir ? readManifest(dir) : null
+  if (!dir || !m || !existsSync(m.cwd)) return null
+  const changes = turnChangesForConversation(convId).get(assistantMessageId) ?? {
+    modified: [],
+    added: [],
+    deleted: [],
+  }
+  const targets: { rel: string; status: CheckpointFileDiff['status'] }[] = [
+    ...changes.modified.map((rel) => ({ rel, status: 'modified' as const })),
+    ...changes.added.map((rel) => ({ rel, status: 'added' as const })),
+    ...changes.deleted.map((rel) => ({ rel, status: 'deleted' as const })),
+  ]
+  const out: CheckpointFileDiff[] = []
+  let total = 0
+  for (const { rel, status } of targets) {
+    const preAbs = join(dir, 'files', rel)
+    const curAbs = join(m.cwd, rel)
+    const preBuf = status === 'added' ? Buffer.alloc(0) : safeRead(preAbs)
+    const curBuf = status === 'deleted' ? Buffer.alloc(0) : safeRead(curAbs)
+    if ((preBuf && isBinary(preBuf)) || (curBuf && isBinary(curBuf))) {
+      out.push({ rel, status, diff: '', skipped: 'binary' })
+      continue
+    }
+    if ((preBuf?.length ?? 0) > DIFF_MAX_FILE_BYTES || (curBuf?.length ?? 0) > DIFF_MAX_FILE_BYTES) {
+      out.push({ rel, status, diff: '', skipped: 'size' })
+      continue
+    }
+    const a = splitLines(preBuf?.toString('utf8') ?? '')
+    const b = splitLines(curBuf?.toString('utf8') ?? '')
+    const text = renderUnified(rel, lcsOps(a, b))
+    if (total + text.length > DIFF_MAX_TOTAL_BYTES) break
+    total += text.length
+    out.push({ rel, status, diff: text })
+  }
+  if (out.length < targets.length) {
+    out.push({ rel: '…', status: 'modified', diff: '(diff truncated — total output cap reached)', skipped: 'size' })
+  }
+  return out
+}

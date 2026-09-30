@@ -263,8 +263,18 @@ function ListDetail({
   onRefresh: () => Promise<void>
   onError: (e: string | null) => void
 }) {
-  const [quickAdd, setQuickAdd] = useState('')
+    const [quickAdd, setQuickAdd] = useState('')
   const [deleting, setDeleting] = useState(false)
+  const [listArm, setListArm] = useState(false)
+
+  // Sandboxed iframes block window.confirm silently (sandbox has no
+  // `allow-modals`), so deletes must use an in-UI arm/confirm step instead.
+  // Auto-disarm so a stray click can't leave delete armed forever.
+  useEffect(() => {
+    if (!listArm) return
+    const t = setTimeout(() => setListArm(false), 5000)
+    return () => clearTimeout(t)
+  }, [listArm])
 
     const sorted = useMemo(() => {
     // done tasks sink to the bottom; otherwise respect store-array order
@@ -293,9 +303,13 @@ function ListDetail({
     }
   }
 
-  const removeList = async () => {
+    const removeList = async () => {
     if (deleting) return
-    if (!confirm(`Delete list "${list.title}" and all ${tasks.length} task(s)?`)) return
+    if (!listArm) {
+      setListArm(true)
+      return
+    }
+    setListArm(false)
     setDeleting(true)
     try {
       await bridge.listDelete(list.id)
@@ -317,8 +331,19 @@ function ListDetail({
             {workspaceCwd && <span className="muted"> · {workspaceCwd}</span>}
           </div>
         </div>
-        <button className="btn btn-danger" onClick={removeList} disabled={deleting}>
-          Delete list
+                <button
+          className={`btn btn-danger${listArm ? ' armed' : ''}`}
+          onClick={removeList}
+          disabled={deleting}
+          title={
+            listArm
+              ? `Confirm: delete "${list.title}" and all ${tasks.length} task(s)`
+              : 'Delete list (click, then confirm)'
+          }
+        >
+          {listArm
+            ? `Confirm delete (${tasks.length} task${tasks.length === 1 ? '' : 's'})?`
+            : 'Delete list'}
         </button>
       </div>
       <div className="tasks-body">
@@ -359,11 +384,20 @@ function TaskRow({
   onRefresh: () => Promise<void>
   onError: (e: string | null) => void
 }) {
-  const [titleDraft, setTitleDraft] = useState(task.title)
+    const [titleDraft, setTitleDraft] = useState(task.title)
   const [notesDraft, setNotesDraft] = useState(task.notes ?? '')
+  const [delArm, setDelArm] = useState(false)
   const notesTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => setTitleDraft(task.title), [task.title])
   useEffect(() => setNotesDraft(task.notes ?? ''), [task.notes])
+
+  // Sandboxed iframes block window.confirm silently (no `allow-modals`), so a
+  // delete needs its own arm/confirm step in the UI. Auto-disarm after 5s.
+  useEffect(() => {
+    if (!delArm) return
+    const t = setTimeout(() => setDelArm(false), 5000)
+    return () => clearTimeout(t)
+  }, [delArm])
 
   const saveTitle = async () => {
     const t = titleDraft.trim()
@@ -395,8 +429,12 @@ function TaskRow({
     notesTimer.current = setTimeout(() => void saveNotes(), 600)
   }
 
-  const remove = async () => {
-    if (!confirm('Delete this task?')) return
+    const remove = async () => {
+    if (!delArm) {
+      setDelArm(true)
+      return
+    }
+    setDelArm(false)
     try {
       await bridge.taskDelete(task.id)
       await onRefresh()
@@ -406,7 +444,7 @@ function TaskRow({
   }
 
   return (
-    <div className={`task${task.status === 'done' ? ' done' : ''}`}>
+    <div className={`task${task.status === 'done' ? ' done' : ''}${delArm ? ' armed' : ''}`}>
       <button
         className="check"
         data-status={task.status}
@@ -426,8 +464,13 @@ function TaskRow({
             {STATUS_LABEL[task.status]}
           </span>
           <div className="task-actions">
-            <button className="icon-btn danger" onClick={remove} title="Delete task" aria-label="delete">
-              ✕
+                        <button
+              className={`icon-btn danger${delArm ? ' armed' : ''}`}
+              onClick={remove}
+              title={delArm ? 'Click again to confirm delete' : 'Delete task (click twice to confirm)'}
+              aria-label="delete"
+            >
+              {delArm ? '✓' : '✕'}
             </button>
           </div>
         </div>

@@ -29,6 +29,8 @@ export type AskQuestionPrompt = {
   messageId?: string | null
   title?: string
   questions: AskQuestionSpec[]
+  /** When the host opened this question (tool start) — anchors turn-timer pause windows. */
+  createdAt?: number
 }
 
 export type AskQuestionSubmit = {

@@ -159,15 +159,24 @@ type BrokerSwitchSession = {
   /** Resolved subagent pins for the switched-to chat; empty string clears the previous chat's. */
   subagentModelsByAgent?: string
   /** Per-chat image (fallback) model override (empty/undefined = keep current). */
-    imageModelId?: string
+  imageModelId?: string
   imageModelProvider?: string
+  /** Plan mode (task 11): per-switch Pi builtin tool pref + chatOnly override. Undefined = keep current. */
+  piBuiltinTools?: PiBuiltinToolsPref
+  chatOnly?: boolean
+
+  /** Compaction reserveTokens override for the switched-to chat's model (null = Pi default). */
+  compactionReserveTokens?: number | null
   /** Per-chat thinking-level override (off/minimal/low/medium/high/[xhigh|max]; omitted = Pi default). */
   thinkingLevel?: string
-  /** Compaction reserveTokens override for the switched-to chat's model (null/undefined = Pi default). */
-  compactionReserveTokens?: number | null
 }
 
 type BrokerForkBeforeLastUser = { type: 'fork_before_last_user'; requestId: string }
+
+/** Edit-resend rewind: fork a copy of the session that ends just BEFORE the
+ *  Nth user entry on the active branch (0-based; tool results are role
+ *  'toolResult' so 'user' entries are real operator sends + steers). */
+type BrokerForkBeforeUserIndex = { type: 'fork_before_user_index'; requestId: string; userIndex: number }
 
 type BrokerCancelSubagent = { type: 'cancel_subagent'; runId: string }
 
@@ -221,6 +230,7 @@ type BrokerMessageIn =
   | BrokerFollowUp
   | BrokerSwitchSession
   | BrokerForkBeforeLastUser
+  | BrokerForkBeforeUserIndex
   | BrokerCancelSubagent
   | BrokerRunSubagent
   | BrokerCancelForcedSubagent
@@ -1218,6 +1228,17 @@ async function handleSwitchSession(msg: BrokerSwitchSession): Promise<void> {
     if (typeof msg.imageModelProvider === 'string') {
       process.env.SYLO_IMAGE_MODEL_PROVIDER = msg.imageModelProvider.trim()
     }
+    // Plan mode (task 11): per-switch overrides for the Pi builtin tool set +
+    // the chat-only switch. The createRuntime factory (re-invoked right below)
+    // reads these module vars, so the switched-to session gets this turn's
+    // policy — plan turns run a read-only builtin allowlist with every
+    // extension tool blocked; normal switches restore the operator's prefs.
+    if (msg.piBuiltinTools !== undefined) {
+      brokerPiBuiltinPref = normalizePiBuiltinToolsPref(msg.piBuiltinTools)
+    }
+    if (msg.chatOnly !== undefined) {
+      brokerChatOnly = msg.chatOnly === true
+    }
         brokerSessionCwd = expandHome(msg.sessionCwd)
     // Propagate the new workspace cwd to SYLO_PI_CWD so per-workspace Sylo
     // extensions follow the switched conversation (env vars are frozen at fork,
@@ -1285,22 +1306,79 @@ async function handleForkBeforeLastUser(msg: BrokerForkBeforeLastUser): Promise<
     }
     await runtime.fork(lastUserId, { position: 'before' })
     session = runtime.session
-    const file = session.sessionFile
-    if (!file) {
+    reportForkResult(msg)
+  } catch (e) {
+    process.send?.({
+      type: 'fork_result',
+      requestId: msg.requestId,
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+    })
+  }
+}
+
+/** Shared tail of both fork ops: swap the live runtime/session to the new
+ *  forked file, then report its absolute path back to the host. */
+function reportForkResult(msg: { requestId: string }): void {
+  const file = session?.sessionFile
+  if (!file) {
+    process.send?.({
+      type: 'fork_result',
+      requestId: msg.requestId,
+      ok: false,
+      error: 'Fork succeeded but session file path missing',
+    })
+    return
+  }
+  process.send?.({
+    type: 'fork_result',
+    requestId: msg.requestId,
+    ok: true,
+    sessionFileAbs: file,
+  })
+}
+
+async function handleForkBeforeUserIndex(msg: BrokerForkBeforeUserIndex): Promise<void> {
+  if (!runtime || !session) {
+    process.send?.({
+      type: 'fork_result',
+      requestId: msg.requestId,
+      ok: false,
+      error: 'Runtime not initialized',
+    })
+    return
+  }
+  try {
+    // Active branch only (leaf chain) — matches what the agent sees. Tool
+    // results are role 'toolResult', so `role === 'user'` entries are the
+    // operator's sends/steers in order; the DB timeline aligns 1:1.
+    const branchEntries = session.sessionManager.getBranch()
+    let userCount = 0
+    let targetId: string | undefined
+    for (const e of branchEntries) {
+      if (e.type === 'message' && e.message.role === 'user') {
+        if (userCount === msg.userIndex) {
+          targetId = e.id
+          break
+        }
+        userCount++
+      }
+    }
+    if (!targetId) {
       process.send?.({
         type: 'fork_result',
         requestId: msg.requestId,
         ok: false,
-        error: 'Fork succeeded but session file path missing',
+        error: `user_index_out_of_range (session has ${userCount} user entries, wanted index ${msg.userIndex})`,
       })
       return
     }
-    process.send?.({
-      type: 'fork_result',
-      requestId: msg.requestId,
-      ok: true,
-      sessionFileAbs: file,
-    })
+    // Fork BEFORE the target user entry: the forked file keeps everything up
+    // to the entry before it (header/system/model changes included). The
+    // edited text is then sent as a fresh prompt and re-appended by Pi.
+    await runtime.fork(targetId, { position: 'before' })
+    session = runtime.session
+    reportForkResult(msg)
   } catch (e) {
     process.send?.({
       type: 'fork_result',
@@ -1792,6 +1870,10 @@ function handleMessage(msg: unknown): void {
   }
   if (m.type === 'fork_before_last_user') {
     void handleForkBeforeLastUser(m)
+    return
+  }
+  if (m.type === 'fork_before_user_index') {
+    void handleForkBeforeUserIndex(m)
     return
   }
   if (m.type === 'abort' && session) {

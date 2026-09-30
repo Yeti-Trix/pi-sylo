@@ -593,6 +593,9 @@ export class BrokerSupervisor {
       thinkingLevel?: string
       /** Compaction reserveTokens override for the switched-to chat's model (null/undefined = Pi default). */
       compactionReserveTokens?: number | null
+      /** Plan mode (task 11): per-switch Pi builtin tool pref override + chatOnly override applied before the switch. Undefined = keep current. */
+      piBuiltinTools?: PiBuiltinToolsPref
+      chatOnly?: boolean
       timeoutMs?: number
     },
   ): Promise<void> {
@@ -633,6 +636,8 @@ export class BrokerSupervisor {
           imageModelProvider: options?.imageModelProvider,
           thinkingLevel: options?.thinkingLevel,
           compactionReserveTokens: options?.compactionReserveTokens ?? null,
+          ...(options?.piBuiltinTools ? { piBuiltinTools: options.piBuiltinTools } : {}),
+          ...(options?.chatOnly !== undefined ? { chatOnly: options.chatOnly } : {}),
         })
       } catch (e) {
         clearTimeout(timer)
@@ -643,6 +648,13 @@ export class BrokerSupervisor {
   }
 
   forkBeforeLastUser(timeoutMs = 180_000): Promise<{ sessionFileAbs: string }> {
+    return this.forkBeforeUserIndex(-1, timeoutMs) // -1 = before the LAST user entry
+  }
+
+  /** Edit-resend rewind: fork the live session at user entry `userIndex`
+   *  (0-based; -1 mirrors forkBeforeLastUser). Resolves with the new session
+   *  file's absolute path — the caller rebinds the conversation to it. */
+  forkBeforeUserIndex(userIndex: number, timeoutMs = 180_000): Promise<{ sessionFileAbs: string }> {
     if (!this.child || this.child.killed) {
       return Promise.reject(new Error('Broker not running'))
     }
@@ -662,7 +674,11 @@ export class BrokerSupervisor {
         timer,
       })
       try {
-        this.child!.send({ type: 'fork_before_last_user', requestId })
+        if (userIndex < 0) {
+          this.child!.send({ type: 'fork_before_last_user', requestId })
+        } else {
+          this.child!.send({ type: 'fork_before_user_index', requestId, userIndex })
+        }
       } catch (e) {
         clearTimeout(timer)
         this.pendingFork.delete(requestId)

@@ -5,6 +5,8 @@ import {
   type CanvasPayload,
   type CanvasTab,
   type CanvasView,
+  type DiffTabPayload,
+  type WidgetTabPayload,
 } from './canvasTypes'
 
 /**
@@ -98,6 +100,17 @@ export type UseCanvasTabs = {
    *  conversation in the workspace, each with its own pty / URL state.
    *  Opens the panel. Returns the tab id. */
   openAppTab: (kind: AppTabKind, origin?: string) => string
+  /** Open (or re-activate) a widget tab for an agent `show_widget` payload.
+   *  Dedupes by `toolCallId` (a re-show of the same call replaces its tab in
+   *  place); scope bucket = the focused conversation (`c:`) — a widget is
+   *  the one-shot output of the turn that produced it, not a workspace-pool
+   *  resource like terminals/boards. Falls back to the `w:` bucket when no
+   *  chat is focused. Returns the tab id. */
+  openWidgetTab: (payload: WidgetTabPayload) => string
+  /** Open (or re-activate) a read-only diff-review tab (task 07). Dedupes by
+   *  assistant message id; scope bucket = focused conversation (same
+   *  reasoning as widgets). Returns the tab id. */
+  openDiffTab: (payload: DiffTabPayload, title: string) => string
 }
 
 /** Title for a new repeatable app-pane tab: "Terminal", then "Terminal 2",
@@ -630,6 +643,83 @@ export function useCanvasTabs({
     [writeTabs, writeActive, activate, nextTabId, onOpenPanel],
   )
 
+  const openDiffTab = useCallback(
+    (payload: DiffTabPayload, title: string) => {
+      // Diff scope: the reviewing conversation's bucket, mirroring widgets.
+      // No workspace gate — the payload came from an operator action (card
+      // click) in this workspace's UI, not a possibly-stale agent event.
+      const scope = scopeKeyOf(convIdRef.current, wsIdRef.current)
+      const tabs = tabsRef.current[scope] ?? []
+      const idx = tabs.findIndex(
+        (t) => (t.kind ?? 'canvas') === 'diff' && t.diff?.assistantMessageId === payload.assistantMessageId,
+      )
+      const next = [...tabs]
+      let targetId: string
+      if (idx >= 0) {
+        targetId = next[idx].id
+        next[idx] = { id: targetId, kind: 'diff', diff: payload, view: next[idx].view }
+      } else {
+        targetId = nextTabId()
+        next.push({
+          id: targetId,
+          kind: 'diff',
+          title: title || APP_TAB_KIND_LABEL.diff,
+          diff: payload,
+          view: { mode: 'snapshot', payload: { toolCallId: targetId, kind: 'markdown', content: '' } },
+        })
+      }
+      writeTabs({ ...tabsRef.current, [scope]: next })
+      activate(targetId, scope, wsIdRef.current)
+      onOpenPanel()
+      return targetId
+    },
+    [writeTabs, writeActive, activate, nextTabId, onOpenPanel],
+  )
+
+  const openWidgetTab = useCallback(
+    (payload: WidgetTabPayload) => {
+      // Widget scope: the producing conversation's bucket (workspace fallback
+      // when no chat is focused) — see openWidgetTab docs above. Workspace
+      // gate mirrors canvas:show: a background workspace's widget must not
+      // pollute the foreground tabs (the payload is dropped; the agent can
+      // re-show it once that workspace is focused).
+      const wsKey = activeWorkspaceCwdRef.current
+      const payloadKey = (payload as { workspaceKey?: string }).workspaceKey
+      if (payloadKey && wsKey && normWsKey(payloadKey) !== normWsKey(wsKey)) {
+        return ''
+      }
+      const scope = scopeKeyOf(convIdRef.current, wsIdRef.current)
+      const wsB = `w:${wsIdRef.current}`
+      const merged = [...(tabsRef.current[scope] ?? []), ...(wsB !== scope ? tabsRef.current[wsB] ?? [] : [])]
+      const scopeTabs = tabsRef.current[scope] ?? []
+      const idx = scopeTabs.findIndex(
+        (t) => (t.kind ?? 'canvas') === 'widget' && t.widget?.toolCallId === payload.toolCallId,
+      )
+      const next = [...scopeTabs]
+      let targetId: string
+      if (idx >= 0) {
+        // Same agent call re-shown: replace the payload in place (fresh data),
+        // keep the tab + its position.
+        targetId = next[idx].id
+        next[idx] = { id: targetId, kind: 'widget', widget: payload, view: next[idx].view }
+      } else {
+        targetId = nextTabId()
+        next.push({
+          id: targetId,
+          kind: 'widget',
+          title: nextAppTabTitle(merged, 'widget'),
+          widget: payload,
+          view: { mode: 'snapshot', payload: { toolCallId: targetId, kind: 'markdown', content: '' } },
+        })
+      }
+      writeTabs({ ...tabsRef.current, [scope]: next })
+      activate(targetId, scope, wsIdRef.current)
+      onOpenPanel()
+      return targetId
+    },
+    [writeTabs, writeActive, activate, nextTabId, onOpenPanel],
+  )
+
   const scope = scopeKeyOf(conversationId, workspaceId)
   const wsBucket = `w:${workspaceId}`
   const scopeTabs = tabsByScope[scope] ?? []
@@ -650,5 +740,5 @@ export function useCanvasTabs({
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null
   const view: CanvasView | null = activeTab ? activeTab.view : null
 
-  return { tabs, activeTabId, view, setActiveTab, closeTab, updateActiveSnapshot, openAppTab }
+  return { tabs, activeTabId, view, setActiveTab, closeTab, updateActiveSnapshot, openAppTab, openWidgetTab, openDiffTab }
 }

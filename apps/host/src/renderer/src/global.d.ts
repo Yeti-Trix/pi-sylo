@@ -544,6 +544,43 @@ declare global {
         abort: (
           conversationId: string,
         ) => Promise<{ ok: true } | { ok: false; error: string }>
+        /** Edit & resend (Claude parity): truncate the conversation after a
+         *  sent user message, rewrite its text (original kept), rewind the pi
+         *  session to that point, and run the turn again. */
+        editAndResend: (
+          conversationId: string,
+          userMessageId: string,
+          text: string,
+          attachments?: { path: string; name?: string }[],
+          restoreAssistantMessageId?: string,
+        ) => Promise<
+          | { ok: true; assistantMessageId: string }
+          | { ok: false; error: string }
+        >
+        /** Retry (Claude parity): discard the last assistant reply, rerun the
+         *  turn from the same user message (discarded attempt retrievable as a
+         *  collapsed "previous attempt" on the new reply). */
+        retryLastReply: (conversationId: string) => Promise<
+          { ok: true; assistantMessageId: string } | { ok: false; error: string }
+        >
+        /** Plan mode (task 11): per-chat toggle. */
+        setPlanMode: (
+          conversationId: string,
+          enabled: boolean,
+        ) => Promise<{ ok: true } | { ok: false; error: string }>
+        /** Approve & execute: rerun a plan-mode reply with full tools. */
+        approvePlan: (
+          conversationId: string,
+          assistantMessageId: string,
+        ) => Promise<
+          { ok: true; assistantMessageId: string } | { ok: false; error: string }
+        >
+        /** @-references (task 06): fuzzy file/folder search under the
+         *  message's workspace cwd (main-side walk). */
+        refSearch: (conversationId: string, query: string) => Promise<
+          | { ok: true; hits: Array<{ path: string; relativePath: string; kind: 'file' | 'folder' }> }
+          | { ok: false; error: string }
+        >
         /** Conversation ids the host still has a turn running for (survives a reload). */
         activeTurns: () => Promise<string[]>
         steer: (
@@ -643,6 +680,16 @@ declare global {
         ) => Promise<
           | { ok: true; content: string; truncated: boolean }
           | { ok: false; error: string }
+        >
+      }
+      rules: {
+        /** Rules panel (task 12): workspace-root AGENTS.md read/write, strictly scoped main-side. */
+        workspaceAgentsRead: (workspaceId: string) => Promise<
+          | { ok: true; path: string; exists: boolean; content: string; bytes: number; modifiedAt: number | null }
+          | { ok: false; error: string }
+        >
+        workspaceAgentsWrite: (workspaceId: string, content: string) => Promise<
+          { ok: true; path: string; bytes: number } | { ok: false; error: string }
         >
       }
       catalog: {
@@ -1194,9 +1241,19 @@ declare global {
         >
         // ── Agent checkpoints (per-turn undo; storage in app data only) ──
         checkpoints: {
-          /** Undoable turns for a conversation (newest first), by assistant message id. */
+          /** Undoable turns for a conversation (newest first), by assistant message id.
+           *  `changes` (tasks 07/13) = what THAT turn changed: hashed manifest
+           *  diffed against the previous turn's manifest (no current-disk reads). */
           list: (conversationId: string) => Promise<
-            { assistantMessageId: string; startedAt: number }[]
+            { assistantMessageId: string; startedAt: number; changes?: { modified: string[]; added: string[]; deleted: string[] } }[]
+          >
+          /** Read-only per-file unified diffs for a turn (task 07 review). */
+          diff: (
+            conversationId: string,
+            assistantMessageId: string,
+          ) => Promise<
+            | { ok: true; diffs: Array<{ rel: string; status: 'modified' | 'added' | 'deleted'; diff: string; skipped?: 'size' | 'binary' }> }
+            | { ok: false; error: string }
           >
           /** What restoring would change (files modified/added/deleted). */
           preview: (
@@ -1893,9 +1950,18 @@ declare global {
       }
       // ── Agent checkpoints (per-turn undo; storage in app data only) ──
       checkpoints: {
-        /** Undoable turns for a conversation (newest first), by assistant message id. */
+        /** Undoable turns for a conversation (newest first), by assistant message id.
+         *  `changes` (tasks 07/13) = what THAT turn changed (previous-manifest hash diff). */
         list: (conversationId: string) => Promise<
-          { assistantMessageId: string; startedAt: number }[]
+          { assistantMessageId: string; startedAt: number; changes?: { modified: string[]; added: string[]; deleted: string[] } }[]
+        >
+        /** Read-only per-file unified diffs for a turn (task 07 review). */
+        diff: (
+          conversationId: string,
+          assistantMessageId: string,
+        ) => Promise<
+          | { ok: true; diffs: Array<{ rel: string; status: 'modified' | 'added' | 'deleted'; diff: string; skipped?: 'size' | 'binary' }> }
+          | { ok: false; error: string }
         >
         /** What restoring would change (files modified/added/deleted). */
         preview: (
@@ -1963,6 +2029,18 @@ declare global {
         fireNow: (
           id: string,
         ) => Promise<{ ok: true; conversationId: string } | { ok: false; error: string }>
+        /** Task 14: recent fire history for one schedule (newest first, capped 20). */
+        listRuns: (scheduleId: string, limit?: number) => Promise<
+          Array<{
+            id: number
+            schedule_id: string
+            fired_at: number
+            status: 'ok' | 'error'
+            conversation_id: string | null
+            brief: string | null
+            duration_ms: number | null
+          }>
+        >
         onChanged: (cb: (payload: { workspaceId: string }) => void) => () => void
       }
     }

@@ -24,6 +24,8 @@ import type { CanvasView } from './canvasTypes'
 import { BrowserPane } from './BrowserPane'
 import { SideChatPane } from './SideChatPane'
 import { TerminalPane } from './TerminalPane'
+import { WidgetPane } from './WidgetPane'
+import { DiffPane } from './DiffPane'
 import type { TerminalRegistry } from './useTerminalSessions'
 
 // `+` picker entries (lucide-style stroke icons, 16px). Module-level so the
@@ -639,7 +641,14 @@ export function CanvasPanel({
                   {item(
                     'Close others',
                     false,
-                    () => onCloseTabs?.(all.filter((t) => t.id !== tabMenu.tabId).map((t) => t.id)),
+                    () => {
+                      const ids = all.filter((t) => t.id !== tabMenu.tabId).map((t) => t.id)
+                      // Guardrail (task 15b): bulk-closing many tabs asks first.
+                      if (ids.length > 2 && !window.confirm(`Close ${ids.length} other tab${ids.length === 1 ? '' : 's'} in this pool?`)) {
+                        return
+                      }
+                      onCloseTabs?.(ids)
+                    },
                     all.length <= 1,
                   )}
                   {target && kindOf(target) !== 'canvas'
@@ -699,6 +708,39 @@ export function CanvasPanel({
               )}
             >
               <BrowserPane tabId={t.id} initialUrl={t.browserUrl} />
+            </div>
+          ))
+      : null}
+      {/* Widget panes stay mounted (hidden, like browsers) so iframe state
+          survives tab switches; skill-surface payload travels on the tab. */}
+      {variant === 'docked' ?
+        (tabs ?? [])
+          .filter((t) => tabKind(t) === 'widget')
+          .map((t) => (
+            <div
+              key={t.id}
+              className={cn(
+                'min-h-0 min-w-0 flex-1',
+                t.id === activeTabId && activeKind === 'widget' ? 'flex' : 'hidden',
+              )}
+            >
+              <WidgetPane widget={t.widget} />
+            </div>
+          ))
+      : null}
+      {/* Diff review panes (task 07): read-only, mounted hidden like widgets. */}
+      {variant === 'docked' ?
+        (tabs ?? [])
+          .filter((t) => tabKind(t) === 'diff')
+          .map((t) => (
+            <div
+              key={t.id}
+              className={cn(
+                'min-h-0 min-w-0 flex-1',
+                t.id === activeTabId && activeKind === 'diff' ? 'flex' : 'hidden',
+              )}
+            >
+              <DiffPane payload={t.diff} />
             </div>
           ))
       : null}

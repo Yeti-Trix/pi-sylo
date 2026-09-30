@@ -16,10 +16,22 @@ import {
   splitUserMessageAttachments,
 } from '../chatUserAttachments'
 import { registerComposerDropHandler } from './chatDropBus'
+import {
+  COMPOSER_SLASH_COMMANDS,
+  extractComposerSlashCommand,
+  isComposerQuickCommand,
+  slashQueryAtCaret,
+  workflowPlaceholders,
+  type ComposerSlashCommand,
+} from './composerSlash'
+import {
+  syloWorkflowRead,
+  syloWorkflowsList,
+  type SyloWorkflowEntry,
+} from '../lib/sylo-workflows-bridge'
 import { cn } from '../lib/cn'
 import {
   applyMentionCompletion,
-  mentionQueryAtCaret,
 } from '../../../shared/subagent-mentions'
 import {
   chatAttachmentChip,
@@ -57,6 +69,48 @@ export type QueuedComposerMessage = {
   attachments?: { path: string; name: string }[]
 }
 
+/** ── @-references (task 06, Cursor parity) ───────────────────────────────── */
+
+/** A canvas tab the picker can reference (@canvas). */
+export type AtRefCanvasItem = {
+  /** Tab strip label ("Task board", sketch file name…). */
+  title: string
+  /** One-line detail (kind + backing file when one exists). */
+  detail: string
+  /** Text block inserted into the message when picked. */
+  refText: string
+}
+
+/** An open terminal pane the picker can reference (@terminal). */
+export type AtRefTerminalItem = {
+  tabId: string
+  title: string
+  /** Reads the pane's CURRENT output at pick time (never stale). */
+  readBuffer: () => string
+}
+
+/**
+ * Superset trigger of the subagent `mentionQueryAtCaret`: same boundares
+ * (token starts a line or follows whitespace), but the query accepts `/` too
+ * so `@docs/ma…` matches workspace paths. Agent resolution on SEND is
+ * untouched — shared `MENTION_TOKEN` never matches `/`, so a picked file path
+ * in the text stays plain prose to the mention parser.
+ */
+export function atQueryAtCaret(
+  text: string,
+  caret: number,
+): { query: string; start: number; end: number } | null {
+  const upto = text.slice(0, caret)
+  const at = upto.lastIndexOf('@')
+  if (at < 0) return null
+  if (at > 0 && !/\s/.test(upto[at - 1]!)) return null
+  const query = upto.slice(at + 1)
+  if (/[\s@]/.test(query)) return null
+  if (query && !/^[A-Za-z0-9._/-]*$/.test(query)) return null
+  const rest = /^[A-Za-z0-9._/-]*/.exec(text.slice(caret))?.[0] ?? ''
+  return { query, start: at, end: caret + rest.length }
+}
+
 /**
  * A staged attachment chip. `pending` marks a drop still being resolved (no
  * local path yet) — the chip renders immediately so the operator can see the
@@ -76,6 +130,9 @@ type SubagentPickerAgent = {
 }
 
 type MentionSpan = { query: string; start: number; end: number }
+
+/** Workspace hit shape from `chat.refSearch` (mirrors main/workspace-ref-search.ts). */
+type WorkspaceRefHit = { path: string; relativePath: string; kind: 'file' | 'folder' }
 
 /** Keep the picker short enough that it never swallows the transcript. */
 const MENTION_PICKER_LIMIT = 8
@@ -107,10 +164,39 @@ type ChatComposerProps = {
   onOptimisticUserMessage?: (text: string) => void
   /** Fired when the send failed and the optimistic bubble must come down. */
   onOptimisticUserMessageFailed?: () => void
+  /** @-reference sources (task 06): open canvas tabs + terminal panes,
+   *  computed App-side. Terminal buffers are read at PICK time via callback. */
+  atCanvasItems?: AtRefCanvasItem[]
+  atTerminalItems?: AtRefTerminalItem[]
+  /** Quick commands (task 10) run App-side (/compact /clear /model). */
+  onSlashCommand?: (name: string) => void
+  /** Workflow library roots (task 09): workspace cwd + resolved agent dir. */
+  atProjectDir?: string
+  atAgentDir?: string
+  /** Plan mode (task 11): per-chat toggle state + click handler. */
+  planModeOn?: boolean
+  onTogglePlanMode?: () => void
 }
 
 function newQueueId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `q-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+}
+
+/** @terminal insert (task 06): same fenced shape as the terminal pane's
+ *  Share→composer hover (shareTerminalToChat), with the pane title. Tail-capped
+ *  like that capture: last 300 lines / 40k chars (registry buffer; alt-screen
+ *  windows replay only what reached the byte buffer). */
+function terminalRefText(buffer: string, title: string): string {
+  let text = (buffer ?? '').trim()
+  if (text) {
+    const lines = text.split('\n')
+    if (lines.length > 300) text = lines.slice(-300).join('\n')
+    if (text.length > 40_000) text = text.slice(-40_000)
+  }
+  if (!text.trim()) {
+    return `Shared terminal output from the apps pane ("${title}"):\n\n(the pane had no readable output yet)\n`
+  }
+  return `Shared terminal output from the apps pane ("${title}"):\n\n\`\`\`\`text\n${text}\n\`\`\`\`\n`
 }
 
 /**
@@ -152,6 +238,13 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
     onDeliverQueued,
     onOptimisticUserMessage,
     onOptimisticUserMessageFailed,
+    atCanvasItems,
+    atTerminalItems,
+    onSlashCommand,
+    atProjectDir,
+    atAgentDir,
+    planModeOn,
+    onTogglePlanMode,
   },
   ref,
 ) {
@@ -164,6 +257,19 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
   const [mentionAgents, setMentionAgents] = useState<SubagentPickerAgent[]>([])
   const [mentionSpan, setMentionSpan] = useState<MentionSpan | null>(null)
   const [mentionIndex, setMentionIndex] = useState(0)
+  // ── Slash surface (tasks 09 + 10) ──
+  const [slashSpan, setSlashSpan] = useState<MentionSpan | null>(null)
+  const [slashWorkflows, setSlashWorkflows] = useState<SyloWorkflowEntry[]>([])
+  const slashWorkflowsLoadedRef = useRef(false)
+  const [slashBusy, setSlashBusy] = useState(false)
+  /** Transient non-blocking hint (e.g. "/compact takes no arguments"). */
+  const [slashNote, setSlashNote] = useState<string | null>(null)
+  const slashNoteTimerRef = useRef<number | null>(null)
+  const showSlashNote = useCallback((hint: string) => {
+    setSlashNote(hint)
+    if (slashNoteTimerRef.current) window.clearTimeout(slashNoteTimerRef.current)
+    slashNoteTimerRef.current = window.setTimeout(() => setSlashNote(null), 4000)
+  }, [])
   const composerBusyRef = useRef(false)
   const [composerBusy, setComposerBusy] = useState(false)
   const prevSendingRef = useRef(false)
@@ -240,28 +346,246 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
       .slice(0, MENTION_PICKER_LIMIT)
   }, [mentionAgents, mentionSpan])
 
-  const mentionOpen = mentionSpan !== null && mentionMatches.length > 0 && !safeMode && !inputLocked
+  // ── @-reference items (files/folders, canvas, terminal) + the unified ────
+  // picker rows. Subagent `@name` mentions share the trigger; each section's
+  // query filtering is independent, so agent completion behaves exactly as
+  // before when the query matches an agent.
+  const [refHits, setRefHits] = useState<WorkspaceRefHit[]>([])
+  const refSearchSeqRef = useRef(0)
+  useEffect(() => {
+    if (!mentionSpan) {
+      setRefHits([])
+      return
+    }
+    const q = mentionSpan.query
+    const seq = ++refSearchSeqRef.current
+    const t = window.setTimeout(() => {
+      void window.sylo.chat
+        .refSearch(activeId ?? '', q)
+        .then((r) => {
+          if (seq === refSearchSeqRef.current && r.ok) setRefHits(r.hits)
+        })
+        .catch(() => {
+          /* ref search is optional */
+        })
+    }, 150)
+    return () => window.clearTimeout(t)
+  }, [mentionSpan?.query, activeId])
 
-  const syncMentionSpan = useCallback((text: string, caret: number | null) => {
-    setMentionSpan(caret == null ? null : mentionQueryAtCaret(text, caret))
-    setMentionIndex(0)
-  }, [])
+  const refItemMatches = (label: string, detail: string, q: string): boolean =>
+    !q || `${label} ${detail}`.toLowerCase().includes(q)
 
-  const acceptMention = useCallback(
-    (agentName: string) => {
+  type PickerRow =
+    | { rowKey: string; section: 'files' | 'canvas' | 'terminal' | 'agents'; label: string; sub: string
+        file?: WorkspaceRefHit; canvas?: AtRefCanvasItem; terminal?: AtRefTerminalItem; agent?: string }
+
+  const pickerRows = useMemo((): PickerRow[] => {
+    if (!mentionSpan) return []
+    const q = mentionSpan.query.toLowerCase()
+    const rows: PickerRow[] = []
+    for (const hit of refHits.slice(0, 5)) {
+      rows.push({
+        rowKey: `file:${hit.relativePath}`,
+        section: 'files',
+        label: hit.kind === 'folder' ? `${hit.relativePath}/` : hit.relativePath,
+        sub: hit.kind === 'folder' ? 'folder' : 'attach',
+        file: hit,
+      })
+    }
+    for (const item of (atCanvasItems ?? []).slice(0, 3)) {
+      if (!refItemMatches(item.title, item.detail, q)) continue
+      rows.push({ rowKey: `canvas:${item.title}`, section: 'canvas', label: item.title, sub: item.detail, canvas: item })
+    }
+    for (const item of (atTerminalItems ?? []).slice(0, 3)) {
+      if (!refItemMatches(item.title, '', q)) continue
+      rows.push({ rowKey: `terminal:${item.tabId}`, section: 'terminal', label: item.title, sub: 'share output', terminal: item })
+    }
+    for (const agent of mentionMatches) {
+      rows.push({ rowKey: `agent:${agent.name}`, section: 'agents', label: `@${agent.name}`, sub: agent.description, agent: agent.name })
+    }
+    return rows
+  }, [mentionSpan, refHits, atCanvasItems, atTerminalItems, mentionMatches])
+
+  // Slash rows: quick commands (task 10) + operator workflows (task 09).
+  const slashRows = useMemo(
+    () => {
+      if (!slashSpan) return []
+      const q = slashSpan.query.toLowerCase()
+      type SlashRow =
+        | { rowKey: string; kind: 'command'; cmd: ComposerSlashCommand }
+        | { rowKey: string; kind: 'workflow'; wf: SyloWorkflowEntry }
+      const rows: SlashRow[] = []
+      for (const cmd of COMPOSER_SLASH_COMMANDS) {
+        if (q && !cmd.name.startsWith(q) && !cmd.name.includes(q)) continue
+        rows.push({ rowKey: `cmd:${cmd.name}`, kind: 'command', cmd })
+      }
+      for (const wf of slashWorkflows) {
+        const hay = `${wf.title} ${wf.description}`.toLowerCase()
+        if (q && !hay.includes(q) && !wf.id.toLowerCase().includes(q)) continue
+        rows.push({ rowKey: `wf:${wf.id}`, kind: 'workflow', wf })
+      }
+      return rows.slice(0, MENTION_PICKER_LIMIT * 2)
+    },
+    [slashSpan, slashWorkflows],
+  )
+
+  type AnyPickerRow =
+    | { rowKey: string; section: 'files' | 'canvas' | 'terminal' | 'agents'; label: string; sub: string
+        file?: WorkspaceRefHit; canvas?: AtRefCanvasItem; terminal?: AtRefTerminalItem; agent?: string }
+    | { rowKey: string; kind: 'command' | 'workflow'; cmd?: ComposerSlashCommand; wf?: SyloWorkflowEntry }
+
+  const activeRows: AnyPickerRow[] = slashSpan !== null
+    ? slashRows.map((r) => r as AnyPickerRow)
+    : pickerRows.map((r) => r as AnyPickerRow)
+  const pickerActive =
+    (slashSpan !== null && slashRows.length > 0)
+    || (mentionSpan !== null && pickerRows.length > 0)
+  const pickerOpen = pickerActive && !safeMode && !inputLocked
+
+  // Refresh workflows EACH open (source badge + fresh list per the spec) —
+  // loading state keeps the picker responsive; a failed fetch just means an
+  // commands-only picker.
+  useEffect(() => {
+    if (!slashSpan) return
+    if (slashBusy) return
+    void (async () => {
+      setSlashBusy(true)
+      try {
+        const r = await syloWorkflowsList({
+          project_dir: atProjectDir ?? '',
+          agent_dir: atAgentDir ?? undefined,
+        })
+        setSlashWorkflows(r.workflows)
+        slashWorkflowsLoadedRef.current = true
+      } catch {
+        setSlashWorkflows([])
+      } finally {
+        setSlashBusy(false)
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slashSpan !== null])
+
+  const acceptSlashRow = useCallback(
+    async (row: { kind: 'command' | 'workflow'; cmd?: ComposerSlashCommand; wf?: SyloWorkflowEntry }) => {
+      setSlashSpan(null)
+      if (row.kind === 'command' && row.cmd) {
+        if (onSlashCommand) {
+          setInput('')
+          setSlashNote(null)
+          onSlashCommand(row.cmd.name)
+        } else {
+          // Standalone fallback (no host wiring): send as Pi command text.
+          setInput(`/${row.cmd.name}`)
+        }
+        return
+      }
+      if (row.kind === 'workflow' && row.wf) {
+        setSlashBusy(true)
+        try {
+          const read = await syloWorkflowRead({
+            project_dir: atProjectDir ?? '',
+            agent_dir: atAgentDir ?? undefined,
+            id: row.wf.id,
+          })
+          // Replace the whole composer content: workflows are reviewable
+          // multi-line prompts, inserted plain ({{arg}} placeholders stay in
+          // the text for the operator to edit in place before sending).
+          setInput(read.body)
+          const ph = workflowPlaceholders(read.body)
+          if (ph.length > 0) {
+            showSlashNote(`Fill ${ph.length} placeholder${ph.length === 1 ? '' : 's'} before sending: ${ph.slice(0, 5).map((x) => `{{${x}}}`).join('  ')}`)
+          }
+          requestAnimationFrame(() => textareaRef.current?.focus())
+        } catch (e) {
+          showSlashNote(`Could not read workflow: ${e instanceof Error ? e.message : String(e)}`)
+        } finally {
+          setSlashBusy(false)
+        }
+      }
+    },
+    [onSlashCommand, atProjectDir, atAgentDir, showSlashNote],
+  )
+
+  const acceptPickerRow = useCallback(
+    (row: PickerRow) => {
       if (!mentionSpan) return
-      const next = applyMentionCompletion(input, mentionSpan, agentName)
-      setInput(next.text)
+      if (row.agent) {
+        // Subagent mention: original completion path (inserts `@name `).
+        const next = applyMentionCompletion(input, mentionSpan, row.agent)
+        setInput(next.text)
+        setMentionSpan(null)
+        requestAnimationFrame(() => {
+          const el = textareaRef.current
+          if (!el) return
+          el.focus()
+          el.setSelectionRange(next.caret, next.caret)
+        })
+        return
+      }
+      if (row.file) {
+        // File/folder: clear the `@query` token and stage an attachment chip —
+        // the agent receives the absolute path on send (same block as drops).
+        setInput((prev) => prev.slice(0, mentionSpan.start) + prev.slice(mentionSpan.end))
+        setMentionSpan(null)
+        const name = row.file.relativePath.replace(/^.*[/\\]/, '') || row.file.relativePath
+        setChatAttachments((prev) => {
+          const seen = new Set(prev.filter((a) => !a.pending).map((a) => a.path.toLowerCase()))
+          if (seen.has(row.file!.path.toLowerCase())) return prev
+          return [
+            ...prev,
+            {
+              id: newQueueId(),
+              path: row.file!.path,
+              name: row.file!.kind === 'folder' ? `${name}/` : name,
+            },
+          ]
+        })
+        requestAnimationFrame(() => textareaRef.current?.focus())
+        return
+      }
+      // Canvas / terminal: replace the `@query` token with the context block.
+      const insert = row.terminal ? terminalRefText(row.terminal.readBuffer(), row.terminal.title) : row.canvas?.refText ?? ''
+      setInput((prev) => prev.slice(0, mentionSpan.start) + insert + prev.slice(mentionSpan.end))
       setMentionSpan(null)
       requestAnimationFrame(() => {
         const el = textareaRef.current
         if (!el) return
         el.focus()
-        el.setSelectionRange(next.caret, next.caret)
+        el.setSelectionRange(mentionSpan.start, mentionSpan.start)
       })
     },
     [input, mentionSpan],
   )
+
+  /** One accept route for both pickers (task 06 @ / tasks 09+10 /). */
+  const pickRow = useCallback(
+    (row: AnyPickerRow) => {
+      if ('kind' in row) {
+        void acceptSlashRow(row)
+      } else {
+        acceptPickerRow(row)
+      }
+    },
+    [acceptSlashRow, acceptPickerRow],
+  )
+
+  const syncMentionSpan = useCallback((text: string, caret: number | null) => {
+    if (caret == null) {
+      setMentionSpan(null)
+      setSlashSpan(null)
+      setMentionIndex(0)
+      return
+    }
+    // The caret lives in exactly one trigger token: '@' (task 06) or '/' at a
+    // line start (tasks 09/10). Whichever matched at the closest span start wins.
+    const at = atQueryAtCaret(text, caret)
+    const slash = at ? null : slashQueryAtCaret(text, caret)
+    setMentionSpan(at)
+    setSlashSpan(slash)
+    setMentionIndex(0)
+  }, [])
+
 
     // Per-conversation draft + queue persistence. Typed-but-unsent text, staged
   // attachments AND the queued follow-ups are stashed in module-scoped maps so
@@ -423,6 +747,26 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
         return
       }
 
+      // Quick commands (task 10): intercept a recognized `/command` before the
+      // send queue machinery gets it (steer passes through — steering is for
+      // the running turn, not session commands). /compact /clear /model run
+      // App-side; ANY other /word falls through as text (Pi slash command —
+      // unchanged behavior).
+      if (mode !== 'steer' && onThinkTankInject === undefined) {
+        const cmd = extractComposerSlashCommand(trimmed)
+        if (cmd && isComposerQuickCommand(cmd.name)) {
+          const usageHint =
+            COMPOSER_SLASH_COMMANDS.find((c) => c.name === cmd.name)?.usageHint
+          if (cmd.hasArgs) {
+            showSlashNote(usageHint ?? `${cmd.name} takes no arguments — sent nothing`)
+            return
+          }
+          setInput('')
+          onSlashCommand?.(cmd.name)
+          return
+        }
+      }
+
       const restoreAttachments = [...chatAttachments]
       const text = formatUserMessageWithAttachments(
         trimmed,
@@ -511,6 +855,8 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
       onRefreshMessages,
       onOptimisticUserMessage,
       onOptimisticUserMessageFailed,
+      onSlashCommand,
+      showSlashNote,
     ],
   )
 
@@ -810,12 +1156,24 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
           ))}
         </div>
       : null}
+      {slashNote ?
+        <div
+          className={cn(
+            chatQueueAttachBadge,
+            'mb-1 self-start border border-border',
+            'max-w-full truncate text-[0.72rem]',
+          )}
+          role="status"
+        >
+          {slashNote}
+        </div>
+      : null}
       <div className={cn(chatInputRow, 'relative')}>
-        {mentionOpen ?
-          <div className={chatMentionPicker} role="listbox" aria-label="Subagents">
-            {mentionMatches.map((agent, index) => (
+        {pickerOpen ?
+          <div className={chatMentionPicker} role="listbox" aria-label="@ references">
+            {activeRows.map((row, index) => (
               <button
-                key={agent.name}
+                key={row.rowKey}
                 type="button"
                 role="option"
                 aria-selected={index === mentionIndex}
@@ -823,10 +1181,28 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
                 // The textarea would blur before onClick fires, closing the picker.
                 onMouseDown={(e) => e.preventDefault()}
                 onMouseEnter={() => setMentionIndex(index)}
-                onClick={() => acceptMention(agent.name)}
+                onClick={() => pickRow(row)}
               >
-                <span className={chatMentionName}>@{agent.name}</span>
-                <span className={chatMentionDesc}>{agent.description}</span>
+                {'kind' in row ?
+                  <>
+                    <span className={chatMentionName}>
+                      /{row.kind === 'workflow' ? row.wf!.title : row.cmd!.name}
+                    </span>
+                    <span className={chatMentionDesc}>
+                      {row.kind === 'workflow' ? row.wf!.description : row.cmd!.description}
+                    </span>
+                    <span className={cn(chatMentionDesc, 'shrink-0')}>
+                      {row.kind === 'workflow' ? row.wf!.source : 'command'}
+                    </span>
+                  </>
+                : (
+                  <>
+                    <span className={chatMentionName}>
+                      {row.section === 'agents' ? `@${row.label.slice(1)}` : row.label}
+                    </span>
+                    <span className={chatMentionDesc}>{row.sub}</span>
+                  </>
+                )}
               </button>
             ))}
           </div>
@@ -844,20 +1220,20 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
           onKeyDown={(e) => {
             // Mid-IME composition, Enter commits the candidate text — stealing
             // it for the mention picker would discard what was being typed.
-            if (mentionOpen && !e.nativeEvent.isComposing) {
+            if (pickerOpen && !e.nativeEvent.isComposing) {
               if (e.key === 'ArrowDown') {
                 e.preventDefault()
-                setMentionIndex((i) => (i + 1) % mentionMatches.length)
+                setMentionIndex((i) => (i + 1) % activeRows.length)
                 return
               }
               if (e.key === 'ArrowUp') {
                 e.preventDefault()
-                setMentionIndex((i) => (i - 1 + mentionMatches.length) % mentionMatches.length)
+                setMentionIndex((i) => (i - 1 + activeRows.length) % activeRows.length)
                 return
               }
               if (e.key === 'Enter' || e.key === 'Tab') {
                 e.preventDefault()
-                acceptMention((mentionMatches[mentionIndex] ?? mentionMatches[0]!).name)
+                pickRow(activeRows[mentionIndex] ?? activeRows[0]!)
                 return
               }
               if (e.key === 'Escape') {
@@ -890,11 +1266,29 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
               'Waiting for Pi broker…'
             : activeSending ?
               'Queue a follow-up… (Enter = queue, Ctrl+Enter = send now)'
-            : 'Message… (`@agent` forces a subagent; drop files or paste images; `/mcp reconnect`, …)'
+            : 'Message… (`@` for files/canvas/terminal/agents; drop files or paste images; `/mcp reconnect`, …)'
           }
           disabled={safeMode || (inputLocked && !onThinkTankInject)}
         />
                 <button
+          type="button"
+          className={cn(chatQueueEditBtn, planModeOn && 'border-accent text-accent')}
+          title={
+            planModeOn
+              ? 'Plan mode ON — the next turn runs read-only (no file writes, no extension tools); Approve & execute reruns it with tools'
+              : 'Plan mode — run the next turn read-only (plan only), then approve to execute'
+          }
+          aria-pressed={planModeOn === true}
+          aria-label="Toggle plan mode"
+          disabled={safeMode || !onTogglePlanMode}
+          onClick={() => {
+            onTogglePlanMode?.()
+            requestAnimationFrame(() => textareaRef.current?.focus())
+          }}
+        >
+          Plan
+        </button>
+        <button
           type="button"
           className={chatInputSendBtn}
           title={

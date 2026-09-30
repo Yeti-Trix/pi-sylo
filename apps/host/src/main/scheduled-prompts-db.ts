@@ -379,6 +379,59 @@ export function recordScheduledPromptConversation(
   return row ? rowFromDb(row) : undefined
 }
 
+/**
+ * Run history (task 14): append one fire row per attempt (scheduled fires and
+ * manual Run-now both record), auto-trimmed to the newest 20 per schedule.
+ */
+export type ScheduledPromptRunRow = {
+  id: number
+  schedule_id: string
+  fired_at: number
+  status: 'ok' | 'error'
+  conversation_id: string | null
+  brief: string | null
+  duration_ms: number | null
+}
+
+export function recordScheduledPromptRunHistory(
+  scheduleId: string,
+  input: { status: 'ok' | 'error'; conversationId?: string; brief?: string; durationMs?: number; now?: number },
+): void {
+  const trimmed = scheduleId.trim()
+  if (!trimmed) return
+  const db = findScheduleDbForId(trimmed)
+  if (!db) return
+  const now = input.now ?? Date.now()
+  db.prepare(
+    'INSERT INTO scheduled_prompt_runs (schedule_id, fired_at, status, conversation_id, brief, duration_ms) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run(
+    trimmed,
+    now,
+    input.status,
+    input.conversationId?.trim() || null,
+    input.brief?.trim() ? input.brief.trim().slice(0, 160) : null,
+    typeof input.durationMs === 'number' && Number.isFinite(input.durationMs) ? Math.round(input.durationMs) : null,
+  )
+  // Cap: keep only the newest 20 runs per schedule.
+  db.prepare(
+    `DELETE FROM scheduled_prompt_runs WHERE schedule_id = ? AND id NOT IN (
+      SELECT id FROM scheduled_prompt_runs WHERE schedule_id = ? ORDER BY fired_at DESC, id DESC LIMIT 20
+    )`,
+  ).run(trimmed, trimmed)
+}
+
+export function listScheduledPromptRuns(scheduleId: string, limit = 20): ScheduledPromptRunRow[] {
+  const trimmed = scheduleId.trim()
+  if (!trimmed) return []
+  const db = findScheduleDbForId(trimmed)
+  if (!db) return []
+  return db
+    .prepare(
+      'SELECT id, schedule_id, fired_at, status, conversation_id, brief, duration_ms FROM scheduled_prompt_runs WHERE schedule_id = ? ORDER BY fired_at DESC, id DESC LIMIT ?',
+    )
+    .all(trimmed, limit) as ScheduledPromptRunRow[]
+}
+
 /** Skip missed intervals without firing — advance next_run_at to the future. */
 export function skipMissedScheduledPrompt(id: string, now = Date.now()): ScheduledPromptRow | undefined {
   const trimmed = id.trim()

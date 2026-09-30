@@ -328,6 +328,48 @@ contextBridge.exposeInMainWorld('sylo', {
       ipcRenderer.invoke('chat:abort', conversationId) as Promise<
         { ok: true } | { ok: false; error: string }
       >,
+    /** Edit & resend (Claude parity): truncate the conversation after a sent
+     *  user message, rewrite its text (original kept), rewind the pi session
+     *  to that point, and run the turn again. */
+    editAndResend: (
+      conversationId: string,
+      userMessageId: string,
+      text: string,
+      attachments?: { path: string; name?: string }[],
+      restoreAssistantMessageId?: string,
+    ) =>
+      ipcRenderer.invoke(
+        'chat:editAndResend',
+        conversationId,
+        userMessageId,
+        text,
+        attachments ?? [],
+        restoreAssistantMessageId,
+      ) as Promise<{ ok: true; assistantMessageId: string } | { ok: false; error: string }>,
+    /** Retry (Claude parity): discard the last assistant reply, rerun the turn
+     *  from the same user message. The discarded attempt comes back on the new
+     *  assistant row's original_text as a collapsed "previous attempt". */
+    retryLastReply: (conversationId: string) =>
+      ipcRenderer.invoke('chat:retryLastReply', conversationId) as Promise<
+        { ok: true; assistantMessageId: string } | { ok: false; error: string }
+      >,
+    /** Plan mode (task 11): per-chat toggle. */
+    setPlanMode: (conversationId: string, enabled: boolean) =>
+      ipcRenderer.invoke('chat:setPlanMode', conversationId, enabled) as Promise<
+        { ok: true } | { ok: false; error: string }
+      >,
+    /** Approve & execute: rerun a plan-mode reply with full tools (operator-clicked). */
+    approvePlan: (conversationId: string, assistantMessageId: string) =>
+      ipcRenderer.invoke('chat:approvePlan', conversationId, assistantMessageId) as Promise<
+        { ok: true; assistantMessageId: string } | { ok: false; error: string }
+      >,
+    /** @-references (task 06): fuzzy file/folder search under the message's
+     *  workspace cwd (main-side walk; no hits ok — hides the section). */
+    refSearch: (conversationId: string, query: string) =>
+      ipcRenderer.invoke('workspace:refSearch', conversationId, query) as Promise<
+        | { ok: true; hits: Array<{ path: string; relativePath: string; kind: 'file' | 'folder' }> }
+        | { ok: false; error: string }
+      >,
     /** Conversation ids the host still has a turn running for (survives a reload). */
     activeTurns: () => ipcRenderer.invoke('chat:activeTurns') as Promise<string[]>,
     steer: (
@@ -427,6 +469,18 @@ contextBridge.exposeInMainWorld('sylo', {
       ipcRenderer.invoke('files:readTextFile', path) as Promise<
         | { ok: true; content: string; truncated: boolean }
         | { ok: false; error: string }
+      >,
+  },
+  rules: {
+    /** Rules panel (task 12): workspace-root AGENTS.md read/write, strictly scoped main-side. */
+    workspaceAgentsRead: (workspaceId: string) =>
+      ipcRenderer.invoke('rules:workspaceAgentsRead', workspaceId) as Promise<
+        | { ok: true; path: string; exists: boolean; content: string; bytes: number; modifiedAt: number | null }
+        | { ok: false; error: string }
+      >,
+    workspaceAgentsWrite: (workspaceId: string, content: string) =>
+      ipcRenderer.invoke('rules:workspaceAgentsWrite', workspaceId, content) as Promise<
+        { ok: true; path: string; bytes: number } | { ok: false; error: string }
       >,
   },
   catalog: {
@@ -1543,6 +1597,12 @@ contextBridge.exposeInMainWorld('sylo', {
       ipcRenderer.invoke('checkpoints:list', conversationId) as Promise<
         { assistantMessageId: string; startedAt: number }[]
       >,
+    /** Read-only per-file unified diffs for a turn (pre-image vs current disk). */
+    diff: (conversationId: string, assistantMessageId: string) =>
+      ipcRenderer.invoke('checkpoints:diff', conversationId, assistantMessageId) as Promise<
+        | { ok: true; diffs: Array<{ rel: string; status: 'modified' | 'added' | 'deleted'; diff: string; skipped?: 'size' | 'binary' }> }
+        | { ok: false; error: string }
+      >,
     preview: (conversationId: string, assistantMessageId: string) =>
       ipcRenderer.invoke('checkpoints:preview', conversationId, assistantMessageId) as Promise<
         | { ok: true; preview: { modified: string[]; added: string[]; deleted: string[] } }
@@ -1608,5 +1668,10 @@ contextBridge.exposeInMainWorld('sylo', {
       ipcRenderer.on('schedules:changed', ch)
       return () => ipcRenderer.removeListener('schedules:changed', ch)
     },
+    /** Task 14: recent fire history for one schedule (newest first, capped 20). */
+    listRuns: (scheduleId: string, limit?: number) =>
+      ipcRenderer.invoke('schedules:listRuns', scheduleId, limit) as Promise<
+        Array<{ id: number; schedule_id: string; fired_at: number; status: 'ok' | 'error'; conversation_id: string | null; brief: string | null; duration_ms: number | null }>
+      >,
   },
 })

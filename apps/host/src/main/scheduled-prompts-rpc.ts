@@ -4,6 +4,7 @@ import {
   createScheduledPrompt,
   deleteScheduledPrompt,
   getScheduledPrompt,
+  listScheduledPromptRuns,
   listScheduledPrompts,
   normalizeRecurrenceValue,
   updateScheduledPrompt,
@@ -32,12 +33,25 @@ export type ScheduleRpcRequest =
       patch: Record<string, unknown>
     }
   | { op: 'delete'; conversationId: string; id: string }
+  | { op: 'listRuns'; conversationId: string; scheduleId: string; limit?: number }
 
 export type ScheduleRpcResult =
   | { op: 'list'; schedules: ReturnType<typeof serializeSchedule>[] }
   | { op: 'create'; schedule: ReturnType<typeof serializeSchedule> }
   | { op: 'update'; schedule: ReturnType<typeof serializeSchedule> }
   | { op: 'delete'; ok: true }
+  | {
+      op: 'listRuns'
+      runs: Array<{
+        id: number
+        schedule_id: string
+        fired_at: number
+        status: 'ok' | 'error'
+        conversation_id: string | null
+        brief: string | null
+        duration_ms: number | null
+      }>
+    }
 
 function workspaceForConversation(conversationId: string): string {
   const conv = getConversation(conversationId.trim())
@@ -128,6 +142,11 @@ export function handleScheduleRpc(req: ScheduleRpcRequest): ScheduleRpcResult {
     if (!existing || existing.workspace_id !== workspaceId) throw new Error('schedule_not_found')
     deleteScheduledPrompt(req.id)
     return { op: 'delete', ok: true }
+  }
+
+  if (req.op === 'listRuns') {
+    workspaceForConversation(req.conversationId)
+    return { op: 'listRuns', runs: listScheduledPromptRuns(req.scheduleId, req.limit ?? 20) }
   }
 
   throw new Error('unknown_schedule_op')

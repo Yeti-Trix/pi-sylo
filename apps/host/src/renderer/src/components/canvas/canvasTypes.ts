@@ -43,13 +43,26 @@ export type CanvasView =
  *  browser, side chat). `kind` defaults to 'canvas'; non-canvas kinds ignore
  *  `view` (it holds an empty placeholder payload) and render their own body.
  *  `title` names app panes (canvas tabs label from their view). */
-export type AppTabKind = 'canvas' | 'terminal' | 'browser' | 'side-chat'
+export type AppTabKind = 'canvas' | 'terminal' | 'browser' | 'side-chat' | 'widget' | 'diff'
+
+/** One-shot agent payload opened as a widget tab (skill-surface iframe).
+ *  Sent by the host when an agent calls `show_widget`; replaces the old
+ *  chat-column widget host. Exactly one of html/path is meaningful — both
+ *  set or both missing render the invalid-payload fallback. */
+export type WidgetTabPayload = {
+  toolCallId: string
+  html?: string
+  path?: string
+  data?: unknown
+}
 
 export const APP_TAB_KIND_LABEL: Record<AppTabKind, string> = {
   canvas: 'Canvas',
   terminal: 'Terminal',
   browser: 'Browser',
   'side-chat': 'Side chat',
+  widget: 'Widget',
+  diff: 'Diff',
 }
 
 export type CanvasTab = {
@@ -62,6 +75,25 @@ export type CanvasTab = {
   /** Workspace-pool persistence: terminal start cwd / last browser URL. */
   terminalCwd?: string
   browserUrl?: string
+  /** Widget tab body (skill-surface payload for an agent `show_widget`).
+   *  Ephemeral by design: pool persistence saves only terminal/browser
+   *  kinds, so a widget payload does not survive a restart (the agent can
+   *  re-show it). */
+  widget?: WidgetTabPayload
+  /** Diff-review tab body (task 07): read-only per-turn file diffs. Same
+   *  ephemerality as widgets — re-openable from the change card. */
+  diff?: DiffTabPayload
+}
+
+/** Diff-review tab payload: per-file unified diffs for one assistant turn. */
+export type DiffTabPayload = {
+  assistantMessageId: string
+  files: Array<{
+    rel: string
+    status: 'modified' | 'added' | 'deleted'
+    diff: string
+    skipped?: 'size' | 'binary'
+  }>
 }
 
 export function tabKind(t: CanvasTab): AppTabKind {
@@ -74,6 +106,8 @@ export const APP_TAB_KIND_GLYPH: Record<AppTabKind, string> = {
   terminal: '>_',
   browser: '◎',
   'side-chat': '◇',
+  widget: '▣',
+  diff: '±',
 }
 
 /** Short label for a tab: app-pane title → payload title → file name → kind fallback. */

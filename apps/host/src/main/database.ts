@@ -90,6 +90,10 @@ export interface MessageRow {
   tool_calls_json: string | null
   status: MessageStatus
   created_at: number
+  /** Original content of an edited (resend) user message — null = never edited. */
+  original_text: string | null
+  /** ms timestamp of the last edit; null = never edited. */
+  edited: number | null
 }
 
 let db: Database.Database | undefined
@@ -310,6 +314,17 @@ function migrateLegacySchema(d: Database.Database, userDataPath: string): void {
     d.exec('ALTER TABLE conversations ADD COLUMN archived_at INTEGER')
   }
 
+
+  // Message edit history (Claude parity, edit-resend): the ORIGINAL content of
+  // an edited user message + the edit timestamp. NULL/0 = never edited; the
+  // original text always stays retrievable (nothing with content is silently
+  // destroyed). The pi session rewind lives in the session files — never here.
+  if (!tableHasColumn(d, 'messages', 'original_text')) {
+    d.exec('ALTER TABLE messages ADD COLUMN original_text TEXT')
+  }
+  if (!tableHasColumn(d, 'messages', 'edited')) {
+    d.exec('ALTER TABLE messages ADD COLUMN edited INTEGER')
+  }
 
   const hasWorkspaceId = tableHasColumn(d, 'conversations', 'workspace_id')
   const hasFolderId = tableHasColumn(d, 'conversations', 'folder_id')
@@ -1219,7 +1234,7 @@ export function listMessages(conversationId: string): MessageRow[] {
     .prepare(
       // rowid tiebreak: same-ms inserts (e.g. a backdated compaction notice vs the
       // user row) render in insertion order instead of an unspecified order.
-      'SELECT id, conversation_id, role, content, tool_calls_json, status, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC',
+      'SELECT id, conversation_id, role, content, tool_calls_json, status, created_at, original_text, edited FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC',
     )
     .all(conversationId) as MessageRow[]
 }
@@ -1240,17 +1255,94 @@ export function messageCreatedAtExists(conversationId: string, createdAt: number
   return row != null
 }
 
-/**
- * Cheap COUNT used by the first-message auto-title hook. Avoid loading message
- * bodies just to check "is this the first user turn?".
- */
+/** Cheap COUNT used by the first-message auto-title hook. Avoid loading message
+ *  bodies just to check "is this the first user turn?". */
 export function countUserMessages(conversationId: string): number {
   const row = getDb()
     .prepare(
       "SELECT COUNT(*) as n FROM messages WHERE conversation_id = ? AND role = 'user'",
     )
-    .get(conversationId) as { n: number } | undefined
+    .get(conversationId) as { n: number }
   return row?.n ?? 0
+}
+
+/** One message row by id (any role), or undefined. */
+export function getMessage(id: string): MessageRow | undefined {
+  const row = getDb()
+    .prepare(
+      'SELECT id, conversation_id, role, content, tool_calls_json, status, created_at, original_text, edited FROM messages WHERE id = ?',
+    )
+    .get(id) as MessageRow | undefined
+  return row
+}
+
+/** 0-based index of a message AMONG the conversation's user rows, ordered the
+ *  same way listMessages orders (created_at, rowid). Aligns the DB timeline
+ *  with the pi session's user-entry sequence for edit-resend rewinds. */
+export function userMessageIndex(conversationId: string, messageId: string): number {
+  const row = getDb()
+    .prepare(
+      `SELECT (
+         SELECT COUNT(*) FROM messages m2
+         WHERE m2.conversation_id = m.conversation_id
+           AND m2.role = 'user'
+           AND (m2.created_at < m.created_at OR (m2.created_at = m.created_at AND m2.rowid < m.rowid))
+       ) AS idx
+       FROM messages m WHERE m.id = ?`,
+    )
+    .get(messageId) as { idx: number } | undefined
+  return row?.idx ?? -1
+}
+
+/**
+ * Edit an existing user message in place (edit-resend). Persists the ORIGINAL
+ * content on the first edit (COALESCE guard — a second edit keeps the first
+ * original), bumps `edited`, leaves created_at untouched (the message stays
+ * where it is on the timeline).
+ */
+export function editUserMessageContent(id: string, newText: string): void {
+  getDb()
+    .prepare(
+      'UPDATE messages SET content = ?, original_text = COALESCE(original_text, content), edited = ?, status = \'complete\', tool_calls_json = NULL WHERE id = ?',
+    )
+    .run(newText, Date.now(), id)
+  const row = getDb().prepare('SELECT conversation_id FROM messages WHERE id = ?').get(id) as
+    | { conversation_id: string }
+    | undefined
+  if (row) {
+    getDb().prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').run(Date.now(), row.conversation_id)
+  }
+}
+
+/**
+ * Retry retention (task 03): record the DISCARDED previous attempt on the NEW
+ * assistant row so the old reply stays retrievable (collapsed "previous
+ * attempt" expander) — nothing with content is silently destroyed.
+ */
+export function setMessageOriginal(id: string, originalText: string): void {
+  getDb()
+    .prepare(
+      'UPDATE messages SET original_text = ? WHERE id = ?',
+    )
+    .run(originalText, id)
+}
+
+/**
+ * Delete every message STRICTLY AFTER the given anchor row in this conversation
+ * (edit-resend truncate primitive). Same-ms rows later in insertion order
+ * (rowid) count as "after" — matches listMessages ordering. Returns the number
+ * of deleted rows.
+ */
+export function deleteMessagesAfter(
+  conversationId: string,
+  message: Pick<MessageRow, 'id' | 'created_at'>,
+): number {
+  const res = getDb()
+    .prepare(
+      'DELETE FROM messages WHERE conversation_id = ? AND (created_at > ? OR (created_at = ? AND rowid > (SELECT rowid FROM messages WHERE id = ?)))',
+    )
+    .run(conversationId, message.created_at, message.created_at, message.id)
+  return Number(res.changes)
 }
 
 /** Copy SQLite transcript through the message before the last user turn (matches Pi fork-before-last-user). */
@@ -1302,7 +1394,7 @@ export function insertMessage(
   const now = createdAt ?? Date.now()
   getDb()
     .prepare(
-      'INSERT INTO messages (id, conversation_id, role, content, tool_calls_json, status, created_at) VALUES (?, ?, ?, ?, NULL, ?, ?)',
+      'INSERT INTO messages (id, conversation_id, role, content, tool_calls_json, status, created_at, original_text, edited) VALUES (?, ?, ?, ?, NULL, ?, ?, NULL, NULL)',
     )
     .run(id, conversationId, role, content, status, now)
   getDb().prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').run(Date.now(), conversationId)
@@ -1314,6 +1406,8 @@ export function insertMessage(
     tool_calls_json: null,
     status,
     created_at: now,
+    original_text: null,
+    edited: null,
   }
 }
 
