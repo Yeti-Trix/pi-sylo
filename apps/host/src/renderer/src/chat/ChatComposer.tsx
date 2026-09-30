@@ -44,13 +44,21 @@ import {
   chatComposer,
   chatComposerDrag,
   chatInputRow,
-    chatInputSendBtn,
+  chatInputSendBtn,
   chatInputTextarea,
   chatMentionDesc,
   chatMentionItem,
   chatMentionItemActive,
   chatMentionName,
   chatMentionPicker,
+  chatPlanMenu,
+  chatPlanMenuItem,
+  chatPlanMenuItemActive,
+  chatPlanMenuDesc,
+  chatPlanMenuTitle,
+  chatPlanSelectBtn,
+  chatPlanSelectBtnOn,
+  chatPlanSelectCaret,
   chatQueueEdit,
   chatQueueEditBtn,
   chatQueueIndex,
@@ -173,9 +181,10 @@ type ChatComposerProps = {
   /** Workflow library roots (task 09): workspace cwd + resolved agent dir. */
   atProjectDir?: string
   atAgentDir?: string
-  /** Plan mode (task 11): per-chat toggle state + click handler. */
+  /** Plan mode (task 11): per-chat current state + a setter for the
+   *  Claude-style mode chip (Auto = agent decides / Plan = forced read-only). */
   planModeOn?: boolean
-  onTogglePlanMode?: () => void
+  onSetPlanMode?: (on: boolean) => void
 }
 
 function newQueueId(): string {
@@ -244,7 +253,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
     atProjectDir,
     atAgentDir,
     planModeOn,
-    onTogglePlanMode,
+    onSetPlanMode,
   },
   ref,
 ) {
@@ -264,6 +273,9 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
   const [slashBusy, setSlashBusy] = useState(false)
   /** Transient non-blocking hint (e.g. "/compact takes no arguments"). */
   const [slashNote, setSlashNote] = useState<string | null>(null)
+  // ── Claude-style plan-mode chip: quiet text button + small dropdown ──
+  const [planMenuOpen, setPlanMenuOpen] = useState(false)
+  const planAnchorRef = useRef<HTMLDivElement>(null)
   const slashNoteTimerRef = useRef<number | null>(null)
   const showSlashNote = useCallback((hint: string) => {
     setSlashNote(hint)
@@ -304,6 +316,31 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
     el.style.height = 'auto'
     el.style.height = `${Math.min(el.scrollHeight, 96)}px`
   }, [input])
+
+  // Plan-mode dropdown dismissal: outside pointer-down closes it (capture phase
+  // so it works even when the next click lands on a button that ignores blur);
+  // Escape closes it and swallows the key so app-level Escape handlers (modal
+  // dismiss and the like) don't fire behind the menu.
+  useEffect(() => {
+    if (!planMenuOpen) return
+    const onDocPointerDown = (e: MouseEvent) => {
+      if (planAnchorRef.current && !planAnchorRef.current.contains(e.target as Node)) {
+        setPlanMenuOpen(false)
+      }
+    }
+    const onDocKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        setPlanMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDocPointerDown, true)
+    document.addEventListener('keydown', onDocKeyDown, true)
+    return () => {
+      document.removeEventListener('mousedown', onDocPointerDown, true)
+      document.removeEventListener('keydown', onDocKeyDown, true)
+    }
+  }, [planMenuOpen])
 
   useImperativeHandle(ref, () => ({
     prefill: (text: string) => {
@@ -1270,33 +1307,78 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
           }
           disabled={safeMode || (inputLocked && !onThinkTankInject)}
         />
-                <button
-          type="button"
-          className={cn(chatQueueEditBtn, planModeOn && 'border-accent text-accent')}
-          title={
-            planModeOn
-              ? 'Plan mode ON — the next turn runs read-only (no file writes, no extension tools); Approve & execute reruns it with tools'
-              : 'Plan mode — run the next turn read-only (plan only), then approve to execute'
-          }
-          aria-pressed={planModeOn === true}
-          aria-label="Toggle plan mode"
-          disabled={safeMode || !onTogglePlanMode}
-          onClick={() => {
-            onTogglePlanMode?.()
-            requestAnimationFrame(() => textareaRef.current?.focus())
-          }}
-        >
-          Plan
-        </button>
+        {/* Claude-style plan-mode chip: quiet text label showing the current
+            mode; clicking opens a small dropdown with the two options. */}
+        <div ref={planAnchorRef} className="relative shrink-0">
+          <button
+            type="button"
+            className={cn(chatPlanSelectBtn, planModeOn && chatPlanSelectBtnOn)}
+            title={
+              planModeOn
+                ? 'Plan mode ON — the next turn runs read-only (no file writes, no extension tools); Approve & execute reruns it with tools. Click to change.'
+                : 'Auto — the agent decides whether to plan first. Click to switch to Plan mode.'
+            }
+            aria-haspopup="menu"
+            aria-expanded={planMenuOpen}
+            aria-label="Plan mode"
+            disabled={safeMode || !onSetPlanMode}
+            onClick={() => setPlanMenuOpen((o) => !o)}
+          >
+            {planModeOn ? 'Plan' : 'Auto'}
+            <span className={chatPlanSelectCaret} aria-hidden="true">
+              ▾
+            </span>
+          </button>
+          {planMenuOpen ?
+            <div className={chatPlanMenu} role="menu" aria-label="Plan mode">
+              <button
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={planModeOn !== true}
+                className={cn(chatPlanMenuItem, planModeOn !== true && chatPlanMenuItemActive)}
+                onClick={() => {
+                  onSetPlanMode?.(false)
+                  setPlanMenuOpen(false)
+                  requestAnimationFrame(() => textareaRef.current?.focus())
+                }}
+              >
+                <span className={chatPlanMenuTitle}>
+                  Auto{planModeOn !== true ? ' ✓' : ''}
+                </span>
+                <span className={chatPlanMenuDesc}>
+                  The agent decides whether to plan first
+                </span>
+              </button>
+              <button
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={planModeOn === true}
+                className={cn(chatPlanMenuItem, planModeOn === true && chatPlanMenuItemActive)}
+                onClick={() => {
+                  onSetPlanMode?.(true)
+                  setPlanMenuOpen(false)
+                  requestAnimationFrame(() => textareaRef.current?.focus())
+                }}
+              >
+                <span className={chatPlanMenuTitle}>
+                  Plan{planModeOn === true ? ' ✓' : ''}
+                </span>
+                <span className={chatPlanMenuDesc}>
+                  Next turn runs read-only (plan only) — Approve &amp; execute applies the plan
+                </span>
+              </button>
+            </div>
+          : null}
+        </div>
         <button
           type="button"
           className={chatInputSendBtn}
           title={
             onThinkTankInject ?
-              'Queue inject for the Moderator'
+              'Queue inject for the Moderator (⏎)'
             : activeSending ?
               'Send now — runs at the next tool call (Enter queues · Ctrl+Enter sends immediately)'
-            : 'Send'
+            : 'Send (⏎)'
           }
           aria-label={
             onThinkTankInject ?
@@ -1322,11 +1404,19 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
             )
           }
         >
-                    {(
-            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className="h-4 w-4">
-              <path d="M12 4 6.8 9.2h3.4V20h3.6V9.2h3.4L12 4z" />
-            </svg>
-          )}
+                    <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+            className="h-4 w-4"
+          >
+            <polyline points="9 10 4 15 9 20" />
+            <path d="M20 4v7a4 4 0 0 1-4 4H4" />
+          </svg>
         </button>
       </div>
     </div>

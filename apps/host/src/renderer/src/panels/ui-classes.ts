@@ -1156,6 +1156,34 @@ export const chatInputTextarea =
 export const chatInputSendBtn =
   'flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center self-end rounded-full border-none bg-white p-0 text-[#111111] transition-[background,opacity] duration-[120ms] hover:bg-[#e2e2e2] disabled:cursor-not-allowed disabled:opacity-40'
 
+/** Claude-style plan-mode chip (composer, right of the textarea) — quiet text
+ *  button showing the current mode; opens a small dropdown of options. */
+export const chatPlanSelectBtn =
+  'flex shrink-0 cursor-pointer select-none items-center gap-1 rounded-md border-none bg-transparent px-2 py-1.5 text-[0.75rem] leading-none text-text-secondary transition-[color,background] duration-[120ms] hover:bg-[rgb(255_255_255/0.06)] hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50'
+
+/** Chip label when Plan mode is ON. */
+export const chatPlanSelectBtnOn = 'text-accent'
+
+/** Chevron hint on the chip (static decoration — the menu opens on click). */
+export const chatPlanSelectCaret =
+  'text-[0.62rem] leading-none text-text-secondary/60 transition-colors duration-[120ms] group-hover:text-text-secondary'
+
+/** Dropdown anchored above the chip (composer row has no headroom below). */
+export const chatPlanMenu =
+  'absolute bottom-full right-0 z-20 mb-2 w-64 overflow-hidden rounded-xl border border-border bg-bg-tertiary py-1 shadow-lg'
+
+export const chatPlanMenuItem =
+  'flex w-full cursor-pointer flex-col items-start gap-0.5 border-0 bg-transparent px-3 py-1.5 text-left'
+
+/** Subtle highlight for the currently selected mode row. */
+export const chatPlanMenuItemActive = 'bg-accent/12'
+
+export const chatPlanMenuTitle =
+  'text-[0.78rem] font-medium leading-tight text-text-primary'
+
+export const chatPlanMenuDesc =
+  'text-[0.72rem] leading-snug text-text-secondary'
+
 /** Quiet model-bar pills (ChatModelBar selects/inputs). */
 export const modelBarPill =
   'box-border cursor-pointer rounded-full border border-border bg-bg-primary px-2.5 py-1 font-[inherit] text-[0.72rem] text-text-secondary transition-[border-color,color,background] duration-[120ms] hover:border-accent/40 hover:text-text-primary focus:border-accent/55 focus:outline-none'

@@ -1202,14 +1202,18 @@ export function App(): React.ReactElement {
     [activeId, conversations, requestCompactNow],
   )
 
-  const togglePlanMode = useCallback(() => {
-    if (!activeId) return
-    const next = !(planModeByConv[activeId] === true)
-    setPlanModeByConv((prev) => ({ ...prev, [activeId]: next }))
-    void window.sylo.chat.setPlanMode(activeId, next).catch(() => {
-      /* pref write failed — optimistic state reverts on next reload */
-    })
-  }, [activeId, planModeByConv])
+  /** Claude-style plan-mode chip: set to a specific mode (Auto = off / Plan
+   *  = forced read-only turn) rather than blindly toggling. */
+  const setPlanMode = useCallback(
+    (on: boolean) => {
+      if (!activeId) return
+      setPlanModeByConv((prev) => ({ ...prev, [activeId]: on }))
+      void window.sylo.chat.setPlanMode(activeId, on).catch(() => {
+        /* pref write failed — optimistic state reverts on next reload */
+      })
+    },
+    [activeId],
+  )
   const planModeOn = activeId ? planModeByConv[activeId] === true : false
   const [diagnostics, setDiagnostics] = useState({
     userData: '',
@@ -5499,7 +5503,7 @@ export function App(): React.ReactElement {
               atProjectDir={activeWorkspaceForSettings.resolvedPiCwd ?? ''}
               atAgentDir={diagnostics.resolvedPiAgentDir}
               planModeOn={planModeOn}
-              onTogglePlanMode={togglePlanMode}
+              onSetPlanMode={setPlanMode}
             />
           </>
         )}

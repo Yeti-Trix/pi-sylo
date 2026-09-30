@@ -507,11 +507,19 @@ export function SideChatPane({
           aria-label={sending ? 'Steer the running turn' : 'Send'}
           onClick={() => void send()}
         >
-          {(
-            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className="h-4 w-4">
-              <path d="M12 4 6.8 9.2h3.4V20h3.6V9.2h3.4L12 4z" />
-            </svg>
-          )}
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+            className="h-4 w-4"
+          >
+            <polyline points="9 10 4 15 9 20" />
+            <path d="M20 4v7a4 4 0 0 1-4 4H4" />
+          </svg>
         </button>
       </div>
     </div>

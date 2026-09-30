@@ -10,9 +10,11 @@ type CodeBlockProps = {
 /**
  * Renders a fenced code block with a language chip, a copy-to-clipboard
  * button pinned to the top-right corner, and (for long blocks) a second
- * copy button in a footer row below the code. The top button stays pinned
- * while the `<pre>` scrolls horizontally; the bottom button lives below
- * the scroll area so it never overlaps the horizontal scrollbar.
+ * copy button pinned inside the bottom-right corner of the same card —
+ * mirroring the top one. Both buttons stay pinned while the `<pre>`
+ * scrolls horizontally; the bottom one floats 8px up from the card's
+ * bottom edge so it clears the 6px-tall horizontal scrollbar when the
+ * block overflows.
  * Used by `ChatMarkdown` for every fenced code block.
  */
 export function CodeBlock({ codeElement, className }: CodeBlockProps): React.ReactElement {
@@ -22,7 +24,7 @@ export function CodeBlock({ codeElement, className }: CodeBlockProps): React.Rea
   const codeClassName = codeProps.className ?? ''
   const lang = /language-([\w-]+)/.exec(codeClassName)?.[1] ?? ''
   const text = String(codeProps.children ?? '').replace(/\n$/, '')
-  // Only show the footer Copy button when the block is long enough that
+  // Only show the bottom-right Copy button when the block is long enough that
   // scrolling back to the top to copy is annoying. ~20 lines is the
   // threshold the operator asked for.
   const lineCount = text ? text.split('\n').length : 0
@@ -60,9 +62,12 @@ export function CodeBlock({ codeElement, className }: CodeBlockProps): React.Rea
     </button>
   )
 
-  // Bottom button: rendered in a footer row *below* the scrollable <pre> so it
-  // never overlaps the horizontal scrollbar. (Pinning it absolute to the
-  // bottom-right covered the scrollbar track — see operator report.)
+  // Bottom button: pinned inside the card at the bottom-right, mirroring the
+  // top one. The horizontal scrollbar (classic, 6px per styles.css) sits in
+  // the card's bottom 6px only when the block overflows, so the 8px bottom
+  // inset keeps the button off the scrollbar track in either case.
+  // (An earlier version pinned it below the scroll area, outside the card —
+  // see operator report, moved back inside per the follow-up request.)
   const bottomBtn = (
     <button
       type="button"
@@ -70,7 +75,7 @@ export function CodeBlock({ codeElement, className }: CodeBlockProps): React.Rea
       title="Copy code to clipboard"
       aria-label="Copy code to clipboard"
       className={cn(
-        'inline-flex select-none items-center gap-1 rounded border border-border',
+        'absolute bottom-2 right-1.5 z-10 inline-flex select-none items-center gap-1 rounded border border-border',
         'bg-bg-tertiary/90 px-1.5 py-0.5 text-[0.66rem] font-medium leading-none text-text-secondary',
         'backdrop-blur transition hover:bg-bg-secondary hover:text-text-primary',
         'focus:outline-none',
@@ -94,9 +99,7 @@ export function CodeBlock({ codeElement, className }: CodeBlockProps): React.Rea
       ) : null}
       {topBtn}
       <pre className="overflow-x-auto">{codeElement}</pre>
-      {showBottom ? (
-        <div className="mt-1 flex justify-end">{bottomBtn}</div>
-      ) : null}
+      {showBottom ? bottomBtn : null}
     </div>
   )
 }
