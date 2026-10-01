@@ -56,3 +56,6 @@ apps/host/test-fixtures/skill-surface/routes/*
 !apps/host/test-fixtures/skill-surface/routes/sylo-workflows/
 apps/host/test-fixtures/skill-surface/widgets/*
 
+
+# Chat transcript exports (private; sylo-user holds journal content)
+/journal/

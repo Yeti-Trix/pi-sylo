@@ -160,17 +160,13 @@ The bundled **sylo-subagents** orchestration skill (under **Skills** after **Res
 | Location | Scope |
 |----------|--------|
 | `~/.pi/agent/agents/*.md` | Global personas (always available when sylo-subagents is on) |
-| `<workspace>/.pi/agents/*.md` | Project personas (opt-in — see below) |
+| `<workspace>/.pi/agents/*.md` | Project personas (listed in the same Subagents modal — see below) |
 
 Bundled personas ship with Sylo; override or extend them by adding markdown files in the global folder. Open the global agents folder from **Developer → Settings → Global Pi directory** (see **Subagents** section).
 
-**Project agents (trusted repos only)**
+**Project agents (folder personas, activated in the UI)**
 
-By default only global and bundled agents load. To allow `.pi/agents/*.md` in the workspace project folder:
-
-1. **Developer → Settings → Subagents**
-2. Enable **Allow project agents**
-3. Confirm prompts when the agent first uses a project-local persona
+Bundled and global personas load by default. `.pi/agents/*.md` personas in the workspace project folder appear in the **Subagents** modal tagged "project" — but only as candidates. They do nothing until you pick a model for that row; the pick both activates the persona for this folder and sets its model (saved per workspace folder host-side; inherit rows don't count). A cloned repo can therefore list candidate personas but can never run one without an operator click. Mind what repos you point a workspace at regardless — the model still reads folder content during runs.
 
 **Orphaned tasks:** if Sylo or the broker restarts during a run, stale rows are marked **orphaned**. Clear them from **Developer → Settings → Subagents → Diagnostics** (**Clear orphaned**), or check counts there.
 
@@ -181,10 +177,10 @@ By default only global and bundled agents load. To allow `.pi/agents/*.md` in th
 Subagent runs consume tokens from whichever model they land on. High-volume, low-intelligence work — web searches, reading/grepping docs, codebase recon — does not need a frontier model, so pin a **free** model to a role and route that work through it:
 
 1. Save an **OpenRouter** key via **Developer → Settings → Model (Pi) → Manage providers** (free models still need a key; the free tier is rate-limited).
-2. In **Developer → Settings → Subagents**, set the per-agent row for **scout** to `OpenRouter · nvidia/nemotron-3-ultra-550b-a55b:free` (any `…:free` OpenRouter model works — pick one from the model list), then **Save subagent models**.
+2. In **Developer → Settings → Subagents**, set the **scout** persona row to `OpenRouter · nvidia/nemotron-3-ultra-550b-a55b:free` (any `…:free` OpenRouter model works — pick one from the model list), then **Save subagent models**.
 3. Now scout runs (and anything similar you pin — e.g. worker runs that only grep/read) cost nothing while the main chat model stays on your paid provider.
 
-Resolution order for a subagent run: **per-agent pin → all-subagents pin → the chat's model**. You can also narrow pins per conversation from the **Subagents** button in the chat model bar. Pinning is operator-configured by agent name — the agent itself cannot pick a model per call, so it helps the free model along by asking for scout/worker runs for cheap work (see the guidance in [AGENTS.md](../AGENTS.md)).
+Resolution order for a subagent run: **this workspace's pin → the Global SubAgents pin → the chat's model**. Workspace pins are per folder — set them from the **Subagents** button in the chat model bar. Project personas (`.pi/agents/*.md`) appear in that same persona list — no separate opt-in. Pinning is operator-configured by agent name — the agent itself cannot pick a model per call, so it helps the free model along by asking for scout/worker runs for cheap work (see the guidance in [AGENTS.md](../AGENTS.md)).
 
 ---
 

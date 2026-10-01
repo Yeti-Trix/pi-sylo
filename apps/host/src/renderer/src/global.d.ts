@@ -248,22 +248,19 @@ declare global {
             }
           | null
         >
-        /** Per-chat subagent pins plus the global pins they layer over. */
+        /** Global SubAgents pins plus this workspace's own (the only override tier). */
         getSubagentModels: (
           id: string,
         ) => Promise<
           | {
-              chat: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>
               global: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>
-              allThinking: string
+              workspace: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>
+              workspaceId: string
+              workspaceLabel: string
               chatThinking: string | null
             }
           | null
         >
-        setSubagentModels: (
-          id: string,
-          pins: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>,
-        ) => Promise<{ ok: true } | { ok: false; error: string }>
         delete: (id: string) => Promise<void>
       }
       /** Thinking (reasoning) effort supported for a provider/model per Pi. */
@@ -277,6 +274,11 @@ declare global {
         >
       }
       workspaces: {
+        /** Save workspace-tier subagent persona pins (this folder only) — the modal's save target. */
+        setSubagentPins: (
+          workspaceId: string,
+          pins: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>,
+        ) => Promise<{ ok: true } | { ok: false; error: string }>
         list: () => Promise<
           {
             id: string
@@ -321,6 +323,10 @@ declare global {
               github_remote_url: string
               github_backup_enabled: number
               github_last_sync_at: number | null
+              /** Per-workspace subagent settings (v3 split): folder personas trusted. */
+              subagent_project_agents: number
+              /** Per-workspace subagent persona pins (serialized JSON, may be ''). */
+              subagent_pins_json: string
               sort_order: number
               created_at: number
             } }
@@ -1900,6 +1906,18 @@ declare global {
           extensionEnabled: boolean
         }>
         agents: () => Promise<
+          Array<{
+            name: string
+            description: string
+            source: 'builtin' | 'user' | 'project'
+            /** Frontmatter `tools:`; absent means unrestricted. */
+            tools?: string[]
+            /** Frontmatter `timeout_seconds`; absent means the default. */
+            timeoutSeconds?: number
+          }>
+        >
+        /** Global-only persona list for Settings → Subagents (bundled + operator-global). */
+        agentsGlobal: () => Promise<
           Array<{
             name: string
             description: string

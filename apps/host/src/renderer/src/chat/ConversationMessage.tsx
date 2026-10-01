@@ -10,7 +10,12 @@ import { LogicForgeIoReviewAction } from '../components/logicforge/LogicForgeIoR
 import { logicForgeMatchRunDir } from '../components/logicforge/logicForgeMatchRunDir'
 import { mapSubagentBatchesToMessage } from '../components/subagent/matchSubagentBatches'
 import { UserMessageBody } from '../UserMessageBody'
-import { splitUserMessageAttachments } from '../chatUserAttachments'
+import {
+  isImageAttachmentPath,
+  resolveImageAttachmentFromFile,
+  splitUserMessageAttachments,
+} from '../chatUserAttachments'
+import { AttachmentImageThumb } from '../AttachmentImageThumb'
 import { cn } from '../lib/cn'
 import { detailsOpenFromToggleEvent } from '../panels/capability/helpers'
 import {
@@ -29,6 +34,13 @@ import {
   chatMsgUser,
   chatQueueEdit,
   chatQueueEditBtn,
+  chatAttachmentChip,
+  chatAttachmentChipGlyph,
+  chatAttachmentChipImage,
+  chatAttachmentChipName,
+  chatAttachmentChipRemove,
+  chatAttachmentStrip,
+  chatQueueAttachBadge,
   chatSegmentArgs,
   chatSegmentBody,
   chatSegmentChevron,
@@ -613,8 +625,27 @@ function InterleavedAssistantBody({
     ]),
   )
 
-  const pieces: React.ReactNode[] = []
-  const galleries: React.ReactNode[] = []
+  type WorkRun = {
+    pieces: React.ReactNode[]
+    overlay: React.ReactNode[]
+    galleries: React.ReactNode[]
+    segs: AssistantSegment[]
+    /** Newest agent text chunk inside the group — preview line for the header. */
+    lastGroupChunk: string
+  }
+  // Work runs: an ask-question tool call SPLITS the turn's foldable timeline
+  // into multiple collapsed group cards so the transcript reads in order —
+  // [Working… run 0] [question card (SUBMITTED)] [Working… run 1 — the
+  // resumed work] … (operator request 2026-09-30). Before the split, every
+  // segment after the answer merged back into the run-0 bubble ABOVE the
+  // question, which read out of order.
+  const runs: WorkRun[] = []
+  const newRun = (): WorkRun => {
+    const r: WorkRun = { pieces: [], overlay: [], galleries: [], segs: [], lastGroupChunk: '' }
+    runs.push(r)
+    return r
+  }
+  let run = newRun()
   let cursor = 0
   /** Completed compaction that already renders as the persisted system-row card. */
   const isCardCoveredCompaction = (seg: AssistantSegment): boolean =>
@@ -623,11 +654,17 @@ function InterleavedAssistantBody({
   // Cursor-style grouping: once the message completes, the whole work timeline
   // (reasoning + tool calls + between-steps text) collapses into ONE expandable
   // row; only tool-result galleries and the final answer text stay outside.
+  // WHILE STREAMING the group exists too — collapsed by default as a
+  // "Working…" header (pulse + newest agent comment as a preview line); it
+  // expands to reveal every tool call plus the in-flight text, and only the
+  // FINISHED final answer surfaces below the card at completion. Mid-turn
+  // phase comments stay inside the group. (Operator request.) Completion
+  // behavior is unchanged.
   let lastVisibleIndex = -1
   ordered.forEach((seg, i) => {
     if (!isCardCoveredCompaction(seg)) lastVisibleIndex = i
   })
-  const grouped = !isStreaming && lastVisibleIndex >= 0
+  const grouped = lastVisibleIndex >= 0
   let groupEndOffset = 0
   if (grouped) {
     let c = 0
@@ -640,6 +677,7 @@ function InterleavedAssistantBody({
   }
   ordered.forEach((seg, i) => {
     if (grouped && i > lastVisibleIndex) return
+    run.segs.push(seg)
     const rawOffset = seg.textOffset ?? body.length
     const offset = Math.max(cursor, Math.min(rawOffset, body.length))
     // Completed compactions with a persisted notice (tokens/summary present) are
@@ -649,7 +687,7 @@ function InterleavedAssistantBody({
     if (offset > cursor) {
       const chunk = body.slice(cursor, offset)
       if (chunk.trim().length > 0) {
-        pieces.push(
+        run.pieces.push(
           <ChatMarkdown
             key={`text-before-${seg.id}`}
             text={chunk}
@@ -657,12 +695,13 @@ function InterleavedAssistantBody({
             workspaceId={workspaceId}
           />,
         )
+        if (grouped) run.lastGroupChunk = chunk
       }
       cursor = offset
     }
     const gap = gapByBeforeId.get(seg.id)
     if (gap && !cardCoveredCompaction) {
-      pieces.push(
+      run.pieces.push(
         <InlineTimingGap key={`gap-before-${seg.id}`} ms={gap.ms} label={gap.label} />,
       )
     }
@@ -679,7 +718,7 @@ function InterleavedAssistantBody({
     const key = `${messageId}:${seg.id}`
     const isAskQuestion = seg.kind === 'tool' && seg.toolName === SYLO_ASK_QUESTION_TOOL
     if (!isAskQuestion) {
-      pieces.push(
+      run.pieces.push(
         <InlineAssistantSegment
           key={`seg-${seg.id}-${i}`}
           segment={seg}
@@ -691,13 +730,22 @@ function InterleavedAssistantBody({
         />,
       )
     }
+    // While the live group is collapsed, waiting/live operator-facing blocks
+    // route to the overlay (rendered under the header) so they stay visible
+    // and interactive without expanding the group. Live ask-questions and
+    // in-flight segments only occur in the current (last) run; completed runs'
+    // blocks stay behind their chevron.
+    const visibleTarget = grouped && isStreaming && (isAskQuestion || isLive) ? run.overlay : run.pieces
     if (isAskQuestion) {
-      pieces.push(<AskQuestionBlock key={`ask-question-${seg.id}`} segment={seg} />)
+      visibleTarget.push(<AskQuestionBlock key={`ask-question-${seg.id}`} segment={seg} />)
+      // The ask boundary STARTS a fresh work run below it — the resumed work
+      // renders as a new "Working…" bubble under the operator's answer.
+      run = newRun()
     }
     if (seg.kind === 'tool' && seg.toolName === 'subagent') {
       const batch = subagentBatchBySegment.get(seg.id)
       if (batch) {
-        pieces.push(
+        visibleTarget.push(
           <SubagentRunBlock
             key={`subagent-block-${seg.id}`}
             batch={batch}
@@ -707,14 +755,14 @@ function InterleavedAssistantBody({
           />,
         )
       } else if (seg.endTs === null) {
-        pieces.push(
+        visibleTarget.push(
           <SubagentRunBlockPending key={`subagent-pending-${seg.id}`} segmentId={seg.id} />,
         )
       }
     }
     const logicForgeRunDir = logicForgeMatchRunDir(seg)
     if (logicForgeRunDir && onOpenLogicForgeIoReview) {
-      pieces.push(
+      visibleTarget.push(
         <LogicForgeIoReviewAction
           key={`logicforge-review-${seg.id}`}
           runDir={logicForgeRunDir}
@@ -727,7 +775,7 @@ function InterleavedAssistantBody({
       if (segImages.length > 0) {
         // Galleries stay outside the collapsed work group so images aren't
         // buried behind the expand chevron.
-        ;(grouped ? galleries : pieces).push(
+        ;(grouped ? run.galleries : run.pieces).push(
           <AssistantImageGallery
             key={`seg-images-${seg.id}-${i}`}
             images={segImages}
@@ -738,7 +786,7 @@ function InterleavedAssistantBody({
       }
       const segAudios = collectToolResultAudios([seg.resultPreview])
       if (segAudios.length > 0) {
-        ;(grouped ? galleries : pieces).push(
+        ;(grouped ? run.galleries : run.pieces).push(
           <AssistantAudioGallery
             key={`seg-audio-${seg.id}-${i}`}
             audios={segAudios}
@@ -750,18 +798,28 @@ function InterleavedAssistantBody({
   })
 
   const tailStart = grouped ? groupEndOffset : cursor
-  if (tailStart < body.length && !grouped) {
-    const tail = body.slice(tailStart)
-    if (tail.trim().length > 0) {
-      pieces.push(
-        <ChatMarkdown key={`text-tail-${messageId}`} text={tail} resolveImageUrl={resolveImageUrl} workspaceId={workspaceId} />,
-      )
+  if (tailStart < body.length) {
+    const tailChunk = body.slice(tailStart)
+    if (tailChunk.trim().length > 0) {
+      // Plain rows (no timeline): everything renders outside the group.
+      // Streaming + collapsed group: the newest text also stays INSIDE the
+      // group — the turn is still working, so it must not look like a partial
+      // answer under the "Working…" card (mid-turn phase comments used to
+      // show there). The header previews the newest chunk; expanding shows
+      // it live. Once the turn completes, the finished text surfaces below
+      // the card as the final answer.
+      if (!grouped || isStreaming) {
+        run.pieces.push(
+          <ChatMarkdown key={`text-tail-${messageId}`} text={tailChunk} resolveImageUrl={resolveImageUrl} workspaceId={workspaceId} />,
+        )
+      }
+      if (grouped) run.lastGroupChunk = tailChunk
     }
   }
 
   const openGap = liveOpenChatGap(ordered, assistantCreatedAt, isStreaming)
   if (openGap) {
-    pieces.push(
+    run.pieces.push(
       <InlineTimingGap
         key="gap-open-live"
         label={openGap.label}
@@ -772,7 +830,7 @@ function InterleavedAssistantBody({
     )
   }
 
-  if (pieces.length === 0) {
+  if (runs.every((r) => r.pieces.length === 0 && r.overlay.length === 0)) {
     if (openGap) {
       return (
         <div className={chatInterleaved}>
@@ -788,42 +846,87 @@ function InterleavedAssistantBody({
     return <ChatMarkdown text={body} resolveImageUrl={resolveImageUrl} workspaceId={workspaceId} />
   }
   if (grouped) {
-    const visibleSegs = ordered.filter((seg) => !isCardCoveredCompaction(seg))
-    const toolCount = visibleSegs.filter((s) => s.kind === 'tool').length
-    const thinkMs = visibleSegs.reduce(
-      (acc, s) =>
-        s.kind === 'thinking' && s.endTs != null ? acc + Math.max(0, s.endTs - s.startTs) : acc,
-      0,
-    )
-    const firstVisible = visibleSegs[0]!
-    const lastVisible = visibleSegs[visibleSegs.length - 1]!
-    const spanMs = Math.max(0, (lastVisible.endTs ?? lastVisible.startTs) - firstVisible.startTs)
-    const labelParts: string[] = []
-    if (toolCount > 0) labelParts.push(`Ran ${toolCount} tool call${toolCount === 1 ? '' : 's'}`)
-    if (thinkMs > 0) labelParts.push(`thought ${formatDurationMs(thinkMs)}`)
-    if (labelParts.length === 0) labelParts.push('Work')
-    labelParts.push(formatDurationMs(spanMs))
+    // Per-run views: earlier runs render their COMPLETED label even while the
+    // turn still streams; only the newest run gets the live "Working…" header
+    // (pulse + newest chunk preview + pause-aware elapsed). The ask-question
+    // cards that end each run sit between the group cards, so the flow reads
+    // [work run] [question] [work run] … exactly in order.
+    const lastRunIndex = runs.length - 1
+    const runViews = runs.map((r, j) => {
+      const visibleSegs = r.segs.filter((s) => !isCardCoveredCompaction(s))
+      const toolCount = visibleSegs.filter((s) => s.kind === 'tool').length
+      const thinkMs = visibleSegs.reduce(
+        (acc, s) =>
+          s.kind === 'thinking' && s.endTs != null ? acc + Math.max(0, s.endTs - s.startTs) : acc,
+        0,
+      )
+      const firstVisible = visibleSegs[0]
+      const lastVisible = visibleSegs[visibleSegs.length - 1] ?? firstVisible
+      const spanMs = firstVisible && lastVisible ?
+        Math.max(0, (lastVisible.endTs ?? lastVisible.startTs) - firstVisible.startTs)
+      : 0
+      const completed = isStreaming && j === lastRunIndex ? false : true
+      const labelParts: string[] = []
+      if (toolCount > 0) labelParts.push(`Ran ${toolCount} tool call${toolCount === 1 ? '' : 's'}`)
+      if (thinkMs > 0) labelParts.push(`thought ${formatDurationMs(thinkMs)}`)
+      if (labelParts.length === 0) labelParts.push('Work')
+      labelParts.push(formatDurationMs(spanMs))
+      const title = completed ?
+        labelParts.join(' · ')
+      : [`Working…`, toolCount > 0 ? `${toolCount} tool${toolCount === 1 ? '' : 's'}` : null]
+          .filter(Boolean)
+          .join(' · ')
+      const lastCommentPreview =
+        !completed && r.lastGroupChunk.trim() ?
+          r.lastGroupChunk.trim().replace(/\s+/g, ' ').slice(0, 200)
+        : ''
+      return { r, completed, title, lastCommentPreview, startTs: firstVisible?.startTs ?? assistantCreatedAt }
+    })
     const tail = tailStart < body.length ? body.slice(tailStart) : ''
     return (
       <div className={chatInterleaved}>
-        <details className={chatSegmentRootClass('tool', {})}>
-          <summary className={chatSegmentSummary}>
-            <span className={cn(chatSegmentIcon, 'text-text-secondary')} aria-hidden="true">
-              ⚙
-            </span>
-            <span className={chatSegmentLabel}>{labelParts.join(' · ')}</span>
-            <span className={chatSegmentChevron} aria-hidden="true" />
-          </summary>
-          <div className="relative mt-1.5 ml-1 flex flex-col gap-1.5 pb-2.5 pl-3 pr-2.5">
-            <span
-              aria-hidden="true"
-              className="absolute bottom-3 left-0 top-0 w-px bg-[rgb(255_255_255/0.14)]"
-            />
-            {pieces}
-          </div>
-        </details>
-        {galleries.length > 0 ? galleries : null}
-        {tail.trim().length > 0 ?
+                    {runViews.map(({ r, completed, title, lastCommentPreview, startTs }, j) => (
+          <React.Fragment key={`work-run-of-${messageId}-${j}`}>
+            {r.segs.length > 0 ?
+              <details className={chatSegmentRootClass('tool', {})}>
+                <summary className={chatSegmentSummary}>
+                  <span
+                    className={cn(chatSegmentIcon, 'text-text-secondary', !completed && chatSegmentPulse)}
+                    aria-hidden="true"
+                  >
+                    ⚙
+                  </span>
+                  <span className={cn(chatSegmentLabel, !completed && 'text-text-primary')}>{title}</span>
+                  {lastCommentPreview ?
+                    <span className={cn(chatSegmentArgs, 'font-sans')}>
+                      — {lastCommentPreview}
+                    </span>
+                  : null}
+                  {!completed ?
+                    <LiveElapsedLabel
+                      startTs={startTs}
+                      className={chatSegmentMeta}
+                      prefix=" · "
+                      title="Elapsed since work on this step began"
+                      pause={turnPause}
+                    />
+                  : null}
+                  <span className={chatSegmentChevron} aria-hidden="true" />
+                </summary>
+                <div className="relative mt-1.5 ml-1 flex flex-col gap-1.5 pb-2.5 pl-3 pr-2.5">
+                  <span
+                    aria-hidden="true"
+                    className="absolute bottom-3 left-0 top-0 w-px bg-[rgb(255_255_255/0.14)]"
+                  />
+                  {r.pieces}
+                </div>
+              </details>
+            : null}
+            {r.overlay.length > 0 ? r.overlay : null}
+            {r.galleries.length > 0 ? r.galleries : null}
+          </React.Fragment>
+        ))}
+        {!isStreaming && tail.trim().length > 0 ?
           <ChatMarkdown
             key={`text-tail-${messageId}`}
             text={tail}
@@ -834,7 +937,7 @@ function InterleavedAssistantBody({
       </div>
     )
   }
-  return <div className={chatInterleaved}>{pieces}</div>
+  return <div className={chatInterleaved}>{runs[0]!.pieces}</div>
 }
 
 export const ChatConversationMessageRow = memo(function ChatConversationMessageRow({
@@ -880,10 +983,13 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
 
   const showInterleavedWorkflow = segments.length > 0 || isStreaming
   const [copied, setCopied] = useState(false)
-  // Edit-resend (user rows): inline editor state. Attachments are parsed from
-  // the persisted row and re-sent verbatim — v1 edits text only.
+  // Edit-resend (user rows): inline editor. Attachments are editable too —
+  // drop files onto the edit box to add, × on a chip to remove — and changes
+  // alone (even with unchanged text) resend the turn. Files resolve through
+  // the same helpers the composer uses.
   const [editDraft, setEditDraft] = useState('')
   const [editing, setEditing] = useState(false)
+  const [editDragOver, setEditDragOver] = useState(false)
   const editAttsRef = useRef<{ path: string; name: string }[]>([])
   const [editingAtts, setEditingAtts] = useState<{ path: string; name: string }[]>([])
   const startEdit = () => {
@@ -891,15 +997,67 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
     editAttsRef.current = attachments
     setEditingAtts(attachments)
     setEditDraft(text)
+    setEditDragOver(false)
     setEditing(true)
   }
   const cancelEdit = () => setEditing(false)
+  const editIngestFiles = async (files: File[]) => {
+    for (const f of files) {
+      let resolved: { path: string; name: string } | null = null
+      try {
+        resolved = await resolveImageAttachmentFromFile(f, {
+          pathFromWebFile: (file) => window.sylo.files.pathFromWebFile(file),
+          writePastedImage: (data, mimeType) => window.sylo.chat.writePastedImage(data, mimeType),
+        })
+      } catch {
+        resolved = null
+      }
+      const r = resolved
+      if (!r || !r.path.trim()) continue
+      setEditingAtts((prev) =>
+        prev.some((x) => x.path.toLowerCase() === r.path.toLowerCase()) ? prev : [...prev, r],
+      )
+    }
+  }
+  const canEditDrag = editing && m.role === 'user'
+  const onEditBubbleDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!canEditDrag || !e.dataTransfer?.types?.includes('Files')) return
+    e.preventDefault()
+    e.stopPropagation()
+    setEditDragOver(true)
+  }
+  const onEditBubbleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!canEditDrag || !e.dataTransfer?.types?.includes('Files')) return
+    e.preventDefault()
+    e.stopPropagation()
+    setEditDragOver(true)
+  }
+  const onEditBubbleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!canEditDrag) return
+    if (e.currentTarget.contains(e.relatedTarget as Node | null)) return
+    setEditDragOver(false)
+  }
+  const onEditBubbleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!canEditDrag) return
+    e.preventDefault()
+    e.stopPropagation()
+    setEditDragOver(false)
+    void editIngestFiles(Array.from(e.dataTransfer?.files ?? []))
+  }
   const saveEdit = () => {
     const newText = editDraft.trim()
     const originalSplit = splitUserMessageAttachments(m.content).text
     setEditing(false)
-    if (!newText || newText === originalSplit.trim() || !onEditMessage) return
-    onEditMessage(newText, editAttsRef.current)
+    if (!newText || !onEditMessage) return
+    // An attachment change alone is a real edit — resend even when the text is
+    // identical (adding/removing files changes what the model sees).
+    const atts = editingAtts
+    const origAtts = editAttsRef.current
+    const attsChanged =
+      atts.length !== origAtts.length ||
+      atts.some((x, i) => x.path !== origAtts[i]?.path)
+    if (!attsChanged && newText === originalSplit.trim()) return
+    onEditMessage(newText, atts)
   }
   const finalDurationMs = useMemo(
     () => (m.role === 'assistant' ? assistantTurnDurationMs(telemetryRows, m.created_at) : null),
@@ -925,14 +1083,24 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
     : null
 
   return (
-    <div className={cn(chatMsgRow, 'group', m.role === 'user' ? chatMsgRowUser : chatMsgRowAssistant)}>
+    <div
+      className={cn(chatMsgRow, 'group', m.role === 'user' ? chatMsgRowUser : chatMsgRowAssistant)}
+      onDragEnter={onEditBubbleDragEnter}
+      onDragOver={onEditBubbleDragOver}
+      onDragLeave={onEditBubbleDragLeave}
+      onDrop={onEditBubbleDrop}
+    >
       <div
+        id={editing && m.role === 'user' ? 'sylo-message-edit-box' : undefined}
         className={cn(
           chatMsgBubble,
           thinkTank ?
             thinkTankSeatBubbleClass(thinkTank.seatId, thinkTank.seatLabel, thinkTank.seatAgent)
           : m.role === 'user' ? chatMsgUser
           : chatMsgAssistant,
+          canEditDrag && 'w-full',
+          canEditDrag && editDragOver &&
+            'outline outline-2 outline-[rgb(255_255_255/0.35)] outline-offset-[-2px]',
         )}
       >
         <div className={chatMsgHead}>
@@ -1031,9 +1199,9 @@ Original:\n${m.original_text}`
               <textarea
                 value={editDraft}
                 autoFocus
-                rows={Math.min(12, Math.max(3, editDraft.split('\n').length))}
+                rows={Math.min(14, Math.max(4, editDraft.split('\n').length))}
                 spellCheck={false}
-                className={chatQueueEdit}
+                className={cn(chatQueueEdit, 'w-full resize-y')}
                 onChange={(e) => setEditDraft(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Escape' && !e.nativeEvent.isComposing) {
@@ -1045,6 +1213,44 @@ Original:\n${m.original_text}`
                   }
                 }}
               />
+              {editingAtts.length > 0 ?
+                <div className={cn(chatAttachmentStrip, 'justify-end px-0 pb-0 pt-2')}>
+                  {editingAtts.map((a) => (
+                    <span
+                      key={a.path}
+                      className={cn(
+                        chatAttachmentChip,
+                        isImageAttachmentPath(a.name, a.path) && chatAttachmentChipImage,
+                      )}
+                      title={a.path}
+                    >
+                      {isImageAttachmentPath(a.name, a.path) ?
+                        <AttachmentImageThumb
+                          path={a.path}
+                          name={a.name}
+                          className="size-10"
+                          fallbackClassName={chatAttachmentChipGlyph}
+                        />
+                      : <span className={chatAttachmentChipGlyph} aria-hidden="true">◇</span>}
+                      <span className={chatAttachmentChipName}>{a.name}</span>
+                      <button
+                        type="button"
+                        className={chatAttachmentChipRemove}
+                        aria-label={`Remove ${a.name}`}
+                        onClick={() => setEditingAtts((prev) => prev.filter((x) => x.path !== a.path))}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              : <div className={cn(chatAttachmentStrip, 'justify-end px-0 pb-0 pt-2')}>
+                  <span
+                    className={cn(chatQueueAttachBadge, 'border border-dashed border-border text-[0.72rem]')}
+                  >
+                    Drop files here to attach
+                  </span>
+                </div>}
               <div className="mt-1.5 flex items-center gap-2">
                 <button type="button" className={chatQueueEditBtn} onClick={saveEdit} title="Save & resend — rewinds the conversation after this message and reruns the turn (Ctrl/Cmd+Enter)">
                   Save & resend
@@ -1052,11 +1258,6 @@ Original:\n${m.original_text}`
                 <button type="button" className={chatQueueEditBtn} onClick={cancelEdit} title="Discard the edit (Esc)">
                   Cancel
                 </button>
-                {editingAtts.length > 0 ?
-                  <span className={cn(mutedText, 'truncate text-[0.72rem]')} title={editingAtts.map((a) => a.path).join('\n')}>
-                    {editingAtts.length} attachment{editingAtts.length === 1 ? '' : 's'} kept
-                  </span>
-                : null}
               </div>
             </>
           : showTyping ?
@@ -1087,7 +1288,7 @@ Original:\n${m.original_text}`
         {m.role === 'assistant' && turnChanges &&
          (turnChanges.modified.length + turnChanges.added.length + turnChanges.deleted.length > 0) ?
           <div className="mt-1 flex flex-wrap items-center gap-2 rounded-md border border-border px-2 py-1 text-[0.72rem]">
-            <span className={cn(mutedText, 'whitespace-nowrap')} title="Files this turn changed (checkpoint manifest diff — Undo restores all of them)">
+            <span className={cn(mutedText, 'min-w-0 whitespace-nowrap')} title="Files this turn changed (checkpoint manifest diff — hover Undo on the reply restores the workspace to before it)">
               <span className="text-[#e2c08d]">{turnChanges.modified.length} modified</span>
               {' · '}
               <span className="text-[#9ece6a]">{turnChanges.added.length} added</span>
@@ -1097,44 +1298,13 @@ Original:\n${m.original_text}`
             {onReviewDiff ?
               <button
                 type="button"
-                className={chatQueueEditBtn}
-                title="Open the read-only before/after diff (canvas pane)"
+                className={cn(chatQueueEditBtn, 'ml-auto')}
+                title="Open the read-only before/after diff (canvas pane) — every changed file, side by side"
                 onClick={() => onReviewDiff()}
               >
                 Review diff
               </button>
             : null}
-            {canUndoTurn && onUndoTurn ?
-              <button
-                type="button"
-                className={chatQueueEditBtn}
-                title="Restore the workspace to before this turn (same as hover Undo — safety-captured first)"
-                onClick={() => onUndoTurn?.()}
-              >
-                Undo
-              </button>
-            : null}
-            <details className="min-w-0">
-              <summary className={cn(mutedText, 'cursor-pointer select-none')} title="Files changed by this turn">
-                files
-              </summary>
-              <div className="mt-1 flex flex-col gap-0.5 font-mono text-[0.7rem]">
-                {[
-                  ...turnChanges.modified.map((rel) => ({ rel, cls: 'text-[#e2c08d]' })),
-                  ...turnChanges.added.map((rel) => ({ rel, cls: 'text-[#9ece6a]' })),
-                  ...turnChanges.deleted.map((rel) => ({ rel, cls: 'text-[#f6b3a4]' })),
-                ]
-                  .slice(0, 12)
-                  .map(({ rel, cls }) => (
-                    <span key={rel} className={cn('break-all', cls)}>{rel}</span>
-                  ))}
-                {turnChanges.modified.length + turnChanges.added.length + turnChanges.deleted.length > 12 ?
-                  <span className={mutedText}>
-                    +{turnChanges.modified.length + turnChanges.added.length + turnChanges.deleted.length - 12} more
-                  </span>
-                : null}
-              </div>
-            </details>
           </div>
         : null}
         {planApprovable && onApprovePlan ?

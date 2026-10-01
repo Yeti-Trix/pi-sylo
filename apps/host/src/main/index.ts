@@ -35,7 +35,13 @@ import {
   turnChangesForConversation,
 } from './checkpoint-store.js'
 import { writeTerminalBridge, terminalBridgeFile } from './terminal-bridge.js'
-import { formatCompactionNoticeContent, type CompactionReason } from '../shared/compaction-notice.js'
+import {
+  formatCompactionNoticeContent,
+  parseCompactionNoticeContent,
+  isCompactionNoticeInProgress,
+  type CompactionNoticePayload,
+  type CompactionReason,
+} from '../shared/compaction-notice.js'
 import { PLAN_MODE_NOTICE, PLAN_MODE_PI_BUILTIN_TOOLS, planModePrefKey } from '../shared/plan-mode.js'
 import { execFile } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -1630,6 +1636,12 @@ type PendingTurn = {
   toolJsonChars: number
   /** Debounced timer ID for the next tool telemetry batch flush (null = none). */
   toolFlushTimer: ReturnType<typeof setTimeout> | null
+  /**
+   * The persisted "compaction in progress" banner row while this turn's Pi session is
+   * compacting (set on compaction_start, cleared when compaction_end settles it). The
+   * turn's cleanup morphs it to cancelled if the turn dies without a compaction_end.
+   */
+  compactionNoticeId?: string | null
 }
 
 const pendingTurns = new Map<string, PendingTurn>()
@@ -1820,6 +1832,9 @@ function finalizePendingTurn(
   } else if (!pending.aborted) {
     db.updateMessageContent(pending.assistantId, pending.chunks || '', 'complete')
   }
+  // Turn died without a compaction_end (Stop mid-compaction, abrupt exit): the
+  // in-progress banner would stay live forever — settle it as cancelled.
+  cancelCompactionNotices(pending.convId)
   dropPendingTurn(turnId)
   if (status === 'cancelled') {
     cancelPendingAskQuestions({
@@ -2103,6 +2118,8 @@ function finalizeOrphanStreamingAssistants(conversationId: string): void {
       'complete',
     )
   }
+  // Orphaned "compaction in progress" banners belong to dead turns/compactors.
+  cancelCompactionNotices(conversationId)
 }
 
 const conversationChatOpTails = new Map<string, Promise<unknown>>()
@@ -2702,6 +2719,8 @@ function effectiveModelForConversation(convId: string): {
   thinkingLevel: string | null
   /** Serialized per-agent subagent pins (global pins + this chat's overrides). */
   subagentModelsByAgent: string
+  /** Persona discovery scope: whether this workspace's folder personas are trusted. */
+  subagentAgentScope: 'user' | 'both'
 } {
   const conv = db.getConversation(convId)
   const gProvider = (db.getPref('sylo.model_provider', SYLO_DEFAULT_MODEL_PROVIDER) as string).trim()
@@ -2733,6 +2752,7 @@ function effectiveModelForConversation(convId: string): {
     imageModelProvider,
     thinkingLevel,
     subagentModelsByAgent: subagentModelsForConversation(convId),
+    subagentAgentScope: 'both', // persona availability is decided by the UI itself (v3.1)
   }
 }
 
@@ -2743,9 +2763,11 @@ function effectiveModelForConversation(convId: string): {
  */
 function subagentModelsForConversation(convId: string | undefined): string {
   const globalPins = parseSubagentPins(db.getPref('sylo.subagents.model_by_agent', ''))
-  const chatPins =
-    convId ? parseSubagentPins(db.getConversation(convId)?.subagent_models_json) : {}
-  return serializeSubagentPins(mergeSubagentPins(globalPins, chatPins))
+  const workspaceId = convId ? db.getConversation(convId)?.workspace_id : undefined
+  const workspacePins = workspaceId ? db.getWorkspaceSubagentPins(workspaceId) : {}
+  // Two layers: this workspace's pin wins, else the Global SubAgents pin. Per-chat pins
+  // were removed (v3.1) — the workspace tier is the only override operators set.
+  return serializeSubagentPins(mergeSubagentPins(globalPins, workspacePins))
 }
 
 /** Fingerprint so a model change forces a broker switchSession even if the session path is unchanged. */
@@ -2756,8 +2778,9 @@ function modelFingerprint(m: {
   imageModelProvider: string
   thinkingLevel: string | null
   subagentModelsByAgent: string
+  subagentAgentScope: 'user' | 'both'
 }): string {
-  return `${m.provider}\0${m.modelId}\0${m.imageModelId}\0${m.imageModelProvider}\0${m.thinkingLevel ?? ''}\0${m.subagentModelsByAgent}`
+  return `${m.provider}\0${m.modelId}\0${m.imageModelId}\0${m.imageModelProvider}\0${m.thinkingLevel ?? ''}\0${m.subagentModelsByAgent}\0${m.subagentAgentScope}`
 }
 
 async function ensureBrokerSessionForConversation(
@@ -2865,6 +2888,7 @@ async function ensureBrokerSessionForConversation(
     imageModelProvider: eff.imageModelProvider,
     thinkingLevel: eff.thinkingLevel ?? '',
     subagentModelsByAgent: eff.subagentModelsByAgent,
+    subagentAgentScope: eff.subagentAgentScope,
   })
   if (supervisor === broker) {
     brokerFocusedConversationId = convId
@@ -2886,6 +2910,15 @@ async function ensureBrokerSessionForConversation(
         includesSystemPrompt: brokerContextStatsIncludesSystem,
       })
     }
+  } else if (overflowSlot) {
+    // Overflow slot rebound to a different conversation (reuse for another
+    // chat's turn): keep its binding record fresh so post-turn
+    // context_window_stats stamps (and exact-binding skips) stay accurate.
+    overflowSlot.boundConversationId = convId
+    overflowSlot.boundSessionAbs = sessionAbs
+    overflowSlot.boundSessionCwd = sessionCwd
+    overflowSlot.boundDisabledFp = dfp
+    overflowSlot.boundModelFp = mfp
   }
 }
 
@@ -3033,14 +3066,15 @@ function brokerChatOnlyPref(): boolean {
   return db.getPref('sylo.chat_only', false) as boolean
 }
 
-/** Personas the extension would discover for the active workspace + agent scope. */
+/** Personas the extension discovers for the active workspace: bundled + operator-global + project. */
 function listSubagentAgentsForActiveScope(): ReturnType<typeof listSubagentAgents> {
-  const scope = String(db.getPref('sylo.subagents.agent_scope', 'user') || 'user').trim()
+  // No trust gate — persona availability is decided in the Subagents UI itself (v3.1):
+  // project personas (.pi/agents) list alongside global ones whenever the folder has them.
   return listSubagentAgents({
     bundledDir: join(SYLO_REPO_ROOT, 'packages/sylo-subagents/agents'),
     userAgentsDir: join(hostAgentDir(), 'agents'),
     projectCwd: effectivePiCwdForWorkspace(activeWorkspaceId()),
-    scope: scope === 'both' || scope === 'project' ? scope : 'user',
+    scope: 'both',
   })
 }
 
@@ -3949,6 +3983,8 @@ function persistCompactionChatNotice(
   convId: string,
   ev: Record<string, unknown>,
   beforeAssistantId?: string,
+  /** When set, settle this existing 'in progress' row in place instead of inserting a new notice. */
+  replaceNoticeId?: string,
 ): void {
   const reason = ev.reason
   const compactionReason: CompactionReason =
@@ -3960,6 +3996,8 @@ function persistCompactionChatNotice(
   const tokensAfter = typeof ev.tokensAfter === 'number' ? ev.tokensAfter : undefined
   const hasResult = !aborted && !errorMessage && (summary != null || tokensBefore != null)
   if (!hasResult && !aborted && !errorMessage) return
+  // (Nothing settled: e.g. a compaction_end carrying willRetry — Pi is retrying.
+  // The in-progress banner stays live until the retry or the turn cleanup settles it.)
 
   const content = formatCompactionNoticeContent({
     kind: 'compaction',
@@ -3970,6 +4008,18 @@ function persistCompactionChatNotice(
     aborted: aborted || undefined,
     errorMessage,
   })
+  if (replaceNoticeId) {
+    // Settle the banner IN PLACE (idempotent: only when it is still in-progress,
+    // so late duplicate end events can never rewrite an already-settled card).
+    const row = db.getMessage(replaceNoticeId)
+    const existing =
+      row && row.conversation_id === convId ? parseCompactionNoticeContent(row.content) : null
+    if (existing && isCompactionNoticeInProgress(existing)) {
+      db.updateMessageContent(replaceNoticeId, content, 'complete')
+      emitChatRefresh(convId, 'messages')
+    }
+    return
+  }
   // Backdate the notice to just before the in-flight assistant row: compaction
   // runs before/while the model generates, so the banner belongs between the
   // user message and the assistant response — not rendered after the AI text.
@@ -3983,8 +4033,129 @@ function persistCompactionChatNotice(
   emitChatRefresh(convId, 'messages')
 }
 
+/**
+ * The moment compaction claims a chat (manual "Compact now" or an auto trigger bound
+ * to an in-flight turn), persist a role=system "compaction in progress" row so the
+ * banner is visible in chat — including after switching to another chat and back, the
+ * exact case where only a live stream would leave no trace. Returns the row id so the
+ * finish path can settle the SAME row in place (no duplicate card, no drift) when the
+ * compaction ends.
+ */
+function insertCompactionInProgressNotice(
+  convId: string,
+  reason: CompactionNoticePayload['reason'],
+  beforeAssistantId?: string,
+): string | null {
+  const content = formatCompactionNoticeContent({
+    kind: 'compaction',
+    reason,
+    status: 'in_progress',
+    startedAt: Date.now(),
+  })
+  // Same backdating as the settled notice: when compaction runs mid-turn, the
+  // banner belongs between the user message and the streaming assistant row.
+  let createdAt: number | undefined
+  const assistantCreatedAt = beforeAssistantId ? db.getMessageCreatedAt(beforeAssistantId) : null
+  if (assistantCreatedAt != null) {
+    createdAt = assistantCreatedAt - 1
+    while (db.messageCreatedAtExists(convId, createdAt)) createdAt -= 1
+  }
+  const row = db.insertMessage(convId, 'system', content, 'complete', createdAt)
+  emitChatRefresh(convId, 'messages')
+  return row.id
+}
 
-function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext): void {
+/**
+ * Settle an in-progress compaction row IN PLACE. `payload: null` means the compaction
+ * never actually started (claim raced a busy broker, spawn failed) — delete the row so
+ * the chat shows only the click's inline error, not a phantom banner. Otherwise update
+ * content to the settled payload and keep the original position. Idempotent guard:
+ * settle only when the row is still an in-progress compaction notice (a crash could
+ * land a late compaction_end after a settled success).
+ */
+function settleCompactionNotice(
+  convId: string,
+  noticeId: string | null | undefined,
+  payload: CompactionNoticePayload | null,
+): void {
+  if (!noticeId) return
+  const row = db.getMessage(noticeId)
+  if (!row || row.conversation_id !== convId) return
+  const existing = parseCompactionNoticeContent(row.content)
+  if (!existing || !isCompactionNoticeInProgress(existing)) return
+  if (!payload) {
+    if (db.deleteMessage(noticeId)) emitChatRefresh(convId, 'messages')
+    return
+  }
+  const { status: _drop, startedAt: _drop2, ...rest } = payload
+  db.updateMessageContent(noticeId, formatCompactionNoticeContent(rest), 'complete')
+  emitChatRefresh(convId, 'messages')
+}
+
+/**
+ * Morph every unresolved in-progress compaction row into a "cancelled" notice:
+ * interrupted turns (Stop, broker exit, orphan sweep) and the one-time app-boot sweep
+ * when a compaction outlived its host process. Reuses the stored reason; outcome text
+ * is accurate because an interrupted compaction never wrote a summary.
+ */
+function cancelCompactionNotices(convId?: string): void {
+  const rows = db.listCompactionInProgressRows()
+  for (const row of rows) {
+    if (convId && row.conversation_id !== convId) continue
+    const existing = parseCompactionNoticeContent(row.content)
+    if (!existing) continue
+    db.updateMessageContent(
+      row.id,
+      formatCompactionNoticeContent({
+        kind: 'compaction',
+        reason: existing.reason,
+        aborted: true,
+      }),
+      'complete',
+    )
+    emitChatRefresh(row.conversation_id, 'messages')
+  }
+}
+
+/**
+ * Deferred auto-compact: evaluate the conversation's effective trigger whenever
+ * fresh context tokens arrive (turn end broadcast, override save push) and run the
+ * compaction when the chat is idle and over its trigger. This is the missing half
+ * of the trigger chain — Pi itself only checks at agent end / pre-prompt, so an
+ * override saved on an idle chat (or a trigger the live session never absorbed)
+ * never fired at all. Mid-turn overruns wait for the turn to end (operator ask);
+ * the hard context edge is handled reactively by Pi's overflow recovery.
+ */
+/** Installed by the IPC setup: the compactConversationNow runner (claims, banner,
+ *  settle) — keeps this decision function decoupled from broker wiring. */
+let compactNowRunner: ((convId: string) => Promise<unknown>) | null = null
+
+function maybeAutoCompactForConversation(convId: string | null, actualTokens: number): void {
+  if (!convId || !(actualTokens > 0)) return
+  if (!brokerAgentReady || primaryCompactionInFlight) return
+  if (compactingConversations.has(convId)) return
+  const conv = db.getConversation(convId)
+  if (!conv || conv.archived_at != null) return
+  // Defer while anything is in flight (turn, queued send, retry, compaction).
+  if (findPendingTurnForConversation(convId)) return
+  const supervisor = brokerForConversationActiveTurn(convId) ?? broker
+  if (!supervisor || supervisorHasInFlightTurn(supervisor)) return
+  const eff = effectiveModelForConversation(convId)
+  if (!eff?.provider || !eff?.modelId) return
+  const cw = readModelContextWindow(hostAgentDir(), eff.provider, eff.modelId) ?? PI_FALLBACK_CONTEXT_WINDOW_TOKENS
+  const overrides = normalizeCompactionOverrides(db.getPref(SYLO_COMPACTION_RESERVE_PREF, {}))
+  const pct = normalizeCompactionOverridePct(overrides[`${eff.provider}:${eff.modelId}`]) ??
+    defaultCompactionTriggerPct(cw)
+  if (!(pct > 0)) return
+  const triggerTokens = Math.floor((pct / 100) * cw)
+  if (actualTokens <= triggerTokens) return
+  if (compactNowRunner) void compactNowRunner(convId).catch(() => undefined)
+}
+
+function handleBrokerOutMessage(
+  msg: BrokerOutMessage,
+  ctx: BrokerMessageContext,
+): void {
   if (ctx.isStale()) return
     if (msg.type === 'show_widget') {
     mainWindow?.webContents.send('skill-surface:show-widget', {
@@ -4317,6 +4488,28 @@ function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext
         actualMessageTokens: msg.actualMessageTokens,
         includesSystemPrompt: brokerContextStatsIncludesSystem,
       })
+      // Deferred auto-compact: an idle chat over its trigger compacts now; a
+      // busy one waits for the next broadcast (which lands at the turn's end).
+      maybeAutoCompactForConversation(brokerContextStatsConvId, msg.actualMessageTokens)
+      return
+    }
+    // Temporary overflow brokers (extra agent for one chat while the primary is
+    // busy, or the dedicated "Compact now" broker) report the context of the
+    // conversation they are bound to. These broadcasts were discarded entirely,
+    // so any chat served by an overflow broker kept a stale footer counter —
+    // the renderer then showed its inflated full-history estimate instead of
+    // the real post-compaction reading.
+    const boundConv = ctx.overflowSlot?.boundConversationId
+    if (boundConv) {
+      brokerActualMessageTokens = msg.actualMessageTokens
+      brokerContextStatsConvId = boundConv
+      brokerContextStatsIncludesSystem = msg.includesSystemPrompt === true
+      mainWindow?.webContents.send('broker:context-window-stats', {
+        conversationId: boundConv,
+        actualMessageTokens: msg.actualMessageTokens,
+        includesSystemPrompt: brokerContextStatsIncludesSystem,
+      })
+      maybeAutoCompactForConversation(boundConv, msg.actualMessageTokens)
     }
     return
   }
@@ -4475,8 +4668,26 @@ function handleBrokerOutMessage(msg: BrokerOutMessage, ctx: BrokerMessageContext
       }
       mainWindow?.webContents.send('chat:tool', toolPayload)
       emitCompanionEvent({ channel: 'chat:tool', payload: toolPayload })
+      if (ev.type === 'compaction_start' && !pending.compactionNoticeId) {
+        // Auto-trigger: persist the "compaction in progress" banner now so it also
+        // shows if the operator switches chats and back while Pi is summarizing.
+        const p = ev as { reason?: unknown }
+        const reason: CompactionNoticePayload['reason'] =
+          p.reason === 'manual' || p.reason === 'overflow' || p.reason === 'threshold' ? p.reason : 'threshold'
+        pending.compactionNoticeId = insertCompactionInProgressNotice(
+          pending.convId,
+          reason,
+          pending.assistantId,
+        )
+      }
       if (ev.type === 'compaction_end') {
-        persistCompactionChatNotice(pending.convId, ev as Record<string, unknown>, pending.assistantId)
+        persistCompactionChatNotice(
+          pending.convId,
+          ev as Record<string, unknown>,
+          pending.assistantId,
+          pending.compactionNoticeId ?? undefined,
+        )
+        pending.compactionNoticeId = null
       }
     }
   }
@@ -4500,6 +4711,7 @@ function buildBrokerSupervisorOptions(
     imageModelProvider: (db.getPref('sylo.image_model_provider', 'ollama') as string).trim(),
     thinkingLevel: null,
     subagentModelsByAgent: subagentModelsForConversation(undefined),
+    subagentAgentScope: 'both' as 'user' | 'both',
   }
   const modelId = eff.modelId
   const modelProvider = eff.provider
@@ -4519,6 +4731,7 @@ function buildBrokerSupervisorOptions(
     compactionReserveTokens: compactionReserveTokensForModel(modelProvider, modelId),
     thinkingLevel: eff.thinkingLevel ?? '',
     subagentModelsByAgent: eff.subagentModelsByAgent,
+    subagentAgentScope: eff.subagentAgentScope,
     disabledSkillPaths: initialBind.mergedDisabled.skillPaths,
     disabledExtensionPaths: initialBind.mergedDisabled.extensionPaths,
     disabledTools: initialBind.mergedDisabled.disabledTools,
@@ -5148,31 +5361,50 @@ function registerIpc(): void {
   ipcMain.handle('conversations:getSubagentModels', (_e, id: unknown) => {
     const cid = typeof id === 'string' ? id.trim() : ''
     if (!cid) return null
+    const workspaceId = db.getConversation(cid)?.workspace_id ?? activeWorkspaceId()
+    const wsRow = db.listWorkspaces().find((w) => w.id === workspaceId)
     return {
-      /** This chat's own pins only — the modal shows inherit for everything else. */
-      chat: parseSubagentPins(db.getConversation(cid)?.subagent_models_json),
-      /** Settings → Subagents pins, so the modal can name what inherit resolves to. */
+      /** Global SubAgents Settings pins, so each dropdown can name what inherit resolves to. */
       global: parseSubagentPins(db.getPref('sylo.subagents.model_by_agent', '')),
-      allThinking: String(db.getPref('sylo.subagents.thinking_level', '') || '').trim(),
+      /** This folder's own pins (workspace tier — the only tier the modal saves). */
+      workspace: db.getWorkspaceSubagentPins(workspaceId),
+      workspaceId,
+      workspaceLabel: wsRow?.name ?? workspaceId,
       chatThinking: effectiveModelForConversation(cid).thinkingLevel,
     }
   })
-  ipcMain.handle('conversations:setSubagentModels', async (_e, id: unknown, pins: unknown) => {
-    const cid = typeof id === 'string' ? id.trim() : ''
-    if (!cid) return { ok: false as const, error: 'missing_id' }
-    const cleaned = parseSubagentPins(typeof pins === 'string' ? pins : JSON.stringify(pins ?? {}))
-    db.setConversationSubagentModels(
-      cid,
-      Object.keys(cleaned).length > 0 ? JSON.stringify(cleaned) : null,
-    )
-    // Republish to the broker now when this chat is focused and idle; otherwise the
-    // model fingerprint carries it into the next switchSession.
-    try {
-      await ensureBrokerSessionForConversation(cid, { phase: 'ui-focus' })
-    } catch {
-      /* broker not ready — persisted; applies on next focus/turn */
+  // Workspace subagent settings (v3.1): per-folder persona pins, saved from the chat
+  // Subagents modal — the only override tier besides Global SubAgents Settings.
+  ipcMain.handle('workspaces:setSubagentSettings', async (_e, workspaceId: unknown, patch: unknown) => {
+    const wid = typeof workspaceId === 'string' && workspaceId.trim() ? workspaceId.trim() : activeWorkspaceId()
+    const p = (patch ?? {}) as { workspacePins?: unknown }
+    if (p.workspacePins !== undefined) {
+      const cleaned = parseSubagentPins(JSON.stringify(p.workspacePins ?? {}))
+      db.setWorkspaceSubagentPins(wid, serializeSubagentPins(cleaned))
+      // The focused chat of this workspace republishes now when idle; other chats carry
+      // the new pins into their next switchSession via the model fingerprint.
+      const focused = brokerFocusedConversationId
+      if (focused && db.getConversation(focused)?.workspace_id === wid) {
+        try {
+          await ensureBrokerSessionForConversation(focused, { phase: 'ui-focus' })
+        } catch {
+          /* broker not ready — persisted; applies on next focus/turn */
+        }
+      }
     }
     return { ok: true as const }
+  })
+
+  ipcMain.handle('tasks:agentsGlobal', (_e) => {
+    // Global-only persona list for Settings → Subagents: bundled + operator-global agents/
+    // directory. Project personas never appear here — they are trusted + pinned per folder
+    // from the chat Subagents modal (v3 split).
+    return listSubagentAgents({
+      bundledDir: join(SYLO_REPO_ROOT, 'packages/sylo-subagents/agents'),
+      userAgentsDir: join(hostAgentDir(), 'agents'),
+      projectCwd: '',
+      scope: 'user',
+    })
   })
 
   /** Thinking levels Pi supports for a concrete provider/model (empty target → fallback list flag). */
@@ -5553,9 +5785,10 @@ function registerIpc(): void {
   ipcMain.handle('checkpoints:list', (_e, conversationId: string) => {
     if (typeof conversationId !== 'string' || !conversationId.trim()) return []
     // Per-turn change stats (tasks 07/13): computed from stored manifests
-    // (hash-diffed against the previous turn) — never against current disk,
-    // so panel/card opens stay cheap; preview/restore diff live state only
-    // when invoked.
+    // (hash-diffed against the NEXT kept manifest — turn N's pre-tree vs the
+    // tree right after it; the newest turn diffs against the live workspace
+    // via previewRestore), so panel/card opens stay cheap; preview/restore
+    // diff live state only when invoked.
     const cid = conversationId.trim()
     const changes = turnChangesForConversation(cid)
     return listCheckpointsForConversation(cid).map((e) => ({
@@ -6337,11 +6570,19 @@ function registerIpc(): void {
     })
     if (!result.ok) return result
     // A pin for a persona that no longer exists would keep shipping a dead
-    // entry in SYLO_SUBAGENTS_MODEL_BY_AGENT on every broker fork.
+    // entry in SYLO_SUBAGENTS_MODEL_BY_AGENT on every broker fork. Same for
+    // the per-workspace pin maps (v3 split).
     const pins = parseSubagentPins(db.getPref('sylo.subagents.model_by_agent', ''))
     if (pins[agentName]) {
       delete pins[agentName]
       db.setPref('sylo.subagents.model_by_agent', serializeSubagentPins(pins))
+    }
+    for (const ws of db.listWorkspaces()) {
+      const wsPins = db.getWorkspaceSubagentPins(ws.id)
+      if (wsPins[agentName]) {
+        delete wsPins[agentName]
+        db.setWorkspaceSubagentPins(ws.id, serializeSubagentPins(wsPins))
+      }
     }
     return result
   })
@@ -7362,6 +7603,36 @@ function registerIpc(): void {
   })
 
   /**
+   * Settle the manual compaction's in-progress banner based on its result: success
+   * keeps the row and writes the result payload; a genuine Pi-side failure keeps the
+   * row as a "compaction failed" card (same as auto-compaction's persisted errors).
+   * Pre-start failures (busy broker, spawn refused) are settled by the handler by
+   * deleting the row instead — no compaction ever ran.
+   */
+  const settleManualCompactionResult = (
+    convId: string,
+    noticeId: string | null,
+    r: { ok: boolean; summary?: string; tokensBefore?: number; tokensAfter?: number; error?: string },
+  ): void => {
+    if (!noticeId) return
+    if (r.ok) {
+      settleCompactionNotice(convId, noticeId, {
+        kind: 'compaction',
+        reason: 'manual',
+        summary: r.summary,
+        tokensBefore: r.tokensBefore,
+        tokensAfter: r.tokensAfter,
+      })
+      return
+    }
+    settleCompactionNotice(convId, noticeId, {
+      kind: 'compaction',
+      reason: 'manual',
+      errorMessage: r.error || 'Compaction failed',
+    })
+  }
+
+  /**
    * "Compact now" while the primary broker is bound to another conversation (usually a
    * mid-turn chat elsewhere). With concurrent turns on, spawn a dedicated overflow broker
    * bound to THIS conversation, compact on it, then kill it — a streaming chat elsewhere
@@ -7392,14 +7663,6 @@ function registerIpc(): void {
         overflowSlot: slot,
       })
       const result = await spawned.compactNow()
-      if (result.ok) {
-        persistCompactionChatNotice(convId, {
-          reason: 'manual',
-          summary: result.summary,
-          tokensBefore: result.tokensBefore,
-          tokensAfter: result.tokensAfter,
-        })
-      }
       return result
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) }
@@ -7421,15 +7684,6 @@ function registerIpc(): void {
     primaryCompactionInFlight = true
     try {
       const r = await broker!.compactNow()
-      if (r.ok) {
-        // Same timeline notice auto-compaction produces, with the manual trigger label.
-        persistCompactionChatNotice(convId, {
-          reason: 'manual',
-          summary: r.summary,
-          tokensBefore: r.tokensBefore,
-          tokensAfter: r.tokensAfter,
-        })
-      }
       return r
     } finally {
       primaryCompactionInFlight = false
@@ -7440,9 +7694,14 @@ function registerIpc(): void {
   // Operator "Compact now" (chat footer): manually compact the active conversation's
   // context. The renderer disables the button while this chat's turn is streaming; the
   // host re-checks so a stale click can never abort an in-flight turn.
-  ipcMain.handle('broker:compactNow', async (_e, conversationId: unknown) => {
-    const id = typeof conversationId === 'string' ? conversationId.trim() : ''
-    if (!id) return { ok: false as const, error: 'missing_conversation_id' }
+  // Extracted from the IPC wrapper so the deferred auto-compact evaluation (which
+  // fires when fresh context_window_stats show an idle chat over its trigger) runs
+  // the exact same claim / banner / settle path as the button.
+  const compactConversationNow = async (
+    id: string,
+  ): Promise<
+    { ok: true; summary?: string; tokensBefore?: number; tokensAfter?: number } | { ok: false; error: string }
+  > => {
     if (!broker || !isSupervisorReady(broker)) {
       return { ok: false as const, error: 'broker_not_ready' }
     }
@@ -7456,6 +7715,12 @@ function registerIpc(): void {
       return { ok: false as const, error: 'compaction_in_progress' }
     }
     compactingConversations.add(id)
+    // Persistent "compaction in progress" banner: written the instant the claim
+    // lands, so the status is visible in chat and survives switching to another
+    // chat and back (previously there was nothing until the final notice). The
+    // settle is guarded on the row still being in-progress, so success/failure/
+    // cleanup paths can run in any order without double-writing.
+    const noticeId = insertCompactionInProgressNotice(id, 'manual')
     try {
       // While a manual compaction streams through the primary, don't touch the
       // primary at all (Pi's session.compact() aborts in-flight operations).
@@ -7464,7 +7729,9 @@ function registerIpc(): void {
         brokerFocusedConversationId === id &&
         !supervisorHasInFlightTurn(broker)
       ) {
-        return await compactOnPrimary(id)
+        const r = await compactOnPrimary(id)
+        settleManualCompactionResult(id, noticeId, r)
+        return r
       }
       // Primary is bound elsewhere (or mid-turn / mid-compaction there). A ui-focus
       // switch must not disturb work in flight, so this only rebinds when idle.
@@ -7475,22 +7742,46 @@ function registerIpc(): void {
           /* fall through — the binding check below decides */
         }
         if (brokerFocusedConversationId === id && !supervisorHasInFlightTurn(broker)) {
-          return await compactOnPrimary(id)
+          const r = await compactOnPrimary(id)
+          settleManualCompactionResult(id, noticeId, r)
+          return r
         }
       }
       // Concurrent turns on: run the compaction on a dedicated overflow broker so a
       // mid-turn chat elsewhere never blocks "Compact now".
       if (concurrentTurnsEnabled()) {
-        return await compactViaOverflowBroker(id)
+        const r = await compactViaOverflowBroker(id)
+        if (!r.ok && r.error === 'overflow_broker_unavailable') {
+          // Spawn failed — no compaction ran; drop the banner (the click's inline
+          // error explains) instead of a phantom "compaction failed" card.
+          settleCompactionNotice(id, noticeId, null)
+        } else {
+          settleManualCompactionResult(id, noticeId, r)
+        }
+        return r
       }
-      // Single-broker mode: only one agent exists and it is busy elsewhere.
+      // Single-broker mode: only one agent exists and it is busy elsewhere. No
+      // compaction ran — drop the banner; the footer error explains.
+      settleCompactionNotice(id, noticeId, null)
       return { ok: false as const, error: 'broker_busy' }
+    } catch (e) {
+      // Unexpected throw after the claim: nothing was compacted; drop the banner.
+      settleCompactionNotice(id, noticeId, null)
+      throw e
     } finally {
       compactingConversations.delete(id)
       // Compaction done → any turn deferred for this conversation can start now.
       void flushDeferredTurns()
     }
+  }
+
+  ipcMain.handle('broker:compactNow', (_e, conversationId: unknown) => {
+    const id = typeof conversationId === 'string' ? conversationId.trim() : ''
+    if (!id) return Promise.resolve({ ok: false as const, error: 'missing_conversation_id' })
+    return compactConversationNow(id)
   })
+  // Let the deferred auto-compact evaluation drive the same claim/banner/settle path.
+  compactNowRunner = (convId: string) => compactConversationNow(convId)
 
     ipcMain.handle('broker:status:get', () => {
     const modelInput =
@@ -8960,6 +9251,10 @@ app.whenReady().then(() => {
   registerSkillSurfaceProtocol()
   registerExternalLinkRouting()
   db.openDatabase(app.getPath('userData'), SYLO_REPO_ROOT)
+  // Brokers are child processes of THIS host — any 'compaction in progress' banner
+  // in the database at boot outlived its process (crash/kill mid-compaction) and
+  // can never settle. Morph them to cancelled before any session resumes.
+  cancelCompactionNotices()
   bindGithubPrefStore({
     get: (key, fallback) => db.getPref(key, fallback),
     set: (key, value) => db.setPref(key, value),

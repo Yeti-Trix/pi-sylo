@@ -16,6 +16,7 @@ import { PLAN_MODE_NOTICE, planModePrefKey } from '../../shared/plan-mode.js'
 import { forwardDroppedFiles } from './chat/chatDropBus'
 import { ChatPlanGoalsBar } from './chat/ChatPlanGoalsBar'
 import { ChatModelBar } from './chat/ChatModelBar'
+import { CompactControl } from './chat/CompactControl'
 import { LiveElapsedLabel } from './chat/LiveElapsedLabel'
 import {
   ChatTimelineList,
@@ -40,6 +41,10 @@ import {
   SYLO_MAX_CONCURRENT_TURNS_PREF,
 } from '../../shared/concurrent-turns'
 import type { AppUpdateStatus } from '../../shared/app-update-types'
+import {
+  formatCompactionNoticeContent,
+  parseCompactionNoticeContent,
+} from '../../shared/compaction-notice.js'
 import { SettingsPanel } from './panels/SettingsPanel'
 import { normalizeOllamaOriginUi } from './panels/ollama-ui'
 import { CHATGPT_CODEX_MODELS } from '../../shared/chatgpt-codex'
@@ -700,12 +705,25 @@ export function App(): React.ReactElement {
   activeIdRef.current = activeId
   /** Monotonic token for refreshMessages: only the newest fetch for the still-active conversation may paint. */
   const messagesRefreshGenRef = useRef(0)
+  /** Monotonic token for refreshConversations: only the newest run may paint its list — beats
+   *  the cross-workspace adoption race where an in-flight refresh for the OLD workspace resolves
+   *  after a switch and yanks the active chat to its saved/first row ("jumped me into another
+   *  folder and opened a chat"). */
+  const convsRefreshGenRef = useRef(0)
   const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([])
   const [dragWsId, setDragWsId] = useState<string | null>(null)
   const [dropHint, setDropHint] = useState<WorkspaceDropHint | null>(null)
   const dragWsIdRef = useRef<string | null>(null)
   const suppressWsToggleRef = useRef(false)
   const [sidebarWorkspaceId, setSidebarWorkspaceId] = useState<string>('')
+  /** Peek mode (Cursor-style): expanding a non-active workspace section just OPENS it to show
+   *  that workspace's chats — expanding never switches the app. The old expand-to-switch was
+   *  the root of "a grab that never became a drag took me to another project folder." The
+   *  switch lives on deliberate gestures inside the peeked section: clicking one of its chats,
+   *  or its + button. The global `conversations` state only tracks the ACTIVE workspace, so
+   *  peeked sections fetch their own rows lazily each time they open. */
+  const [peekConvsByWs, setPeekConvsByWs] = useState<Record<string, Conv[]>>({})
+  const [peekOpenWs, setPeekOpenWs] = useState<Set<string>>(() => new Set())
   /** Sidebar chat-search filter (title substring within the active workspace). */
   const [convSearch, setConvSearch] = useState('')
   /** Whether the active workspace's chat section is expanded (others always collapsed). */
@@ -1030,6 +1048,9 @@ export function App(): React.ReactElement {
   const activeThinkTankSessionViews = activeId ?
     (thinkTankSessionsByConv[activeId] ?? EMPTY_THINK_TANK_SESSION_VIEWS)
   : EMPTY_THINK_TANK_SESSION_VIEWS
+  const [compactNowBusyId, setCompactNowBusyId] = useState<string | null>(null)
+  /** Wall-clock moment the current manual compaction was requested (optimistic card). */
+  const [compactNowTs, setCompactNowTs] = useState(0)
   const chatTimeline = useMemo(() => {
     const base = buildChatTimeline({
       messages,
@@ -1041,27 +1062,67 @@ export function App(): React.ReactElement {
     // `optimisticUserByConv`). Superseded rows are pruned by refreshMessages;
     // also guard here for renders before the next refresh lands.
     const op = activeId ? optimisticUserByConv[activeId] : undefined
-    if (!op) return base
-    const superseded = messages.some(
-      (m) => m.role === 'user' && m.created_at >= op.ts - 2000,
-    )
-    if (superseded || Date.now() - op.ts > OPTIMISTIC_SEND_GRACE_MS) return base
-    return [
-      ...base,
-      {
-        kind: 'message' as const,
-        key: `optimistic-user-${op.ts}`,
-        message: {
-          id: `optimistic-user-${op.ts}`,
-          role: 'user' as const,
-          content: op.text,
-          tool_calls_json: null,
-          status: 'complete' as const,
-          created_at: op.ts,
-          conversation_id: activeId,
-        },
-      },
-    ]
+    let rows = base
+    if (op) {
+      const superseded = messages.some(
+        (m) => m.role === 'user' && m.created_at >= op.ts - 2000,
+      )
+      if (!(superseded || Date.now() - op.ts > OPTIMISTIC_SEND_GRACE_MS)) {
+        rows = [
+          ...rows,
+          {
+            kind: 'message' as const,
+            key: `optimistic-user-${op.ts}`,
+            message: {
+              id: `optimistic-user-${op.ts}`,
+              role: 'user' as const,
+              content: op.text,
+              tool_calls_json: null,
+              status: 'complete' as const,
+              created_at: op.ts,
+              conversation_id: activeId,
+            },
+          },
+        ]
+      }
+    }
+    // Optimistic "Compacting…" card while a manual compaction runs: pops the
+    // instant the operator clicks so the status is evident in chat (not just
+    // on the busy button). The host's persisted in-progress row replaces it
+    // via the chat refresh it emits at insert; the settle path updates that
+    // row in place, so the same card later shows the result.
+    if (activeId != null && compactNowBusyId === activeId && compactNowTs > 0) {
+      const realRowLanded = messages.some(
+        (m) =>
+          m.role === 'system' &&
+          m.created_at >= compactNowTs - 1000 &&
+          parseCompactionNoticeContent(m.content ?? '') != null,
+      )
+      if (!realRowLanded) {
+        rows = [
+          ...rows,
+          {
+            kind: 'message' as const,
+            key: `optimistic-compaction-${compactNowTs}`,
+            message: {
+              id: `optimistic-compaction-${compactNowTs}`,
+              role: 'system' as const,
+              content: formatCompactionNoticeContent({
+                kind: 'compaction',
+                reason: 'manual',
+                status: 'in_progress',
+                startedAt: compactNowTs,
+              }),
+              tool_calls_json: null,
+              status: 'complete' as const,
+              created_at: compactNowTs,
+              conversation_id: activeId,
+            },
+          },
+        ]
+      }
+    }
+    return rows
   }, [
     messages,
     activeThinkTankBubbles,
@@ -1069,6 +1130,8 @@ export function App(): React.ReactElement {
     activeThinkTankSession,
     activeId,
     optimisticUserByConv,
+    compactNowBusyId,
+    compactNowTs,
   ])
   const [brokerInitError, setBrokerInitError] = useState<string | null>(null)
   /** Model Pi bound to the session (from broker), not Sylo prefs. */
@@ -1083,8 +1146,6 @@ export function App(): React.ReactElement {
     sections: { label: string; chars: number; tokens: number; pct: number }[]
   } | null>(null)
   const [systemPromptStatsOpen, setSystemPromptStatsOpen] = useState(false)
-  /** "Compact now" (chat footer): conversation id with a manual compaction in flight. */
-  const [compactNowBusyId, setCompactNowBusyId] = useState<string | null>(null)
   // ── Composer quick commands (tasks 09/10): /clear modal + /model flash ──
   const [clearChatModal, setClearChatModal] = useState<{ id: string; title: string } | null>(null)
   const [modelBarFlash, setModelBarFlash] = useState(false)
@@ -1118,7 +1179,6 @@ export function App(): React.ReactElement {
     const sysTokens = systemPromptStats?.totalTokens ?? 0
     let userTokens = 0
     let assistantTokens = 0
-    let toolTokens = 0
     // Live streaming deltas for THIS conversation only — other chats' buffers
     // must not inflate the visible counter.
     let liveActive = 0
@@ -1128,9 +1188,6 @@ export function App(): React.ReactElement {
         userTokens += Math.ceil(contentLen / 4)
       } else if (m.role === 'assistant') {
         assistantTokens += Math.ceil(contentLen / 4)
-        if (m.tool_calls_json) {
-          try { toolTokens += Math.ceil(m.tool_calls_json.length / 4) } catch { /* ignore */ }
-        }
         // Add live streaming delta for in-flight assistant messages
         const live = liveDelta[m.id]
         if (live) {
@@ -1142,7 +1199,14 @@ export function App(): React.ReactElement {
         assistantTokens += Math.ceil(contentLen / 4)
       }
     }
-    const total = sysTokens + userTokens + assistantTokens + toolTokens
+    // NOTE: `tool_calls_json` is deliberately NOT counted here. It stores the
+    // agent-timeline telemetry (agent_start/agent_end/turn/tool events with
+    // full thinking text and duplicated deltas) that powers the collapsible
+    // workflow UI — megabytes of display payload that never approximates the
+    // model's context. Counting it made the no-usage fallback claim a million
+    // tokens for a ~50k-token chat. The accurate number comes from broker
+    // usage broadcasts (actualTokens); this estimate is only the fallback.
+    const total = sysTokens + userTokens + assistantTokens
     // Actual context from broker (reflects Pi compaction) — keyed per
     // conversation so a stale entry from another chat never shows here.
     // usage-based broker totals already include the system prompt; the estimate
@@ -1157,7 +1221,6 @@ export function App(): React.ReactElement {
       { label: 'System prompt', tokens: sysTokens },
       { label: 'User messages', tokens: userTokens },
       { label: 'Assistant text', tokens: assistantTokens },
-      { label: 'Tool calls + results', tokens: toolTokens },
     ].map((s) => ({ ...s, pct: total > 0 ? Math.round((s.tokens / total) * 1000) / 10 : 0 }))
     return { totalTokens: total, actualTokens, sections }
   }, [messages, systemPromptStats, liveDelta, actualContextByConv, activeId])
@@ -1167,6 +1230,7 @@ export function App(): React.ReactElement {
     if (compactNowBusyId !== null) return
     setCompactNowError(null)
     setCompactNowBusyId(conversationId)
+    setCompactNowTs(Date.now())
     try {
       const r = await window.sylo.broker.compactNow(conversationId)
       if (!r.ok) setCompactNowError(compactNowErrorText(r.error))
@@ -1174,6 +1238,7 @@ export function App(): React.ReactElement {
       setCompactNowError(e instanceof Error ? e.message : String(e))
     } finally {
       setCompactNowBusyId((cur) => (cur === conversationId ? null : cur))
+      setCompactNowTs(0)
       window.setTimeout(() => setCompactNowError((cur) => (cur ? null : cur)), 8000)
     }
   }, [compactNowBusyId])
@@ -1762,10 +1827,17 @@ export function App(): React.ReactElement {
       setArchivedConversations([])
       return
     }
+    // Stale-result guard: an in-flight refresh for the OLD workspace resolving
+    // after a switch must not paint its list (or adopt its saved conversation —
+    // the "jumped me into another folder and opened a chat" class). Bump the
+    // generation and bail when a newer run started.
+    const gen = ++convsRefreshGenRef.current
     let list: Conv[] = (await window.sylo.conversations.list(wid)) as Conv[]
+    if (gen !== convsRefreshGenRef.current) return
     if (list.length === 0) {
       await window.sylo.conversations.create('Chat', wid)
       list = (await window.sylo.conversations.list(wid)) as Conv[]
+      if (gen !== convsRefreshGenRef.current) return
     }
 
     setConversations(list)
@@ -1775,19 +1847,15 @@ export function App(): React.ReactElement {
     setArchiveSelected(new Set())
 
     // Archived (retention v2): kept chats idle past the retention window.
-    try {
-      setArchivedConversations(
-        (await window.sylo.conversations.listArchived(wid)) as {
-          id: string
-          title: string
-          updated_at: number
-          archived_at: number | null
-          workspace_id: string | null
-        }[],
-      )
-    } catch {
-      /* keep previous list */
-    }
+    const archived = await window.sylo.conversations.listArchived(wid).catch(() => [])
+    if (gen !== convsRefreshGenRef.current) return
+    setArchivedConversations(archived as {
+      id: string
+      title: string
+      updated_at: number
+      archived_at: number | null
+      workspace_id: string | null
+    }[])
 
     const saved = (await window.sylo.prefs.get('sylo.ui.active_conversation_id', '')) as string
     const savedTrim = typeof saved === 'string' ? saved.trim() : ''
@@ -4627,7 +4695,11 @@ export function App(): React.ReactElement {
                   sidebarWsSection,
                   dragWsId === ws.id && sidebarWsSectionDragging,
                 )}
-                open={wsActive ? activeWsOpen || searching : false}
+                open={
+                  wsActive ? activeWsOpen || searching
+                  : searching ? false
+                  : peekOpenWs.has(ws.id)
+                }
                 onDragOver={(e) => {
                   const fromId = dragWsIdRef.current
                   if (!fromId) return
@@ -4661,13 +4733,35 @@ export function App(): React.ReactElement {
                     return
                   }
                   const nowOpen = detailsOpenFromToggleEvent(e)
-                  if (nowOpen && !wsActive) {
-                    // Expanding another workspace's section switches to it.
-                    setActiveWsOpen(true)
-                    setSidebarWorkspaceId(ws.id)
-                    void window.sylo.prefs.set('sylo.ui.active_workspace_id', ws.id)
-                  } else if (wsActive) {
+                  if (wsActive) {
                     setActiveWsOpen(nowOpen)
+                  } else if (nowOpen && !searching) {
+                    // Peek mode: opening another workspace's section shows its
+                    // chats without switching the app (the old expand-to-switch
+                    // navigated here — a failed drag or stray toggle-click could
+                    // jump the operator into a different project folder). Fetch
+                    // the rows lazily each time the section opens. Navigation
+                    // happens when the operator clicks one of those chats, or
+                    // the section's + button.
+                    setPeekOpenWs((prev) => {
+                      const next = new Set(prev)
+                      next.add(ws.id)
+                      return next
+                    })
+                    void (async () => {
+                      try {
+                        const list = (await window.sylo.conversations.list(ws.id)) as Conv[]
+                        setPeekConvsByWs((prev) => ({ ...prev, [ws.id]: list }))
+                      } catch {
+                        /* keep previous peek rows */
+                      }
+                    })()
+                  } else {
+                    setPeekOpenWs((prev) => {
+                      const next = new Set(prev)
+                      next.delete(ws.id)
+                      return next
+                    })
                   }
                 }}
               >
@@ -4772,12 +4866,13 @@ export function App(): React.ReactElement {
                     </svg>
                   </button>
                 </summary>
-                {wsActive && wsConvs.length === 0 ? (
+                {(wsActive ? wsConvs : (peekConvsByWs[ws.id] ?? [])).length === 0 &&
+                (wsActive || peekOpenWs.has(ws.id)) ? (
                   <div className={sidebarConvEmpty}>
-                    {searching ? `No chats matching "${convSearch.trim()}"` : 'No chats yet'}
+                    {wsActive && searching ? `No chats matching "${convSearch.trim()}"` : 'No chats yet'}
                   </div>
                 ) : null}
-                    {wsConvs.map((c) => {
+                    {(wsActive ? wsConvs : (peekConvsByWs[ws.id] ?? [])).map((c) => {
             const selected = c.id === activeId
             const activity = convActivityStatus(c.id, sendingConvIds, unreadConvIds, questionConvIds)
             return (
@@ -4791,6 +4886,23 @@ export function App(): React.ReactElement {
                   type="button"
                   className={cn(convRowSelect, selected && convRowSelectActive)}
                   onClick={() => {
+                    if (!wsActive) {
+                      // Peeked-section chat click (Cursor-style): switching the
+                      // folder and opening this chat is one deliberate gesture —
+                      // expansion itself never navigates. Drop the peek flag so
+                      // this section is governed by the active-section state from
+                      // here on (no stale peek rows resurfacing after we switch
+                      // away to another workspace later).
+                      setSidebarWorkspaceId(ws.id)
+                      void window.sylo.prefs.set('sylo.ui.active_workspace_id', ws.id)
+                      setActiveWsOpen(true)
+                      setPeekOpenWs((prev) => {
+                        if (!prev.has(ws.id)) return prev
+                        const next = new Set(prev)
+                        next.delete(ws.id)
+                        return next
+                      })
+                    }
                     setActiveId(c.id)
                     setTab('chat')
                   }}
@@ -5250,15 +5362,12 @@ export function App(): React.ReactElement {
                       </button>
                     : null}
                     {activeId && agentReady && !activeSending && contextStats.totalTokens > 0 ?
-                      <button
-                        type="button"
-                        className={cn(btnGhostSm, 'text-[0.72rem] opacity-70 hover:opacity-100')}
-                        disabled={compactNowBusyId !== null}
-                        title="Compact now — summarize older turns into a note to free context space"
-                        onClick={() => void requestCompactNow(activeId)}
-                      >
-                        {compactNowBusyId === activeId ? 'Compacting…' : 'Compact now'}
-                      </button>
+                      <CompactControl
+                        conversationId={activeId}
+                        contextTokens={contextStats.actualTokens ?? contextStats.totalTokens}
+                        busy={compactNowBusyId === activeId}
+                        onCompact={() => void requestCompactNow(activeId)}
+                      />
                     : null}
                     {compactNowError ?
                       <span className={cn(mutedText, 'text-[0.72rem] opacity-80')}>{compactNowError}</span>
@@ -5390,15 +5499,12 @@ export function App(): React.ReactElement {
                     </button>
                   : null}
                   {activeId && agentReady && !activeSending && contextStats.totalTokens > 0 ?
-                    <button
-                      type="button"
-                      className={cn(btnGhostSm, 'text-[0.72rem] opacity-70 hover:opacity-100')}
-                      disabled={compactNowBusyId !== null}
-                      title="Compact now — summarize older turns into a note to free context space"
-                      onClick={() => void requestCompactNow(activeId)}
-                    >
-                      {compactNowBusyId === activeId ? 'Compacting…' : 'Compact now'}
-                    </button>
+                    <CompactControl
+                      conversationId={activeId}
+                      contextTokens={contextStats.actualTokens ?? contextStats.totalTokens}
+                      busy={compactNowBusyId === activeId}
+                      onCompact={() => void requestCompactNow(activeId)}
+                    />
                   : null}
                   {compactNowError ?
                     <span className={cn(mutedText, 'text-[0.72rem] opacity-80')}>{compactNowError}</span>

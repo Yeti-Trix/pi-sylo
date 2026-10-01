@@ -81,24 +81,25 @@ contextBridge.exposeInMainWorld('sylo', {
     getSubagentModels: (id: string) =>
       ipcRenderer.invoke('conversations:getSubagentModels', id) as Promise<
         | {
-            chat: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>
+            /** Global SubAgents Settings pins, so each dropdown names what inherit resolves to. */
             global: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>
-            allThinking: string
+            /** This workspace folder's own pins — the only tier the modal saves. */
+            workspace: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>
+            workspaceId: string
+            workspaceLabel: string
             chatThinking: string | null
           }
         | null
-      >,
-    setSubagentModels: (
-      id: string,
-      pins: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>,
-    ) =>
-      ipcRenderer.invoke('conversations:setSubagentModels', id, pins) as Promise<
-        { ok: true } | { ok: false; error: string }
       >,
     delete: (id: string) => ipcRenderer.invoke('conversations:delete', id),
   },
   workspaces: {
     list: () => ipcRenderer.invoke('workspaces:list'),
+    /** Workspace-tier subagent persona pins (this folder only) — the modal's save target. */
+    setSubagentPins: (workspaceId: string, pins: Record<string, { provider: string; modelId: string; thinkingLevel?: string }>) =>
+      ipcRenderer.invoke('workspaces:setSubagentSettings', workspaceId, { workspacePins: pins }) as Promise<
+        { ok: true } | { ok: false; error: string }
+      >,
     devWorkspaceId: () => ipcRenderer.invoke('workspaces:devWorkspaceId') as Promise<string | null>,
     defaultPathForName: (name: string) =>
       ipcRenderer.invoke('workspaces:defaultPathForName', name) as Promise<string>,
@@ -1535,6 +1536,17 @@ contextBridge.exposeInMainWorld('sylo', {
       }>,
     agents: () =>
       ipcRenderer.invoke('tasks:agents') as Promise<
+        Array<{
+          name: string
+          description: string
+          source: 'builtin' | 'user' | 'project'
+          tools?: string[]
+          timeoutSeconds?: number
+        }>
+      >,
+    /** Global-only persona list for Settings → Subagents (no project personas). */
+    agentsGlobal: () =>
+      ipcRenderer.invoke('tasks:agentsGlobal') as Promise<
         Array<{
           name: string
           description: string

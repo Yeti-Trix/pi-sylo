@@ -625,6 +625,14 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
 
 
     // Per-conversation draft + queue persistence. Typed-but-unsent text, staged
+  // Keyboard-driven active row must stay visible: the picker is a 220px scroll
+  // container, so once the highlight passes the fold, auto-scroll it into view
+  // ("nearest" is a no-op while the row is already fully visible).
+  const activeOptionRef = useRef<HTMLButtonElement | null>(null)
+  useEffect(() => {
+    activeOptionRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [mentionIndex])
+
   // attachments AND the queued follow-ups are stashed in module-scoped maps so
   // they survive BOTH conversation switches (staying on the chat tab) AND tab
   // switches that unmount this composer (e.g. chat → Tasks → chat). The maps
@@ -1214,6 +1222,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
                 type="button"
                 role="option"
                 aria-selected={index === mentionIndex}
+                ref={index === mentionIndex ? activeOptionRef : undefined}
                 className={cn(chatMentionItem, index === mentionIndex && chatMentionItemActive)}
                 // The textarea would blur before onClick fires, closing the picker.
                 onMouseDown={(e) => e.preventDefault()}

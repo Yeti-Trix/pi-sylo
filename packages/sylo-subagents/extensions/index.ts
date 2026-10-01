@@ -100,6 +100,49 @@ function resolveDefaultAgentScope(): AgentScope {
   return 'user'
 }
 
+/**
+ * Persona names with a complete provider+model pin in the merged map (inherit rows are
+ * never saved as pins, so a pin is always an explicit operator pick).
+ *
+ * For project personas (`.pi/agents/*.md`, repo-controlled) these names double as the
+ * trust act: the repo file only gets its persona listed in the Subagents modal — it
+ * becomes delegatable only after the operator picks a model for it there.
+ */
+function activeProjectAgentNames(): Set<string> {
+  const raw = process.env.SYLO_SUBAGENTS_MODEL_BY_AGENT?.trim()
+  if (!raw) return new Set()
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return new Set()
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return new Set()
+  const names = new Set<string>()
+  for (const [name, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object') continue
+    const entry = value as { provider?: unknown; modelId?: unknown }
+    if (
+      typeof entry.provider === 'string' &&
+      entry.provider.trim() !== '' &&
+      typeof entry.modelId === 'string' &&
+      entry.modelId.trim() !== ''
+    ) {
+      names.add(name)
+    }
+  }
+  return names
+}
+
+/**
+ * Hide unpinned project personas from the agent's reach: repo files add candidates to
+ * the Subagents modal, but only an operator pick there adds a runnable persona.
+ */
+function filterActiveAgents(agents: AgentConfig[]): AgentConfig[] {
+  const pinned = activeProjectAgentNames()
+  return agents.filter((a) => a.source !== 'project' || pinned.has(a.name))
+}
+
 const SOURCE_RELATIVE_AGENTS_DIR = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
@@ -712,9 +755,31 @@ export async function runForcedSubagentChain(opts: {
 }): Promise<ForcedSubagentOutcome[]> {
   const { cwd, agentNames, task, signal } = opts
   const agentScope = opts.agentScope ?? resolveDefaultAgentScope()
-  const { agents, projectAgentsDir } = discoverAgents(cwd, agentScope, {
+  const discovery = discoverAgents(cwd, agentScope, {
     bundledAgentsDir: resolveBundledAgentsDir(),
   })
+  const agents = filterActiveAgents(discovery.agents)
+  const projectAgentsDir = discovery.projectAgentsDir
+
+  // An @mention naming an unactivated project persona deserves a real reason, not
+  // "unknown agent" — the file exists, the operator just hasn't picked a model for it.
+  const unpinned = agentNames.filter((n) => {
+    const found = discovery.agents.find((a) => a.name === n)
+    return found && found.source === 'project' && !activeProjectAgentNames().has(n)
+  })
+  if (unpinned.length > 0) {
+    return [
+      {
+        agent: unpinned[0]!,
+        status: 'failed',
+        output:
+          `Not active: "${unpinned[0]}" comes from this repo's .pi/agents — ` +
+          'open the Subagents modal (chat model bar) and pick a model for it to enable. ' +
+          'Repo files list personas there; they only run after you pick one.',
+      },
+    ]
+  }
+
   const mode: SyloSubagentRunMode = agentNames.length > 1 ? 'chain' : 'single'
   const makeDetails = (results: SingleResult[]): SubagentDetails => ({
     mode,
@@ -834,8 +899,8 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
     description: [
       'Delegate tasks to specialized subagents with isolated context.',
       'Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).',
-      'Default agent scope is "user" (Sylo builtins + ~/.pi/agent/agents). Omit agentScope unless project .pi/agents are required.',
-      'Sylo Settings → Subagents can enable project agents (agentScope "both").',
+      'Default agent scope is "user" (Sylo builtins + ~/.pi/agent/agents). Omit agentScope unless you specifically need the project agents dir.',
+      'Project personas (.pi/agents, repo-controlled) are listed in the Subagents modal but only run after the operator picked a model for them there — if a persona from that dir is missing here, it is not activated.',
     ].join(' '),
     parameters: SubagentParams,
 
@@ -844,7 +909,7 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
       const discovery = discoverAgents(ctx.cwd, agentScope, {
         bundledAgentsDir: resolveBundledAgentsDir(),
       })
-      const agents = discovery.agents
+      const agents = filterActiveAgents(discovery.agents)
       const confirmProjectAgents = params.confirmProjectAgents ?? true
       const contextPacket = params.context
 

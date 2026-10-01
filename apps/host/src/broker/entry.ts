@@ -158,6 +158,8 @@ type BrokerSwitchSession = {
   modelId?: string
   /** Resolved subagent pins for the switched-to chat; empty string clears the previous chat's. */
   subagentModelsByAgent?: string
+  /** Persona discovery scope for the switched-to chat's workspace ('user' = global-only). */
+  subagentAgentScope?: 'user' | 'both'
   /** Per-chat image (fallback) model override (empty/undefined = keep current). */
   imageModelId?: string
   imageModelProvider?: string
@@ -1219,6 +1221,11 @@ async function handleSwitchSession(msg: BrokerSwitchSession): Promise<void> {
     if (typeof msg.subagentModelsByAgent === 'string') {
       process.env.SYLO_SUBAGENTS_MODEL_BY_AGENT = msg.subagentModelsByAgent
     }
+    if (typeof msg.subagentAgentScope === 'string') {
+      // Persona discovery scans dirs per run, so the workspace trust level must be
+      // re-published like the pin map — env is frozen at fork but updated per switch.
+      process.env.SYLO_SUBAGENTS_AGENT_SCOPE = msg.subagentAgentScope
+    }
     // Image (fallback) model: the sylo-image-fallback extension reads these env
     // vars at tool-execution time, so updating them here takes effect on the
     // next analyze_image call without a broker restart.
@@ -1780,6 +1787,9 @@ function handleCompactionUpdate(msg: BrokerCompactionUpdate): void {
   if (provider !== brokerModelProvider.trim() || modelId !== brokerModelId.trim()) return
   brokerCompactionReserve = sanitizeCompactionReserve(msg.reserveTokens)
   applyCompactionReserveToSettings(session?.settingsManager, brokerCompactionReserve)
+  // Report fresh stats so the host's deferred auto-compact can act on the new
+  // trigger immediately when this chat is idle (and after turns otherwise).
+  sendContextWindowStats()
 }
 
 /**

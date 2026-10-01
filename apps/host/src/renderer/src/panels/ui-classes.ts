@@ -1188,6 +1188,37 @@ export const chatPlanMenuDesc =
 export const modelBarPill =
   'box-border cursor-pointer rounded-full border border-border bg-bg-primary px-2.5 py-1 font-[inherit] text-[0.72rem] text-text-secondary transition-[border-color,color,background] duration-[120ms] hover:border-accent/40 hover:text-text-primary focus:border-accent/55 focus:outline-none'
 
+/** Split "Compact" control (chat status subfoot): main half = compact now,
+ *  caret half = popover (auto-compact token trigger + compact now). */
+export const chatCompactSplit =
+  'flex shrink-0 items-center overflow-hidden rounded-md border border-border bg-[rgb(255_255_255/0.04)] text-[0.72rem] transition-[border-color,background] duration-[120ms] hover:border-accent/40 disabled:cursor-not-allowed disabled:opacity-60'
+
+export const chatCompactMain =
+  'cursor-pointer border-none bg-transparent px-2 py-1 leading-tight text-text-secondary hover:text-text-primary'
+
+export const chatCompactCaretBtn =
+  'cursor-pointer border-0 border-l border-border bg-transparent px-1.5 py-1 leading-none text-text-secondary/70 hover:text-text-primary'
+
+/** Popover for the compact control — opens downward over the composer. */
+export const chatCompactMenu =
+  'absolute bottom-full right-0 z-20 mb-2 w-72 overflow-hidden rounded-xl border border-border bg-bg-tertiary py-2 shadow-lg'
+
+export const chatCompactMenuHead =
+  'px-3 text-[0.72rem] font-semibold leading-tight text-text-primary'
+
+export const chatCompactMenuMeta =
+  'text-[0.7rem] leading-snug text-text-secondary'
+
+export const chatCompactMenuInput =
+  'w-full rounded-md border border-border bg-bg-primary px-2 py-1 font-[inherit] text-[0.78rem] text-text-primary outline-none focus:border-accent'
+
+export const chatCompactMenuBtn =
+  'shrink-0 cursor-pointer rounded-md border border-[rgb(255_255_255/0.3)] bg-[rgb(255_255_255/0.08)] px-2 py-0.5 text-[0.72rem] text-text-primary hover:bg-[rgb(255_255_255/0.16)] disabled:cursor-not-allowed disabled:opacity-50'
+
+/** Primary row inside the popover ("Compact now"). */
+export const chatCompactMenuPrimary =
+  'mt-1.5 flex w-full cursor-pointer items-center justify-center gap-1 border-0 border-t border-border/70 bg-transparent px-3 py-2 text-[0.76rem] text-text-primary hover:bg-[rgb(255_255_255/0.05)] disabled:cursor-not-allowed disabled:opacity-50'
+
 export const chatStopBtn =
   'shrink-0 cursor-pointer rounded-md border border-[rgb(241_106_80/0.55)] bg-[rgb(241_106_80/0.12)] text-[#f6b3a4] hover:bg-[rgb(241_106_80/0.22)] disabled:cursor-not-allowed disabled:opacity-50'
 
@@ -1203,6 +1234,24 @@ export const toolLogPre =
 
 /** Settings-style caption (workspace hints) */
 export const settingsCaption = 'm-0 text-[0.78rem] leading-[1.4] text-text-secondary'
+
+/** Compact "more information" expander for settings cards (native <details>). */
+export const detailsSummary =
+  'cursor-pointer select-none text-[0.74rem] text-text-secondary transition-[color] duration-[120ms] hover:text-text-primary focus:outline-none focus-visible:text-text-primary'
+
+export const detailsBody = 'm-0 mt-1.5 text-[0.75rem] leading-[1.45] text-text-secondary'
+
+/** Toast stack — fixed bottom-right (Settings renders its own <ToastHost />). */
+export const toastStack =
+  'pointer-events-none fixed bottom-4 right-4 z-[10001] flex max-w-[min(440px,86vw)] flex-col gap-2'
+
+export const toastCard =
+  'pointer-events-auto flex min-w-0 gap-2 rounded-md border border-border bg-bg-secondary px-3 py-2 text-[0.8rem] leading-snug text-text-primary whitespace-pre-wrap shadow-[0_10px_28px_rgb(0_0_0/0.35)]'
+
+export const toastCardError = cn(
+  toastCard,
+  'border-danger/45 bg-danger/10 text-danger',
+)
 
 /** Centered app modals */
 export const modalOverlay =
@@ -1314,5 +1363,17 @@ export const routePopoutHeader =
 export const routePopoutHeaderTitle = 'm-0 text-base'
 
 export const routePopoutBody = 'min-h-0 flex-1 p-3'
+
+/** Settings shell — left category rail. */
+export const settingsRail = 'flex w-[172px] flex-none flex-col gap-1 border-r border-border py-3 pl-4 pr-3'
+
+export const settingsRailLabel =
+  'mb-1 mt-0 text-[0.72rem] font-semibold uppercase tracking-[0.06em] text-text-muted'
+
+export const settingsRailBtn =
+  'cursor-pointer rounded-md border border-transparent bg-transparent px-2.5 py-1.5 text-left text-[0.82rem] text-text-secondary transition-[background,border-color,color] duration-[120ms] hover:bg-bg-tertiary hover:text-text-primary'
+
+export const settingsRailBtnActive =
+  'cursor-pointer rounded-md border border-border bg-bg-tertiary px-2.5 py-1.5 text-left text-[0.82rem] font-medium text-text-primary'
 
 

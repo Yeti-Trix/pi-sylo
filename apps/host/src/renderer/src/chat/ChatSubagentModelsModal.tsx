@@ -15,13 +15,17 @@ import { btnGhostSm, btnPrimarySm, input, mutedText, select } from '../panels/ui
 import { useConfiguredProviders } from './useConfiguredProviders'
 
 /**
- * Per-chat subagent model and thinking pins.
+ * Subagent personas + models for THIS WORKSPACE — the only override tier (per-chat pins
+ * were removed in v3.1).
  *
- * Settings → Subagents sets the defaults for every chat; this narrows them for one
- * conversation. A role left on inherit uses the Settings pin, then this chat's
- * model and thinking.
+ * Each persona's provider dropdown offers "Use Global Setting (…)" — inherits the Global
+ * SubAgents Settings pin, then the chat's model and thinking — or a picked provider/model
+ * saved per workspace folder. Project personas (`.pi/agents/*.md`) list alongside global
+ * ones whenever the folder has them; persona availability is decided here in the UI,
+ * with no separate opt-in checkbox.
  */
 type AgentInfo = { name: string; description: string; source: 'builtin' | 'user' | 'project' }
+type PinMap = Record<string, SubagentModelPin>
 
 function emptyPin(): SubagentModelPin {
   return { provider: '', modelId: '' }
@@ -35,12 +39,17 @@ function pinLabel(pin: SubagentModelPin | undefined): string {
   return `${provider} · ${pin.modelId}`
 }
 
-function thinkingInheritLabel(
-  global: SubagentModelPin | undefined,
-  allThinking: string,
-  chatThinking: string | null,
-): string {
-  const level = global?.thinkingLevel || allThinking || chatThinking
+function globalInheritLabel(globalPin: SubagentModelPin | undefined): string {
+  return `Use Global Setting (${globalPin?.provider ? pinLabel(globalPin) : 'the chat model'})`
+}
+
+/** Inherit option text. For repo-sourced personas inherit means OFF — say so. */
+function inheritOptionLabel(source: AgentInfo['source'], globalPin: SubagentModelPin | undefined): string {
+  return source === 'project' ? 'Not active — pick a model to enable' : globalInheritLabel(globalPin)
+}
+
+function thinkingInheritLabel(globalPin: SubagentModelPin | undefined, chatThinking: string | null): string {
+  const level = globalPin?.thinkingLevel || chatThinking
   return level ? `Inherit (${level})` : 'Inherit (model default)'
 }
 
@@ -52,15 +61,17 @@ export function ChatSubagentModelsModal({
   onClose: () => void
 }): React.ReactElement {
   const [agents, setAgents] = useState<AgentInfo[] | null>(null)
-  const [chatPins, setChatPins] = useState<Record<string, SubagentModelPin>>({})
-  const [globalPins, setGlobalPins] = useState<Record<string, SubagentModelPin>>({})
-  const [allThinking, setAllThinking] = useState('')
+  const [workspacePins, setWorkspacePins] = useState<PinMap>({})
+  const [globalPins, setGlobalPins] = useState<PinMap>({})
+  const [workspaceId, setWorkspaceId] = useState('')
+  const [workspaceLabel, setWorkspaceLabel] = useState('')
   const [chatThinking, setChatThinking] = useState<string | null>(null)
   const [ollamaTags, setOllamaTags] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
   const pinProviders = [
-    ...Object.values(chatPins).map((p) => p.provider),
+    ...Object.values(workspacePins).map((p) => p.provider),
     ...Object.values(globalPins).map((p) => p.provider),
   ]
   const providers = useConfiguredProviders(pinProviders)
@@ -76,9 +87,10 @@ export function ChatSubagentModelsModal({
       ])
       if (cancelled) return
       setAgents(agentRows)
-      setChatPins(pins?.chat ?? {})
+      setWorkspacePins(pins?.workspace ?? {})
       setGlobalPins(pins?.global ?? {})
-      setAllThinking(pins?.allThinking ?? '')
+      setWorkspaceId(pins?.workspaceId ?? '')
+      setWorkspaceLabel(pins?.workspaceLabel ?? '')
       setChatThinking(pins?.chatThinking ?? null)
 
       const pref = ((await window.sylo.prefs.get('sylo.ollama_base_url', '')) as string).trim()
@@ -92,38 +104,44 @@ export function ChatSubagentModelsModal({
   }, [conversationId])
 
   const setPin = useCallback((agent: string, next: SubagentModelPin) => {
-    setChatPins((prev) => ({ ...prev, [agent]: next }))
+    setWorkspacePins((prev) => ({ ...prev, [agent]: next }))
   }, [])
 
   const save = useCallback(async () => {
-    const cleaned: Record<string, SubagentModelPin> = {}
+    const cleaned: PinMap = {}
     const incomplete: string[] = []
-    for (const [agent, pin] of Object.entries(chatPins)) {
+    for (const [agent, pin] of Object.entries(workspacePins)) {
       const provider = pin.provider.trim()
       const modelId = pin.modelId.trim()
       const thinkingLevel = pin.thinkingLevel?.trim() ?? ''
       if (!provider && !thinkingLevel) continue
-      // A provider without a model would hand the Pi CLI a model id that provider does
-      // not serve, so a model pin only counts as a complete pair.
+      // A provider without a model would hand the Pi CLI a model id that provider
+      // does not serve, so a model pin only counts as a complete pair.
       if (provider && !modelId) incomplete.push(agent)
       else {
         cleaned[agent] = thinkingLevel ? { provider, modelId, thinkingLevel } : { provider, modelId }
       }
     }
     if (incomplete.length > 0) {
-      setError(`Pick a model for: ${incomplete.join(', ')} — or set it back to inherit.`)
+      setError(`Pick a model for: ${incomplete.join(', ')} — or set it back to "Use Global Setting".`)
+      return
+    }
+    if (!workspaceId) {
+      setError('No workspace is bound to this chat yet — reopen the chat and try again.')
       return
     }
     setError(null)
     setSaving(true)
-    const r = await window.sylo.conversations.setSubagentModels(conversationId, cleaned)
+    const r = await window.sylo.workspaces.setSubagentPins(workspaceId, cleaned)
     setSaving(false)
     if (!r.ok) {
       setError(r.error)
       return
     }
     onClose()
-  }, [chatPins, conversationId, onClose])
+  }, [workspacePins, workspaceId, onClose])
+
+  const resetAll = useCallback(() => setWorkspacePins({}), [])
 
   return (
     <div
@@ -140,7 +158,7 @@ export function ChatSubagentModelsModal({
       >
         <div className="mb-3 flex items-center justify-between gap-3">
           <h2 id="chat-subagent-models-title" className="m-0 text-base font-semibold">
-            Subagents for this chat
+            Subagent settings
           </h2>
           <button
             type="button"
@@ -152,8 +170,9 @@ export function ChatSubagentModelsModal({
         </div>
 
         <p className={cn(mutedText, 'mb-3 text-[0.82rem] leading-[1.45]')}>
-          Each role runs in its own Pi session. Leave a model or think level on inherit to use
-          Settings → Subagents, then this chat&apos;s model and thinking.
+          Pick a model for each persona in <strong>{workspaceLabel || 'this workspace'}</strong>.
+          Leave one on <strong>Use Global Setting</strong> to follow Global SubAgents Settings,
+          then this chat&apos;s model and thinking. Saved for this workspace folder.
         </p>
 
         {agents === null ?
@@ -165,7 +184,7 @@ export function ChatSubagentModelsModal({
           </p>
         : <div className="flex flex-col gap-3">
             {agents.map((agent) => {
-              const pin = chatPins[agent.name] ?? emptyPin()
+              const pin = workspacePins[agent.name] ?? emptyPin()
               return (
                 <div key={agent.name} className="flex flex-col gap-1">
                   <span className="text-[0.84rem] text-text-primary">
@@ -176,7 +195,7 @@ export function ChatSubagentModelsModal({
                   </span>
                   <div className="flex flex-wrap items-center gap-2">
                     <select
-                      className={cn(select, 'h-8 w-auto min-w-[150px] flex-none py-0.5 text-[0.78rem]')}
+                      className={cn(select, 'h-8 w-auto min-w-[170px] flex-none py-0.5 text-[0.78rem]')}
                       value={pin.provider}
                       // Model ids do not carry across providers, so switching clears the pair.
                       onChange={(e) =>
@@ -184,7 +203,7 @@ export function ChatSubagentModelsModal({
                       }
                       aria-label={`${agent.name} provider`}
                     >
-                      <option value="">Inherit ({pinLabel(globalPins[agent.name])})</option>
+                      <option value="">{inheritOptionLabel(agent.source, globalPins[agent.name])}</option>
                       {providers.map((p) => (
                         <option key={p} value={p}>
                           {SYLO_MODEL_PROVIDER_LABELS[p]}
@@ -239,7 +258,7 @@ export function ChatSubagentModelsModal({
                       aria-label={`${agent.name} thinking`}
                     >
                       <option value="">
-                        {thinkingInheritLabel(globalPins[agent.name], allThinking, chatThinking)}
+                        {thinkingInheritLabel(globalPins[agent.name], chatThinking)}
                       </option>
                       {SUBAGENT_THINKING_LEVELS.map((lvl) => (
                         <option key={lvl} value={lvl}>
@@ -263,10 +282,11 @@ export function ChatSubagentModelsModal({
           <button
             type="button"
             className={btnGhostSm}
-            onClick={() => setChatPins({})}
+            onClick={resetAll}
             disabled={saving}
+            title="Every persona back to Use Global Setting"
           >
-            Reset to inherit
+            Reset to global
           </button>
         </div>
       </div>

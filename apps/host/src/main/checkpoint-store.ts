@@ -560,9 +560,12 @@ export function relOf(cwd: string, abs: string): string {
   return relative(cwd, abs).replace(/\\/g, '/')
 }
 // ── Per-turn change review (task 07 diff cards) + per-turn diff (task 13 panel)
-// Stats for a turn come from diffing its manifest against the PREVIOUS kept
-// manifest in the conversation — pure hash math over stored manifests, no
-// current-disk reads (only `previewRestore` diffs against the live tree).
+// Stats for a turn come from diffing its manifest against the NEXT kept
+// manifest, one turn forward. Checkpoints store the PRE-turn state (captured
+// when a turn STARTS), so turn N's changes = manifest N vs manifest N+1 — the
+// state right before it vs right after it. The newest turn has no forward
+// checkpoint yet: its stats come from diffing its manifest against the live
+// workspace (previewRestore — the only current-disk path).
 
 export type CheckpointTurnChanges = {
   modified: string[]
@@ -587,40 +590,62 @@ function realManifestsOldestFirst(convId: string): { dir: string; m: CheckpointM
   return out.sort((a, b) => a.m.started_at - b.m.started_at)
 }
 
+/** Turn N's changes from two adjacent manifests: pair pre-turn state (the
+ *  turn's own manifest) with post-turn state (the next turn's manifest). Same
+ *  rel on both sides with a different hash = modified by this turn; only in
+ *  the post state = added by it; only in the pre state = deleted by it. v1
+ *  manifests carry no hashes: only added/deleted are provable. */
+function manifestPairChanges(
+  pre: CheckpointManifest,
+  post: CheckpointManifest,
+): CheckpointTurnChanges {
+  const changes: CheckpointTurnChanges = { modified: [], added: [], deleted: [] }
+  const preSet = new Set(pre.files)
+  const postSet = new Set(post.files)
+  const preHashes = pre.v >= 2 ? (pre.hashes ?? {}) : {}
+  const postHashes = post.v >= 2 ? (post.hashes ?? {}) : {}
+  for (const rel of pre.files) {
+    if (!postSet.has(rel)) changes.deleted.push(rel)
+    else if (preHashes[rel] && postHashes[rel] && preHashes[rel] !== postHashes[rel]) {
+      changes.modified.push(rel)
+    }
+  }
+  for (const rel of post.files) {
+    if (!preSet.has(rel)) changes.added.push(rel)
+  }
+  changes.modified.sort()
+  changes.added.sort()
+  changes.deleted.sort()
+  return changes
+}
+
 /**
  * Per-turn change counts + file lists for every kept checkpoint in a
- * conversation, keyed by assistant message id. Each entry diffs the turn's
- * manifest against the previous turn's manifest (same rel and a different
- * hash = modified; only in this manifest = added; only in the previous =
- * deleted), so the numbers describe what THAT TURN did — matching the Undo
- * semantics. v1 manifests carry no hashes: only added/deleted are provable.
+ * conversation, keyed by assistant message id. Checkpoints hold the state
+ * BEFORE their turn, so each entry diffs the turn's manifest against the NEXT
+ * turn's manifest (same rel, different hash = modified; only in that next
+ * manifest = added by this turn; only in this manifest = deleted by it). The
+ * newest turn diffs against the live workspace instead — no forward snapshot
+ * exists for it yet. v1 manifests carry no hashes: only added/deleted are
+ * provable.
  */
 export function turnChangesForConversation(
   convId: string,
 ): Map<string, CheckpointTurnChanges> {
   const out = new Map<string, CheckpointTurnChanges>()
   const manifests = realManifestsOldestFirst(convId)
-  let prevFiles: string[] = []
-  let prevHashes: Record<string, string> = {}
-  for (const { m } of manifests) {
-    const changes: CheckpointTurnChanges = { modified: [], added: [], deleted: [] }
-    const set = new Set(m.files)
-    for (const rel of m.files) {
-      const knownBefore = prevFiles.includes(rel)
-      const hash = m.v >= 2 ? (m.hashes ?? {})[rel] : undefined
-      const prevHash = m.v >= 2 ? prevHashes[rel] : undefined
-      if (!knownBefore) changes.added.push(rel)
-      else if (hash && prevHash && hash !== prevHash) changes.modified.push(rel)
-    }
-    for (const rel of prevFiles) {
-      if (!set.has(rel)) changes.deleted.push(rel)
-    }
-    changes.modified.sort()
-    changes.added.sort()
-    changes.deleted.sort()
-    if (m.assistantMessageId) out.set(m.assistantMessageId, changes)
-    prevFiles = m.files
-    prevHashes = m.v >= 2 ? (m.hashes ?? {}) : {}
+  for (let i = 0; i < manifests.length; i++) {
+    const m = manifests[i]!.m
+    const assistantMessageId = m.assistantMessageId
+    if (!assistantMessageId) continue
+    const next = i + 1 < manifests.length ? manifests[i + 1]!.m : null
+    // Forward rebase: manifest N is the pre-turn tree of turn N, manifest
+    // N+1 is the tree right after it — so the pair diff describes exactly
+    // what turn N did. Diffing backward (manifest N vs N−1) would describe
+    // turn N−1 and make a first-ever turn report its whole workspace as
+    // "added" (empty base).
+    const changes = next ? manifestPairChanges(m, next) : previewRestore(convId, assistantMessageId)
+    if (changes) out.set(assistantMessageId, changes)
   }
   return out
 }
@@ -797,9 +822,15 @@ function safeRead(abs: string): Buffer | null {
  * appended). Read-only: nothing here writes files.
  */
 export function diffTurn(convId: string, assistantMessageId: string): CheckpointFileDiff[] | null {
-  const dir = findDirForAssistant(convId, assistantMessageId)
-  const m = dir ? readManifest(dir) : null
-  if (!dir || !m || !existsSync(m.cwd)) return null
+  const manifests = realManifestsOldestFirst(convId)
+  const idx = manifests.findIndex((e) => e.m.assistantMessageId === assistantMessageId)
+  if (idx < 0) return null
+  const { dir, m } = manifests[idx]!
+  if (!existsSync(m.cwd)) return null
+  // Post-turn content source: the NEXT checkpoint's stored copies (that
+  // manifest is the tree right after this turn); only the newest turn has no
+  // forward checkpoint and reads the live workspace.
+  const post = idx + 1 < manifests.length ? manifests[idx + 1]! : null
   const changes = turnChangesForConversation(convId).get(assistantMessageId) ?? {
     modified: [],
     added: [],
@@ -814,9 +845,14 @@ export function diffTurn(convId: string, assistantMessageId: string): Checkpoint
   let total = 0
   for (const { rel, status } of targets) {
     const preAbs = join(dir, 'files', rel)
-    const curAbs = join(m.cwd, rel)
+    // Before-side: this turn's pre-turn copy (empty for files it created).
+    // After-side: the forward checkpoint's copy when one exists — that is the
+    // state right after this turn. Reading the live tree here would make an
+    // older turn's pane show whatever later turns (or the operator) did to the
+    // file since — the numbers above are turn-scoped, the pane should match.
+    const postAbs = post ? join(post.dir, 'files', rel) : join(m.cwd, rel)
     const preBuf = status === 'added' ? Buffer.alloc(0) : safeRead(preAbs)
-    const curBuf = status === 'deleted' ? Buffer.alloc(0) : safeRead(curAbs)
+    const curBuf = status === 'deleted' ? Buffer.alloc(0) : safeRead(postAbs)
     if ((preBuf && isBinary(preBuf)) || (curBuf && isBinary(curBuf))) {
       out.push({ rel, status, diff: '', skipped: 'binary' })
       continue

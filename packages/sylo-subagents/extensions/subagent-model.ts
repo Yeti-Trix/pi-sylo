@@ -14,7 +14,11 @@ function readThinking(raw: string | undefined): string {
   return raw?.trim() ?? ''
 }
 
-/** Per-agent pins keyed by agent name, published as JSON by Settings / the chat modal. */
+/**
+ * Per-agent pins keyed by agent name, published as JSON by the host on every
+ * init / switch_session. One merge point up there: this-chat pin → this-workspace pin →
+ * global SubAgents pin, so the extension only ever sees one resolved map.
+ */
 function readPinsByAgent(): Record<string, SubagentModelPin> {
   const raw = process.env.SYLO_SUBAGENTS_MODEL_BY_AGENT?.trim()
   if (!raw) return {}
@@ -48,8 +52,7 @@ function readPinsByAgent(): Record<string, SubagentModelPin> {
 /**
  * Pi CLI flags for the model and thinking one subagent runs on.
  *
- * Model: agent pin → all-subagents pin → chat model.
- * Thinking: agent pin → all-subagents thinking → this chat's thinking.
+ * Model: persona pin ?? the chat's model. Thinking: persona pin ?? this chat's thinking.
  * A thinking-only pin does not steal the model from a lower level.
  */
 export function subagentModelCliArgs(agentName?: string): {
@@ -59,16 +62,9 @@ export function subagentModelCliArgs(agentName?: string): {
   args: string[]
 } {
   const byAgent = agentName ? readPinsByAgent()[agentName] : undefined
-  const allAgents = pinFrom(
-    process.env.SYLO_SUBAGENTS_MODEL_PROVIDER,
-    process.env.SYLO_SUBAGENTS_MODEL_ID,
-  )
   const chat = pinFrom(process.env.SYLO_MODEL_PROVIDER, process.env.SYLO_MODEL_ID)
-  const resolved = pinFrom(byAgent?.provider, byAgent?.modelId) ?? allAgents ?? chat
-  const thinking =
-    readThinking(byAgent?.thinkingLevel) ||
-    readThinking(process.env.SYLO_SUBAGENTS_THINKING) ||
-    readThinking(process.env.SYLO_THINKING_LEVEL)
+  const resolved = pinFrom(byAgent?.provider, byAgent?.modelId) ?? chat
+  const thinking = readThinking(byAgent?.thinkingLevel) || readThinking(process.env.SYLO_THINKING_LEVEL)
 
   const args: string[] = []
   if (resolved) {

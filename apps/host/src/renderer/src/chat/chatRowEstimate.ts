@@ -54,11 +54,13 @@ function estimateChatRowHeight(m: EstimateMsg | undefined): number {
     const segmentCount = countApproxSegments(toolJson)
     const textLines = Math.ceil(contentLen / 68)
     const streaming = m.status === 'streaming'
-    // Completed turns collapse tools into one <details>. Counting raw JSON
-    // length used to estimate 64k px rows; measuring the real ~200px card
-    // then yanked the list by tens of thousands of pixels.
-    const segmentBlocks = streaming ? segmentCount * 120 : segmentCount > 0 ? 48 : 0
-    const streamingExtra = streaming ? 120 : 0
+    // Completed AND live turns collapse tools into one <details> (live = the
+    // "Working…" header collapsed by default) — only the streaming answer
+    // grows below it. Counting raw JSON used to estimate 64k px rows; measuring
+    // the real ~200px card then yanked the list by tens of thousands of pixels.
+    // The virtualizer measures the real DOM once mounted; this just seeds it.
+    const segmentBlocks = segmentCount > 0 ? 56 : 0
+    const streamingExtra = streaming ? 160 : 0
     return Math.min(64000, 96 + textLines * 21 + segmentBlocks + streamingExtra)
   }
 

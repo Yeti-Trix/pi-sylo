@@ -22,6 +22,11 @@ import {
   migrateThinkTankSchema,
 } from './think-tank-db.js'
 import { dropLegacyScheduledPromptsFromMainDb } from './workspace-db.js'
+import {
+  parseSubagentPins,
+  serializeSubagentPins,
+  type SubagentModelPin,
+} from '../shared/subagent-model-pin.js'
 
 export type MessageRole = 'user' | 'assistant' | 'system'
 export type MessageStatus = 'streaming' | 'complete' | 'failed' | 'cancelled'
@@ -78,6 +83,16 @@ export interface WorkspaceRow {
   /** When true, Sylo pulls on startup and includes this workspace in Push all. */
   github_backup_enabled: number
   github_last_sync_at: number | null
+  /**
+   * Per-workspace subagent settings (v3 split): whether `.pi/agents/*.md` personas from this
+   * workspace's folder are discoverable. Set from the chat Subagents modal, not Settings.
+   */
+  subagent_project_agents: number
+  /**
+   * Serialized `{ "<agent>": { provider, modelId, thinkingLevel? } }` pins applied for
+   * this workspace only — they override the global `sylo.subagents.model_by_agent` rows.
+   */
+  subagent_pins_json: string
   sort_order: number
   created_at: number
 }
@@ -369,6 +384,18 @@ function migrateLegacySchema(d: Database.Database, userDataPath: string): void {
     if (!tableHasColumn(d, 'workspaces', 'github_last_sync_at')) {
       d.exec('ALTER TABLE workspaces ADD COLUMN github_last_sync_at INTEGER')
     }
+    // Per-workspace subagent settings (v3 split): persona pins + the project-agents trust
+    // flag live on the workspace row, configured from the chat Subagents modal — not from
+    // global Settings. Kept host-side so a cloned repo can never carry its own trust flag.
+    if (!tableHasColumn(d, 'workspaces', 'subagent_project_agents')) {
+      d.exec(
+        "ALTER TABLE workspaces ADD COLUMN subagent_project_agents INTEGER NOT NULL DEFAULT 0",
+      )
+    }
+    if (!tableHasColumn(d, 'workspaces', 'subagent_pins_json')) {
+      d.exec("ALTER TABLE workspaces ADD COLUMN subagent_pins_json TEXT NOT NULL DEFAULT ''")
+    }
+    migrateSubagentSettingsSplit(d)
     d.prepare('UPDATE workspaces SET path_segment = id WHERE TRIM(path_segment) = \'\'').run()
   }
 
@@ -932,10 +959,104 @@ export function setConversationSubagentModels(id: string, json: string | null): 
     .run(json && json.trim() ? json.trim() : null, Date.now(), id)
 }
 
+/** Per-workspace subagent pins (v3 split) — parsed map; empty map when unset. */
+export function getWorkspaceSubagentPins(id: string): Record<string, SubagentModelPin> {
+  const row = getDb()
+    .prepare('SELECT subagent_pins_json FROM workspaces WHERE id = ?')
+    .get(id) as { subagent_pins_json: string } | undefined
+  return parseSubagentPins(row?.subagent_pins_json)
+}
+
+export function setWorkspaceSubagentPins(id: string, json: string): void {
+  getDb()
+    .prepare('UPDATE workspaces SET subagent_pins_json = ? WHERE id = ?')
+    .run(json && json.trim() ? json.trim() : '', id)
+}
+
+/** Project-agent trust flag for a workspace — `.pi/agents/*.md` in that folder discoverable. */
+export function getWorkspaceProjectAgents(id: string): boolean {
+  const row = getDb()
+    .prepare('SELECT subagent_project_agents FROM workspaces WHERE id = ?')
+    .get(id) as { subagent_project_agents: number } | undefined
+  return Boolean(row?.subagent_project_agents)
+}
+
+export function setWorkspaceProjectAgents(id: string, enabled: boolean): void {
+  getDb()
+    .prepare('UPDATE workspaces SET subagent_project_agents = ? WHERE id = ?')
+    .run(enabled ? 1 : 0, id)
+}
+
 const WORKSPACE_COLUMNS = `id, name, pi_cwd, path_segment, disabled_skill_paths_json,
     disabled_extension_paths_json, disabled_tools_json, enabled_skill_paths_json,
     always_apply_skill_paths_json, github_remote_url, github_backup_enabled,
-    github_last_sync_at, sort_order, created_at`
+    github_last_sync_at, subagent_project_agents, subagent_pins_json, sort_order, created_at`
+
+/**
+ * Subagent settings restructure (2026-09-30, v3 split) — one-time data migration, called
+ * from migrateLegacySchema after the workspaces columns exist:
+ *   - project-agent opt-in moved out of the global `sylo.subagents.agent_scope` pref into a
+ *     per-workspace `subagent_project_agents` flag (configured from the chat Subagents modal)
+ *   - the blanket "all subagents → one model" pair (`sylo.subagents.model_provider` / `model_id`
+ *     / `thinking_level`) is retired; it folds into per-persona pins for the four bundled
+ *     personas (existing per-persona thinking wins over the blanket level)
+ * Old prefs are blanked afterwards so stale values can never resurrect via a future reader
+ * reintroducing the keys. Bundled persona names mirror packages/sylo-subagents/agents/*.md —
+ * keep in step when that set changes.
+ */
+function migrateSubagentSettingsSplit(d: Database.Database): void {
+  const BUNDLED_PERSONAS = ['scout', 'planner', 'worker', 'reviewer']
+  const marker = d
+    .prepare("SELECT value_json FROM prefs WHERE key = 'sylo.subagents.migrated_split_v1'")
+    .get() as { value_json: string } | undefined
+  if (marker) return
+  const readJson = (key: string): string => {
+    const row = d.prepare('SELECT value_json FROM prefs WHERE key = ?').get(key) as
+      | { value_json: string }
+      | undefined
+    if (!row) return ''
+    try {
+      return String(JSON.parse(row.value_json) ?? '')
+    } catch {
+      return ''
+    }
+  }
+  const writeJson = (key: string, value: unknown): void => {
+    d.prepare(
+      'INSERT INTO prefs (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json',
+    ).run(key, JSON.stringify(value))
+  }
+  const agentScope = readJson('sylo.subagents.agent_scope').trim()
+  const blanketProvider = readJson('sylo.subagents.model_provider').trim()
+  const blanketModelId = readJson('sylo.subagents.model_id').trim()
+  const blanketThinking = readJson('sylo.subagents.thinking_level').trim()
+  if (agentScope === 'both') {
+    d.exec('UPDATE workspaces SET subagent_project_agents = 1')
+  }
+  if (blanketProvider && blanketModelId) {
+    const pins = parseSubagentPins(readJson('sylo.subagents.model_by_agent'))
+    for (const name of [...BUNDLED_PERSONAS, ...Object.keys(pins)]) {
+      const pin = pins[name] ?? { provider: '', modelId: '' }
+      pins[name] = {
+        provider: pin.provider || blanketProvider,
+        modelId: pin.provider ? pin.modelId : blanketModelId,
+        ...(pin.thinkingLevel || blanketThinking
+          ? { thinkingLevel: pin.thinkingLevel || blanketThinking }
+          : {}),
+      }
+    }
+    d
+      .prepare("UPDATE prefs SET value_json = ? WHERE key = 'sylo.subagents.model_by_agent'")
+      .run(JSON.stringify(serializeSubagentPins(pins)))
+  }
+  writeJson('sylo.subagents.agent_scope', '')
+  if (blanketProvider || blanketModelId || blanketThinking) {
+    writeJson('sylo.subagents.model_provider', '')
+    writeJson('sylo.subagents.model_id', '')
+    writeJson('sylo.subagents.thinking_level', '')
+  }
+  writeJson('sylo.subagents.migrated_split_v1', true)
+}
 
 export function listWorkspaces(): WorkspaceRow[] {
   return getDb()
@@ -968,6 +1089,8 @@ export function createWorkspace(name: string, piCwd = ''): WorkspaceRow {
     path_segment: id,
     disabled_skill_paths_json: '[]',
     disabled_extension_paths_json: '[]',
+    subagent_project_agents: 0,
+    subagent_pins_json: '',
     disabled_tools_json: '[]',
     enabled_skill_paths_json: '[]',
     always_apply_skill_paths_json: '[]',
@@ -1276,6 +1399,22 @@ export function getMessage(id: string): MessageRow | undefined {
   return row
 }
 
+/** Delete one message row by id; false when the id did not exist. */
+export function deleteMessage(id: string): boolean {
+  const r = getDb().prepare('DELETE FROM messages WHERE id = ?').run(id)
+  return r.changes > 0
+}
+
+/** Every unresolved 'in progress' compaction notice row, across conversations.
+ *  Matcher: role=system + JSON payload with status 'in_progress' (JSON.stringify has
+ *  no spaces, so the exact key:value LIKE is reliable and cannot hit a summary's prose). */
+export function listCompactionInProgressRows(): { id: string; conversation_id: string; content: string }[] {
+  return getDb()
+    .prepare(
+      "SELECT id, conversation_id, content FROM messages WHERE role = 'system' AND content LIKE '%\"status\":\"in_progress\"%'",
+    )
+    .all() as { id: string; conversation_id: string; content: string }[]
+}
 /** 0-based index of a message AMONG the conversation's user rows, ordered the
  *  same way listMessages orders (created_at, rowid). Aligns the DB timeline
  *  with the pi session's user-entry sequence for edit-resend rewinds. */

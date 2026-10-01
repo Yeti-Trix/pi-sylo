@@ -7,7 +7,6 @@ import { defaultPiBuiltinToolsPref, type PiBuiltinToolsPref } from '../shared/pi
 import type { SystemPromptStats } from '../shared/system-prompt-stats.js'
 import { withDateTimeStamp } from '../shared/message-datetime-stamp.js'
 import type { SubagentRunOutcome } from '../shared/subagent-mentions.js'
-import { readSyloPrefString } from '../shared/sylo-sqlite-prefs.js'
 
 /** Repo workspace installs `@earendil-works/*` under root `node_modules`; cwd must stay inside host package for predictable resolution when Electron forks broker.mjs. */
 function resolveHostPackageRoot(supervisorDir: string): string {
@@ -227,8 +226,14 @@ export interface BrokerConfig {
   compactionReserveTokens?: number | null
   /** Per-chat thinking level; empty means Pi default. Published so child subagents can inherit it. */
   thinkingLevel?: string
-  /** Serialized `{ "<agent>": { provider, modelId, thinkingLevel? } }` — global pins plus the chat's own. */
+  /** Serialized `{ "<agent>": { provider, modelId, thinkingLevel? } }` — resolved by the host. */
   subagentModelsByAgent?: string
+  /**
+   * Persona discovery scope for this broker's workspace: whether `.pi/agents/*.md` from the
+   * workspace folder join the bundled + operator-global personas. Resolved host-side from
+   * the workspace row's `subagent_project_agents` flag (v3 split) — no DB read at fork.
+   */
+  subagentAgentScope?: 'user' | 'both'
   /** Sylo ~/.sylo/disabled.json — broker filters these from capability snapshots. */
   disabledSkillPaths?: string[]
   disabledExtensionPaths?: string[]
@@ -367,6 +372,7 @@ export class BrokerSupervisor {
             modelId: cfg.modelId,
       compactionReserveTokens: cfg.compactionReserveTokens ?? null,
       subagentModelsByAgent: cfg.subagentModelsByAgent ?? '',
+      subagentAgentScope: cfg.subagentAgentScope === 'both' ? 'both' : 'user',
       disabledSkillPaths: cfg.disabledSkillPaths ?? [],
       disabledExtensionPaths: cfg.disabledExtensionPaths ?? [],
       disabledTools: cfg.disabledTools ?? [],
@@ -431,31 +437,13 @@ export class BrokerSupervisor {
         ...(this.cfg.subagentsExtension ?
           {
             SYLO_SUBAGENTS_EXTENSION: this.cfg.subagentsExtension,
-            SYLO_SUBAGENTS_AGENT_SCOPE: readSyloPrefString(
-              this.cfg.syloDbPath,
-              'sylo.subagents.agent_scope',
-              'user',
-            ),
-            // Empty pair means "follow the chat model"; see subagentModelCliArgs.
-            SYLO_SUBAGENTS_MODEL_PROVIDER: readSyloPrefString(
-              this.cfg.syloDbPath,
-              'sylo.subagents.model_provider',
-              '',
-            ),
-            SYLO_SUBAGENTS_MODEL_ID: readSyloPrefString(
-              this.cfg.syloDbPath,
-              'sylo.subagents.model_id',
-              '',
-            ),
-            // JSON `{ "<agent>": { provider, modelId } }` — overrides the pair above per agent.
-            // Resolved by the host (global pins + the focused chat's own), not read here,
-            // so the chat-level override and the Settings default have one merge point.
+            // Resolved by the host (global pins + this workspace's pins + the focused chat's own),
+            // not read here, so the three pin layers and Settings have exactly one merge point.
             SYLO_SUBAGENTS_MODEL_BY_AGENT: this.cfg.subagentModelsByAgent ?? '',
-            SYLO_SUBAGENTS_THINKING: readSyloPrefString(
-              this.cfg.syloDbPath,
-              'sylo.subagents.thinking_level',
-              '',
-            ),
+            // 'user' = bundled + operator-global personas only; 'both' adds this workspace's
+            // folder personas (a cloned repo must not carry its own trust flag, so this is a
+            // per-workspace host-side setting rather than a global one).
+            SYLO_SUBAGENTS_AGENT_SCOPE: this.cfg.subagentAgentScope ?? 'user',
           }
         : {}),
         ...(this.cfg.schedulerExtension ?
@@ -586,6 +574,8 @@ export class BrokerSupervisor {
       modelId?: string
       /** Resolved subagent pins for the switched-to chat; empty string clears them. */
       subagentModelsByAgent?: string
+      /** Persona discovery scope for the switched-to chat's workspace ('user' = global-only). */
+      subagentAgentScope?: 'user' | 'both'
             /** Per-chat image (fallback) model override (empty = keep current). */
       imageModelId?: string
       imageModelProvider?: string
@@ -632,6 +622,7 @@ export class BrokerSupervisor {
           modelProvider: options?.modelProvider,
           modelId: options?.modelId,
           subagentModelsByAgent: options?.subagentModelsByAgent,
+          subagentAgentScope: options?.subagentAgentScope,
           imageModelId: options?.imageModelId,
           imageModelProvider: options?.imageModelProvider,
           thinkingLevel: options?.thinkingLevel,

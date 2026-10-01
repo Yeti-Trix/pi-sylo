@@ -2,6 +2,15 @@
 export type CompactionNoticePayload = {
   kind: 'compaction'
   reason: 'manual' | 'threshold' | 'overflow'
+  /**
+   * 'in_progress' rows are written the moment compaction claims the chat and are
+   * updated IN PLACE to the settled payload (result / failed / cancelled) when the
+   * compaction ends — so the same row shows live status after switching chats and
+   * back, with no orphaned "in progress" card after the fact.
+   */
+  status?: 'in_progress'
+  /** Wall-clock start (row insert time of the in-progress card). Cosmetic only. */
+  startedAt?: number
   tokensBefore?: number
   /** Estimated context tokens after compaction (chars/4 heuristic). Optional; absent on older rows. */
   tokensAfter?: number
@@ -27,6 +36,10 @@ export function formatCompactionNoticeContent(payload: CompactionNoticePayload):
   return JSON.stringify(payload)
 }
 
+export function isCompactionNoticeInProgress(payload: CompactionNoticePayload): boolean {
+  return payload.status === 'in_progress'
+}
+
 export function parseCompactionNoticeContent(content: string): CompactionNoticePayload | null {
   const trimmed = content.trim()
   if (!trimmed.startsWith('{')) return null
@@ -40,6 +53,14 @@ export function parseCompactionNoticeContent(content: string): CompactionNoticeP
     return {
       kind: 'compaction',
       reason,
+      status:
+        (o as { status?: unknown }).status === 'in_progress' ?
+          ('in_progress' as const)
+        : undefined,
+      startedAt:
+        typeof (o as { startedAt?: unknown }).startedAt === 'number' ?
+          (o as { startedAt: number }).startedAt
+        : undefined,
       tokensBefore:
         typeof (o as { tokensBefore?: unknown }).tokensBefore === 'number' ?
           (o as { tokensBefore: number }).tokensBefore
@@ -64,12 +85,19 @@ export function parseCompactionNoticeContent(content: string): CompactionNoticeP
 }
 
 export function compactionNoticeTitle(payload: CompactionNoticePayload): string {
+  if (payload.status === 'in_progress') return 'Compacting context…'
   if (payload.aborted) return 'Context compaction cancelled'
   if (payload.errorMessage) return 'Context compaction failed'
   return 'Context compacted'
 }
 
 export function compactionNoticeBody(payload: CompactionNoticePayload): string {
+  if (payload.status === 'in_progress') {
+    return (
+      'Older turns are being summarized to free context space. This can take a little while — ' +
+      'you can switch chats meanwhile; this card stays until it finishes and then shows the result.'
+    )
+  }
   if (payload.aborted) {
     return 'Older history was not summarized. The full conversation is still in context.'
   }

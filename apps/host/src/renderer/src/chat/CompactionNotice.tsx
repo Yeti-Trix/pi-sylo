@@ -5,6 +5,7 @@ import {
   compactionNoticeBody,
   compactionNoticeTitle,
   compactionTriggerLabel,
+  isCompactionNoticeInProgress,
   parseCompactionNoticeContent,
   type CompactionNoticePayload,
 } from '../../../shared/compaction-notice'
@@ -33,10 +34,36 @@ function CompactionNoticeCard({
   payload: CompactionNoticePayload
 }): React.ReactElement {
   const [showSummary, setShowSummary] = useState(false)
+  const inProgress = isCompactionNoticeInProgress(payload)
   const title = compactionNoticeTitle(payload)
   const body = compactionNoticeBody(payload)
   const trigger = compactionTriggerLabel(payload.reason)
-  const hasSummary = Boolean(payload.summary?.trim())
+  const hasSummary = Boolean(payload.summary?.trim()) && !inProgress
+
+  if (inProgress) {
+    return (
+      <div className="flex justify-center px-1 py-2">
+        <div
+          className={cn(
+            'w-full max-w-[92%] rounded-lg border px-4 py-3 text-[0.84rem] leading-[1.45]',
+            'border-[rgb(245_158_11/0.35)] bg-[rgb(245_158_11/0.06)]',
+          )}
+          role="status"
+          aria-live="polite"
+        >
+          <div className="flex items-center gap-2 font-medium text-text-primary">
+            <span
+              className="inline-block size-2 shrink-0 animate-pulse rounded-full bg-[rgb(245_158_11)]"
+              aria-hidden="true"
+            />
+            {title}
+          </div>
+          <p className={cn('mt-1.5', mutedText)}>{body}</p>
+          <p className={cn('mt-1.5 text-[0.76rem]', mutedText)}>Trigger: {trigger}</p>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="flex justify-center px-1 py-2">
