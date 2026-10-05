@@ -180,7 +180,7 @@ Subagent runs consume tokens from whichever model they land on. High-volume, low
 2. In **Developer → Settings → Subagents**, set the **scout** persona row to `OpenRouter · nvidia/nemotron-3-ultra-550b-a55b:free` (any `…:free` OpenRouter model works — pick one from the model list), then **Save subagent models**.
 3. Now scout runs (and anything similar you pin — e.g. worker runs that only grep/read) cost nothing while the main chat model stays on your paid provider.
 
-Resolution order for a subagent run: **this workspace's pin → the Global SubAgents pin → the chat's model**. Workspace pins are per folder — set them from the **Subagents** button in the chat model bar. Project personas (`.pi/agents/*.md`) appear in that same persona list — no separate opt-in. Pinning is operator-configured by agent name — the agent itself cannot pick a model per call, so it helps the free model along by asking for scout/worker runs for cheap work (see the guidance in [AGENTS.md](../AGENTS.md)).
+Resolution order for a subagent run: **this workspace's pin → the Global SubAgents pin → the chat's model**. Workspace pins are per folder — set them from the **Subagents** button in the chat model bar. Project personas (`.pi/agents/*.md`) appear in that same persona list — no separate opt-in. Pinning is operator-configured by agent name — the agent itself cannot pick a model per call, so it helps the free model along by asking for scout/worker runs for cheap work (see the AI-guidance section of the repo's AGENTS.md).
 
 ---
 

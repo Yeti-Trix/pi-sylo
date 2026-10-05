@@ -5,7 +5,7 @@ board** (user-level GitHub Project). The rule in one line: **no unclaimed, untra
 work — if it isn't an issue, it isn't being coordinated.**
 
 This applies to every agent session and human, regardless of tool (Sylo chats, Cursor,
-GitHub Desktop, CLI). `AGENTS.md` carries only the pointer; this file is the process.
+GitHub Desktop, CLI). `AGENTS.md` (dev repo, not published) carries only the pointer; this file is the process.
 
 ## Where things live
 
