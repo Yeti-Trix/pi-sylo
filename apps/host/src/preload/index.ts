@@ -1033,7 +1033,7 @@ contextBridge.exposeInMainWorld('sylo', {
         onLiveShow: (
       cb: (p: {
         liveId: string
-        kind: 'live-demo' | 'task-board'
+        kind: 'live-demo' | 'task-board' | 'subagent-runs'
         title?: string
         data?: unknown
         workspaceKey?: string
@@ -1070,7 +1070,7 @@ contextBridge.exposeInMainWorld('sylo', {
      *  first `canvas:live-update` arrives. */
         getLivePopout: (liveId: string) =>
       ipcRenderer.invoke('canvas:get-live-popout', liveId) as Promise<
-        | { liveId: string; kind: 'live-demo' | 'task-board'; title?: string; data?: unknown }
+        | { liveId: string; kind: 'live-demo' | 'task-board' | 'subagent-runs'; title?: string; data?: unknown }
         | null
       >,
     stopLiveDemo: (liveId: string) =>
@@ -1097,7 +1097,7 @@ contextBridge.exposeInMainWorld('sylo', {
      *  has no board (or it was disposed while away). */
     getActiveBoardForWorkspace: (workspaceKey: string) =>
       ipcRenderer.invoke('canvas:get-active-board-for-workspace', workspaceKey) as Promise<
-        | { liveId: string; kind: 'live-demo' | 'task-board'; title?: string; data?: unknown }
+        | { liveId: string; kind: 'live-demo' | 'task-board' | 'subagent-runs'; title?: string; data?: unknown }
         | null
       >,
   },

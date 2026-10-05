@@ -1281,7 +1281,7 @@ declare global {
                 onLiveShow: (
           cb: (p: {
             liveId: string
-            kind: 'live-demo' | 'task-board'
+            kind: 'live-demo' | 'task-board' | 'subagent-runs'
             title?: string
             data?: unknown
             workspaceKey?: string
@@ -1294,7 +1294,7 @@ declare global {
         getLivePopout: (
           liveId: string,
         ) => Promise<
-          | { liveId: string; kind: 'live-demo' | 'task-board'; title?: string; data?: unknown }
+          | { liveId: string; kind: 'live-demo' | 'task-board' | 'subagent-runs'; title?: string; data?: unknown }
           | null
         >
         stopLiveDemo: (
@@ -1309,7 +1309,7 @@ declare global {
         getActiveBoardForWorkspace: (
           workspaceKey: string,
         ) => Promise<
-          | { liveId: string; kind: 'live-demo' | 'task-board'; title?: string; data?: unknown }
+          | { liveId: string; kind: 'live-demo' | 'task-board' | 'subagent-runs'; title?: string; data?: unknown }
           | null
         >
       }

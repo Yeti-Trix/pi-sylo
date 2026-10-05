@@ -16,8 +16,11 @@ import { randomUUID } from 'node:crypto'
  *                     `CanvasLiveContent`). Future kinds (`draw`, `3d` …) add
  *                     another host-owned render branch and another entry here
  *                     — they do not touch the snapshot kinds.
+ *   `'subagent-runs'` — per-workspace "Subagents — Runs" board for background
+ *                     subagent runs (issue #27 P2): status sections + live
+ *                     output tails, rebuilt by main from agent_tasks rows.
  */
-export type CanvasLiveKind = 'live-demo' | 'task-board'
+export type CanvasLiveKind = 'live-demo' | 'task-board' | 'subagent-runs'
 
 export type CanvasLiveSubscription = {
   liveId: string

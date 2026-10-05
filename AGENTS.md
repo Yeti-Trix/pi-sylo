@@ -4,6 +4,24 @@ This repo is the public distribution of **Sylo**, a local-first desktop app that
 **[Pi](https://pi.dev/)**. If you are an AI agent (or a human) asked to make changes here,
 this file tells you how to run, test, and submit work.
 
+## Two Git remotes — "push to public" means the publish workflow
+
+This clone has two remotes with different commit histories:
+
+- `origin` → `github.com/Yeti-Trix/pi-sylo-dev` — the development workspace. Safe to
+  commit and push directly.
+- `public` → `github.com/Yeti-Trix/pi-sylo` — the published repo the operator pulls on
+  other machines. It receives only **synced trees**, not dev commits — its history is a
+  different graph, so a direct `git push public` would corrupt it (and a pre-push hook
+  in this clone blocks it on purpose).
+
+When the operator says "push to public", "commit and push to public", "publish this",
+or asks for changes to land on `pi-sylo`, that means the **publish-public-sylo**
+workflow (slash command `/Publish Public Sylo`;
+`sylo-user/.sylo/workflows/publish-public-sylo.md`): scan → dry-run → sync to the
+operator-local public clone → semantic audit → explicit approval gate → push **from the
+public clone**. Plain `git push origin main` here publishes nothing.
+
 ## Running Sylo
 
 | Script | What it does |

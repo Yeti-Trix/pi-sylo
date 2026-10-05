@@ -60,13 +60,11 @@ import {
   capPkgCardSummaryLead,
   capPkgCardSummaryTrail,
   capPkgCardToolbar,
+    capPaneHead,
   capSection,
   capSectionBody,
-  capSectionChevron,
   capSectionLeadTight,
-  capSectionSummary,
   capSectionSummaryTitle,
-  capSectionTitle,
   capSkillRow,
   capStatusDot,
   capStatusDotDisabled,
@@ -90,8 +88,12 @@ import {
   rowHeadline,
   rowList,
   rowName,
-  rowSpacer,
+    rowSpacer,
   select,
+  settingsRail,
+  settingsRailBtn,
+  settingsRailBtnActive,
+  settingsRailLabel,
 } from '../ui-classes'
 import { CapEnableSwitch, OriginBadge } from './badges'
 import { ConfigFormModal } from './config-form'
@@ -223,6 +225,18 @@ function CatalogRowLi({
   )
 }
 
+/** Left-rail categories for the Capability pane — mirrors the Settings tab shell. */
+type CapabilityCategory = 'builtins' | 'optional' | 'packages' | 'catalog' | 'skills' | 'extensions'
+
+const CAP_CATEGORIES: { id: CapabilityCategory; label: string }[] = [
+  { id: 'builtins', label: 'Built-in tools' },
+  { id: 'optional', label: 'Optional packages' },
+  { id: 'packages', label: 'Personal packages' },
+  { id: 'catalog', label: 'Catalog' },
+  { id: 'skills', label: 'Skills' },
+  { id: 'extensions', label: 'Extensions' },
+]
+
 export function CapabilityManagerPanel({
   capabilities,
   settingsJson,
@@ -261,19 +275,15 @@ export function CapabilityManagerPanel({
   const [piDevPage, setPiDevPage] = useState(1)
   const [piDevNameInput, setPiDevNameInput] = useState('')
   const [piDevNameApplied, setPiDevNameApplied] = useState('')
-  const [catalogOpen, setCatalogOpen] = useState(false)
-  const [piBuiltinToolsOpen, setPiBuiltinToolsOpen] = useState(false)
   const [piBuiltinTools, setPiBuiltinTools] = useState<PiBuiltinToolsPref>(() => defaultPiBuiltinToolsPref())
-  const [skillsSectionOpen, setSkillsSectionOpen] = useState(false)
   const [includeCursorSkills, setIncludeCursorSkills] = useState(false)
   const [includeCursorBusy, setIncludeCursorBusy] = useState(false)
   /** Normalized skill paths pinned inline into this workspace's system prompt. */
   const [pinnedSkillPaths, setPinnedSkillPaths] = useState<Set<string>>(() => new Set())
   const [expandedSkillPath, setExpandedSkillPath] = useState<string | null>(null)
-  const [extensionsSectionOpen, setExtensionsSectionOpen] = useState(false)
-  // Personal packages (moved Downloaded-packages card) is the primary inventory surface — keep this section expanded by default;
-  // individual package rows below stay collapsed until opened.
-  const [downloadedOpen, setDownloadedOpen] = useState(true)
+  // Active rail category. Every category stays mounted (hidden via CSS), so filter text,
+  // open package rows, and expanded skills survive rail switches.
+  const [activeCat, setActiveCat] = useState<CapabilityCategory>('builtins')
   /** Tracks open state for each Personal-packages row (<details>). */
   const [pkgCardOpenBySource, setPkgCardOpenBySource] = useState<Record<string, boolean>>({})
   const [piDevType, setPiDevType] = useState<'' | 'extension' | 'skill' | 'theme' | 'prompt'>('')
@@ -358,10 +368,7 @@ export function CapabilityManagerPanel({
     return () => window.clearTimeout(t)
   }, [piDevNameInput])
 
-  // Auto-expand the catalog section when the user starts typing a filter.
-  useEffect(() => {
-    if (piDevNameInput.trim() !== '') setCatalogOpen(true)
-  }, [piDevNameInput])
+  
 
   useEffect(() => {
     const prev = piCatalogFilterRef.current
@@ -499,8 +506,9 @@ export function CapabilityManagerPanel({
   const skills = capabilities?.skills ?? []
   const extensions = capabilities?.extensions ?? []
 
+  // Resolve extension config sidecars lazily — once the Extensions category is opened.
   useEffect(() => {
-    if (!extensionsSectionOpen) return
+    if (activeCat !== 'extensions') return
     let cancelled = false
     void (async () => {
       const next = new Set<string>()
@@ -514,7 +522,7 @@ export function CapabilityManagerPanel({
     return () => {
       cancelled = true
     }
-  }, [extensionsSectionOpen, extensions])
+  }, [activeCat, extensions])
 
   /** `packages[]` from Pi settings — must track `settingsJson` in the renderer, not `capabilities.packages` (stale until refresh). */
   const enabledSpecsList = useMemo(
@@ -899,11 +907,7 @@ export function CapabilityManagerPanel({
     }
   }, [bundleItemsBySource])
 
-  // Auto-expand the Personal packages section when there are cards (section is at the page
-  // bottom; operator usually wants to see inventory without another click).
-  useEffect(() => {
-    if (installedItemCards.length > 0) setDownloadedOpen(true)
-  }, [installedItemCards.length])
+  
 
   const syncCapabilitiesAfterPackageOp = useCallback(async () => {
     await onRefresh()
@@ -1202,740 +1206,745 @@ export function CapabilityManagerPanel({
     : null
 
   return (
-    <div className={capManager}>
-      {banner}
-      {excludeScopeBanner}
-      {collisionBanner}
-
-      <h2 className={capSectionTitle}>Capability manager</h2>
-
-      {installFlash && (
-        <div className={cn(capBanner, capBannerWarn)} style={{ marginTop: 8 }}>
-          {installFlash}
-        </div>
-      )}
-      {excludeAgentNotice && (
-        <div className={cn(capBanner, capBannerWarn)} style={{ marginTop: 8 }}>
-          {excludeAgentNotice}
-        </div>
-      )}
-
-      <details
-        className={capSection}
-        open={piBuiltinToolsOpen}
-        onToggle={(e) => setPiBuiltinToolsOpen(detailsOpenFromToggleEvent(e))}
-      >
-        <summary className={capSectionSummary}>
-          <h2 className={capSectionSummaryTitle}>Pi built-in tools</h2>
-          <span className={capCount}>
-            {piBuiltinTools.enabled ? `${piBuiltinEnabledCount}/${PI_BUILTIN_TOOL_IDS.length}` : 'off'}
-          </span>
-          <span className={capSectionChevron} aria-hidden="true" />
-        </summary>
-        <div className={capSectionBody}>
-          <p className={cn(mutedText, capSectionLeadTight)}>
-            Pi&apos;s native filesystem and shell tools (<code>read</code>, <code>write</code>, <code>bash</code>, etc.).
-            Turn the master switch off to rely only on <strong>extensions</strong> and <strong>skills</strong> you install
-            below. Disabled tools are removed from the agent prompt and <strong>blocked at execution</strong> if the model
-            still requests them. Extension tools you enable are unaffected.
-          </p>
-          {piBuiltinGuardMismatch ?
-            <div className={cn(capBanner, capBannerError)} style={{ marginTop: 8 }}>
-              <strong>Enforcement gap:</strong> the built-in <code>sylo-builtin-tools-guard</code> extension is
-              disabled, but Pi built-in tool toggles above still restrict at least one tool. Those restrictions are{' '}
-              <strong>not enforced</strong> until you re-enable the guard under Extensions and restart the broker.
-            </div>
-          : null}
-          <div className={cn(rowHeadline, 'mb-2 mt-3')}>
-            <span className={rowName}>All Pi built-in tools</span>
-            <span className={rowSpacer} />
-            <CapEnableSwitch
-              checked={piBuiltinTools.enabled}
-              ariaLabel={
-                piBuiltinTools.enabled ?
-                  'Pi built-in tools enabled — click to disable all'
-                : 'Pi built-in tools disabled — click to enable'
-              }
-              label={piBuiltinTools.enabled ? 'On' : 'Off'}
-              onClick={() => setPiBuiltinMaster(!piBuiltinTools.enabled)}
-            />
-          </div>
-          <ul className={cn(rowList, !piBuiltinTools.enabled && 'opacity-55')}>
-            {PI_BUILTIN_TOOL_IDS.map((id) => (
-              <li key={id} className={capSkillRow}>
-                <div className={rowHeadline}>
-                  <span className={rowName}>
-                    <code>{id}</code>
-                    <span className={cn(mutedText, 'ml-2 font-normal')}>
-                      {PI_BUILTIN_TOOL_LABELS[id]}
-                    </span>
-                  </span>
-                  <span className={rowSpacer} />
-                  <CapEnableSwitch
-                    checked={piBuiltinTools.tools[id]}
-                    disabled={!piBuiltinTools.enabled}
-                    ariaLabel={`${id} ${piBuiltinTools.tools[id] ? 'enabled' : 'disabled'}`}
-                    label="Enable"
-                    onClick={() => setPiBuiltinTool(id, !piBuiltinTools.tools[id])}
-                  />
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
-      </details>
-
-      <SyloOptionalPackagesSection
-        onSaved={(note) => {
-          if (note) setExcludeAgentNotice(note)
-          onRefresh()
-        }}
-      />
-
-      <details
-        className={capSection}
-        open={downloadedOpen}
-        onToggle={(e) => setDownloadedOpen(detailsOpenFromToggleEvent(e))}
-      >
-        <summary className={capSectionSummary}>
-          <h2 className={capSectionSummaryTitle}>Personal packages</h2>
-          <span className={capCount}>{installedItemCards.length}</span>
-          <span className={capSectionChevron} aria-hidden="true" />
-        </summary>
-        <div className={capSectionBody}>
-          <p className={cn(mutedText, capSectionLeadTight)}>
-            Pi packages <strong>you installed yourself</strong> (npm, git, or a local path like the{' '}
-            <code>sylo-tools-*</code> bundles) — loaded <strong>in every workspace</strong> at broker start.{' '}
-            <strong>Load package for agent</strong> adds the spec to <code>packages[]</code> (global — broker loads the
-            whole package). Turn it <strong>off</strong> to stop the broker from loading that package for the AI; files
-            stay installed. To remove files from the machine, use <strong>Uninstall</strong> (<code>pi uninstall</code>);
-            restart the broker after either. Per-skill/per-extension <strong>disable</strong> (hide from AI only) is
-            under <strong>Skills</strong> and <strong>Extensions</strong> above.
-          </p>
-          <div className={capActions}>
-            <button
-              type="button"
-              className={btnGhostSm}
-              disabled={!!customPackBusy || customToolPacks.length === 0}
-              onClick={openExportCustom}
-            >
-              {customPackBusy === 'export' ? 'Exporting…' : 'Export custom tools…'}
-            </button>
-            <button
-              type="button"
-              className={btnGhostSm}
-              disabled={!!customPackBusy}
-              onClick={() => void runImportCustom()}
-            >
-              {customPackBusy === 'import' ? 'Importing…' : 'Import custom tools…'}
-            </button>
-          </div>
-          <p className={cn(mutedText, capSectionLeadTight)}>
-            Share <code>Custom/</code> tool bundles locally as a zip (dashboards and tools only — not saved data,
-            tokens, or <code>node_modules</code>). Import on another Sylo by picking that zip — Sylo will ask you to
-            restart so Dashboards and Tools menus appear.
-          </p>
-          {hostPlugins.length > 0 && (
-            <div className="mb-3">
-              <div className={capSubhead}>
-                <span className={capSubheadTitle}>Sylo host plugins</span>
-                <span className={cn(mutedText, capSubheadHint)}>
-                  Loaded by the Sylo app itself — Settings cards, phone-app tabs, RPC tools. The switch loads the package for the agent; packages without a host-plugin card load from the list below.
-                </span>
-              </div>
-              <ul className={rowList}>
-                {hostPlugins.map((p) => {
-                  const dirBase = (p.dir.split(/[\\/]/).pop() ?? '').toLowerCase()
-                  const inv = invByDirBase.get(dirBase)
-                  const primary = inv ? knownPackagePrimarySpec(inv.source) : null
-                  const strip = primary ? alsoStripForPackageToggle(primary) : undefined
-                  const on = inv ? specsEquivalentTo(inv.source).some((x) => enabledPkgs.has(x)) : false
-                  const busy = inv ? cardBusy === inv.source : false
-                  const bundle = inv ? bundleItemsBySource.get(inv.source) : undefined
-                  const skillPaths = bundle
-                    ? [...bundle.values()]
-                        .flatMap((s) => s.skills.map((sk) => sk.path))
-                        .filter(Boolean)
-                    : []
-                  return (
-                  <li key={p.id} className={capSkillRow}>
-                    <div className={rowHeadline}>
-                      <span
-                        className={cn(
-                          capStatusDot,
-                          p.loaded && p.entryPresent ? capStatusDotOn : capStatusDotDisabled,
-                        )}
-                        title={
-                          p.loaded && p.entryPresent ?
-                            'Loaded into the Sylo host'
-                          : 'Discovered but not loaded (restart broker/Sylo)'
-                        }
-                        aria-label={p.loaded && p.entryPresent ? 'Loaded' : 'Not loaded'}
-                        role="img"
-                      />
-                      <code className={capPkgCardName}>{p.id}</code>
-                      <span className={capPkgCardHint}>{p.version ? `v${p.version}` : p.name}</span>
-                      {primary ? (
-                        <CapEnableSwitch
-                          checked={on}
-                          disabled={!!installBusy || busy}
-                          ariaLabel={
-                            on ?
-                              'Package loaded for agent — click to stop loading (files stay on disk)'
-                              : 'Package not loaded — click to add to packages[] for the agent'
-                          }
-                          label="Enable"
-                          className="mr-0"
-                          onClick={() =>
-                            void onTogglePackage(primary, !on, strip ?? undefined, { skillPaths })
-                          }
-                        />
-                      ) : null}
-                      <span className={rowSpacer} />
-                      <OriginBadge origin={p.source === 'npm' ? 'npm-package' : 'sylo-repo'} />
-                    </div>
-                    {p.description ? <p className={cn(mutedText, 'mt-1 text-sm')}>{p.description}</p> : null}
-                    <p className={cn(mutedText, 'mt-1 text-xs')}>{p.dir}</p>
-                    {!p.entryPresent ?
-                      <p className={cn(mutedText, 'mt-1 text-xs text-danger')}>
-                        Host entry missing on disk — cannot load.
-                      </p>
-                    : null}
-                  </li>
-                  )
-                })}
-              </ul>
-            </div>
-          )}
-          {installedItemCards.length === 0 && (
-            <p className={cn(mutedText, capEmptyNote)}>
-              No packages installed yet — install from the catalog below, then Restart broker.
-            </p>
-          )}
-                    {visibleItemCards.map(
-            ({ cardKey, inv, title, titleHint, originTag, siblingCount, bundleLabel, brokerStaleBanner, merged, on }, cardIdx) => {
-        const primary = knownPackagePrimarySpec(inv.source)
-        const strip = alsoStripForPackageToggle(primary)
-        const busy = cardBusy === inv.source
-        const mergedHasAny = merged.extensions.length > 0 || merged.skills.length > 0
-        // Group boundary: first-party published Sylo packages (npm-installed sylo-*)
-        // sit above everything else; a labeled divider marks the transition.
-        const isNpmSyloCard = /^sylo-/i.test(title) && inv.source.startsWith('npm:')
-        const prevCard = cardIdx > 0 ? installedItemCards[cardIdx - 1] : null
-        const prevIsNpmSylo =
-          !!prevCard && /^sylo-/i.test(prevCard.title) && prevCard.inv.source.startsWith('npm:')
-        const showGroupDivider = !isNpmSyloCard && prevIsNpmSylo
-        return (
-                    <React.Fragment key={cardKey}>
-            {showGroupDivider && (
-              <div className={capPkgGroupDivider}>
-                <span className={capPkgGroupDividerLabel}>other packages</span>
-                <span className={capPkgGroupDividerLine} />
-              </div>
-            )}
-                    <details
-            className={capPkgCard}
-            open={pkgCardOpenBySource[cardKey] === true}
-            onToggle={(e) => {
-              setPkgCardOpenBySource((p) => ({
-                ...p,
-                [cardKey]: detailsOpenFromToggleEvent(e),
-              }))
-            }}
+    <div className="flex min-h-0 flex-1 w-full">
+      <nav className={settingsRail} aria-label="Capability categories">
+        <span className={settingsRailLabel}>Capabilities</span>
+        {CAP_CATEGORIES.map((cat) => (
+          <button
+            key={cat.id}
+            type="button"
+            aria-current={activeCat === cat.id ? 'true' : undefined}
+            className={cn(activeCat === cat.id ? settingsRailBtnActive : settingsRailBtn)}
+            onClick={() => setActiveCat(cat.id)}
           >
-            <summary className={capPkgCardSummary}>
-              <div className={capPkgCardSummaryLead}>
-                <div className={capPkgCardHeadline}>
-                  <code className={capPkgCardName}>{title}</code>
-                  {titleHint ? <span className={capPkgCardHint}>{titleHint}</span> : null}
-                </div>
-              </div>
-              <div className={capPkgCardSummaryTrail}>
-                <OriginBadge origin={originTag} />
-                <span
-                  className={capPkgCardSummaryActions}
-                  onClick={(e) => {
-                    e.preventDefault()
-                    e.stopPropagation()
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === ' ' || e.key === 'Enter') e.stopPropagation()
-                  }}
-                >
-                  <CapEnableSwitch
-                    checked={on}
-                    disabled={!!installBusy || busy}
-                    ariaLabel={
-                      on ?
-                        'Package loaded for agent — click to stop loading (files stay on disk)'
-                      : 'Package not loaded — click to add to packages[] for the agent'
-                    }
-                    label="Enable"
-                    className="mr-0"
-                    onClick={() =>
-                      void onTogglePackage(primary, !on, strip, {
-                        skillPaths: merged.skills.map(({ row }) => row.path).filter(Boolean),
-                      })
-                    }
-                  />
-                </span>
-              </div>
-            </summary>
-            <div className={capPkgCardBody}>
-              <div className={capPkgCardToolbar}>
-                <button
-                  type="button"
-                  className={btnGhost}
-                  disabled={!!installBusy || busy}
-                  onClick={() => void runUpdate(inv.source)}
-                >
-                  {busy ? 'Working…' : 'Update'}
-                </button>
-                                <button
-                  type="button"
-                  className={btnDanger}
-                  disabled={!!installBusy || busy}
-                  title={
-                    siblingCount > 1 ?
-                      `Removes the whole ${bundleLabel} bundle (${siblingCount} packages)` :
-                      undefined
-                  }
-                  onClick={() => void runUninstall(inv.source)}
-                >
-                  {siblingCount > 1 ? `Uninstall bundle (${siblingCount})` : 'Uninstall'}
-                </button>
-              </div>
+            {cat.label}
+          </button>
+        ))}
+      </nav>
 
-              {brokerStaleBanner ? (
-                <div className={cn(capBanner, capBannerWarn, 'mb-2.5')}>
-                  {brokerStaleBanner}
-                </div>
-              ) : null}
-
-                            <div className={capPkgCardMeta}>
-                <span className={mutedText}>{siblingCount > 1 ? 'Bundle' : 'Installed at'}</span>
-                <code className={capPath}>{siblingCount > 1 ? inv.source : inv.installedPath}</code>
-              </div>
-
-              {mergedHasAny ?
-                <>
-                  <p className={cn(mutedText, capSectionLeadTight, 'mb-0 mt-2.5')}>
-                    {merged.skills.length} skill(s), {merged.extensions.length} extension(s)
-                    {siblingCount > 1 ? ` — part of the ${bundleLabel} bundle` : ''} — use{' '}
-                    <strong>Skills</strong> and <strong>Extensions</strong> to disable individual items for the AI.
-                  </p>
-                  {merged.skills.length > 0 ?
-                    <p className={cn(mutedText, 'mt-1.5 text-xs')}>
-                      Skills:{' '}
-                      {merged.skills.map(({ row }) => (
-                        <code key={row.path} className="mr-2">
-                          {row.name}
-                        </code>
-                      ))}
-                    </p>
-                  : null}
-                  {merged.extensions.length > 0 ?
-                    <p className={cn(mutedText, 'mt-1 text-xs')}>
-                      Extensions:{' '}
-                      {merged.extensions.map(({ row }) => (
-                        <code key={row.path} className="mr-2">
-                          {row.name}
-                        </code>
-                      ))}
-                    </p>
-                  : null}
-                </>
-              : null}
-
-              {!mergedHasAny && (
-                <p className={cn(mutedText, capPkgCardEmpty)}>
-                  No skills/extensions discovered for this install yet — use <strong>Load package for agent</strong>, then{' '}
-                  <strong>Restart broker</strong>.
-                </p>
-              )}
-            </div>
-          </details>
-        </React.Fragment>
-        )
-      })}
-        </div>
-      </details>
-
-      {capabilities?.loadErrors && capabilities.loadErrors.length > 0 && (
-        <div className={cn(capBanner, capBannerError, 'mt-3')}>
-          <strong>Extension load errors:</strong>
-          <ul style={{ margin: '4px 0 0 16px' }}>
-            {capabilities.loadErrors.map((e) => (
-              <li key={e.path}>
-                <code>{e.path}</code>: {e.error}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {capabilities?.brokerOk && orphanPackages.length > 0 && (
-        <div className={cn(capBanner, capBannerWarn)} style={{ marginTop: 12 }}>
-          <strong>Enabled in settings but no matching loaded extension:</strong>
-          <ul style={{ margin: '6px 0 0 18px', padding: 0, listStyle: 'disc inside' }}>
-            {orphanPackages.map((pkg) => (
-              <li key={pkg} style={{ marginBottom: 10 }}>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-                  <code>{pkg}</code>
-                  <button
-                    type="button"
-                    className={btnGhostSm}
-                    disabled={!!installBusy || !!cardBusy || installBusy === pkg}
-                    onClick={() => void runInstall(pkg)}
-                  >
-                    {installBusy === pkg ? 'Installing…' : 'Install / repair'}
-                  </button>
-                </div>
-                <div className={cn(mutedText, 'mt-1')}>
-                  Often the package was never installed, or the extension failed to import (see errors above).
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-
-      <details
-        className={capSection}
-        open={catalogOpen}
-        onToggle={(e) => setCatalogOpen(detailsOpenFromToggleEvent(e))}
+      {/* Scrolled category pane — switching hides a category, never unmounts it, so filter
+          text, open package rows, and expanded skills survive rail switches. Carries the
+          old capManager width cap. */}
+      <div
+        className={cn(
+          'min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain touch-pan-y p-4',
+          capManager,
+        )}
       >
-        <summary className={capSectionSummary}>
-          <h2 className={capSectionSummaryTitle}>Pi.dev package catalog</h2>
-          {piDevResult && <span className={capCount}>{piDevResult.total.toLocaleString()}</span>}
-          <span className={capSectionChevron} aria-hidden="true" />
-        </summary>
-        <div className={capSectionBody}>
-          <p className={cn(mutedText, capSectionLeadTight)}>
-            Browse packages on{' '}
-            <a href="https://pi.dev/packages" target="_blank" rel="noreferrer">
-              pi.dev
-            </a>
-            . <strong>Install</strong> runs <code>pi install</code>. When it finishes, use <strong>Developer → Restart broker</strong>{' '}
-            so installs show up; a <strong>Personal packages</strong> card appears below once Pi sees them on
-            disk.
-          </p>
+        {banner}
+        {excludeScopeBanner}
+        {collisionBanner}
 
-          <div className={capCatalogCard}>
-            <div className={capCatalogToolbar}>
-              <label className={cn(capField, capFieldGrow, capCatalogToolbarLabel)}>
-                <span className={fieldLabel}>Filter (pi.dev)</span>
-                <input
-                  type="search"
-                  className={input}
-                  value={piDevNameInput}
-                  onChange={(e) => setPiDevNameInput(e.target.value)}
-                  placeholder="Name, description, author…"
-                  autoComplete="off"
-                />
-              </label>
-              <label className={capField}>
-                <span className={fieldLabel}>Type</span>
-                <select
-                  className={select}
-                  value={piDevType}
-                  onChange={(e) => {
-                    setPiDevType(e.target.value as typeof piDevType)
-                    setPiDevPage(1)
-                  }}
-                >
-                  <option value="">All types</option>
-                  <option value="extension">extension</option>
-                  <option value="skill">skill</option>
-                  <option value="theme">theme</option>
-                  <option value="prompt">prompt</option>
-                </select>
-              </label>
-              <label className={capField}>
-                <span className={fieldLabel}>Sort</span>
-                <select
-                  className={select}
-                  value={piDevSort}
-                  onChange={(e) => {
-                    setPiDevSort(e.target.value as typeof piDevSort)
-                    setPiDevPage(1)
-                  }}
-                >
-                  <option value="downloads">Most downloads</option>
-                  <option value="recent">Recently published</option>
-                  <option value="name">A–Z</option>
-                </select>
-              </label>
-              <button
-                type="button"
-                className={btnGhost}
-                disabled={piDevBusy || piDevPage <= 1}
-                onClick={() => setPiDevPage((p) => Math.max(1, p - 1))}
-              >
-                Previous page
-              </button>
-              <button
-                type="button"
-                className={btnGhost}
-                disabled={piDevBusy || !piDevResult || piDevResult.rangeEnd >= piDevResult.total}
-                onClick={() => setPiDevPage((p) => p + 1)}
-              >
-                Next page
-              </button>
-            </div>
-
-        {piDevResult && !piDevBusy && !piDevErr && (
-          <div className={cn(capCatalogMeta, mutedText)}>
-            Showing {piDevResult.rangeStart}-{piDevResult.rangeEnd} of {piDevResult.total} · page {piDevPage} (
-            <a href={piDevResult.sourceUrl} target="_blank" rel="noreferrer">
-              open on pi.dev
-            </a>
-            )
+        {installFlash && (
+          <div className={cn(capBanner, capBannerWarn)} style={{ marginTop: 8 }}>
+            {installFlash}
+          </div>
+        )}
+        {excludeAgentNotice && (
+          <div className={cn(capBanner, capBannerWarn)} style={{ marginTop: 8 }}>
+            {excludeAgentNotice}
           </div>
         )}
 
-        <div className={capCatalogScroll}>
-          {piDevBusy && <p className={mutedText}>Loading pi.dev catalog…</p>}
-          {piDevErr && (
-            <p className={cn(mutedText, 'mt-0 text-danger')}>
-              {piDevErr}
+        {/* --- Pi built-in tools --- */}
+        <section className={cn(capSection, 'flex flex-col', activeCat !== 'builtins' && 'hidden')}>
+          <div className={capPaneHead}>
+            <h2 className={capSectionSummaryTitle}>Pi built-in tools</h2>
+            <span className={capCount}>
+              {piBuiltinTools.enabled
+                ? `${piBuiltinEnabledCount}/${PI_BUILTIN_TOOL_IDS.length}`
+                : 'off'}
+            </span>
+          </div>
+          <div className={capSectionBody}>
+            <p className={cn(mutedText, capSectionLeadTight)}>
+              Pi&apos;s native filesystem and shell tools (<code>read</code>, <code>write</code>, <code>bash</code>, etc.).
+              Turn the master switch off to rely only on <strong>extensions</strong> and <strong>skills</strong> you install
+              below. Disabled tools are removed from the agent prompt and <strong>blocked at execution</strong> if the model
+              still requests them. Extension tools you enable are unaffected.
             </p>
+            {piBuiltinGuardMismatch ?
+              <div className={cn(capBanner, capBannerError)} style={{ marginTop: 8 }}>
+                <strong>Enforcement gap:</strong> the built-in <code>sylo-builtin-tools-guard</code> extension is
+                disabled, but Pi built-in tool toggles above still restrict at least one tool. Those restrictions are{' '}
+                <strong>not enforced</strong> until you re-enable the guard under Extensions and restart the broker.
+              </div>
+            : null}
+            <div className={cn(rowHeadline, 'mb-2 mt-3')}>
+              <span className={rowName}>All Pi built-in tools</span>
+              <span className={rowSpacer} />
+              <CapEnableSwitch
+                checked={piBuiltinTools.enabled}
+                ariaLabel={
+                  piBuiltinTools.enabled ?
+                    'Pi built-in tools enabled — click to disable all'
+                  : 'Pi built-in tools disabled — click to enable'
+                }
+                label={piBuiltinTools.enabled ? 'On' : 'Off'}
+                onClick={() => setPiBuiltinMaster(!piBuiltinTools.enabled)}
+              />
+            </div>
+            <ul className={cn(rowList, !piBuiltinTools.enabled && 'opacity-55')}>
+              {PI_BUILTIN_TOOL_IDS.map((id) => (
+                <li key={id} className={capSkillRow}>
+                  <div className={rowHeadline}>
+                    <span className={rowName}>
+                      <code>{id}</code>
+                      <span className={cn(mutedText, 'ml-2 font-normal')}>
+                        {PI_BUILTIN_TOOL_LABELS[id]}
+                      </span>
+                    </span>
+                    <span className={rowSpacer} />
+                    <CapEnableSwitch
+                      checked={piBuiltinTools.tools[id]}
+                      disabled={!piBuiltinTools.enabled}
+                      ariaLabel={`${id} ${piBuiltinTools.tools[id] ? 'enabled' : 'disabled'}`}
+                      label="Enable"
+                      onClick={() => setPiBuiltinTool(id, !piBuiltinTools.tools[id])}
+                    />
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+
+        {/* --- Sylo optional packages --- */}
+        <SyloOptionalPackagesSection
+          onSaved={(note) => {
+            if (note) setExcludeAgentNotice(note)
+            onRefresh()
+          }}
+        />
+
+        {/* --- Personal packages — orphan repairs surface before the cards. --- */}
+        <section className={cn(capSection, 'flex flex-col', activeCat !== 'packages' && 'hidden')}>
+          {capabilities?.brokerOk && orphanPackages.length > 0 && (
+            <div className={cn(capBanner, capBannerWarn)} style={{ marginTop: 12 }}>
+              <strong>Enabled in settings but no matching loaded extension:</strong>
+              <ul style={{ margin: '6px 0 0 18px', padding: 0, listStyle: 'disc inside' }}>
+                {orphanPackages.map((pkg) => (
+                  <li key={pkg} style={{ marginBottom: 10 }}>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                      <code>{pkg}</code>
+                      <button
+                        type="button"
+                        className={btnGhostSm}
+                        disabled={!!installBusy || !!cardBusy || installBusy === pkg}
+                        onClick={() => void runInstall(pkg)}
+                      >
+                        {installBusy === pkg ? 'Installing…' : 'Install / repair'}
+                      </button>
+                    </div>
+                    <div className={cn(mutedText, 'mt-1')}>
+                      Often the package was never installed, or the extension failed to import (see the{' '}
+                      <strong>Extension load errors</strong> under Extensions).
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
-          {(() => {
-            const syloPinned = piDevResult?.syloPinned ?? []
-            if (syloPinned.length === 0) return null
-            return (
+          <div className={capPaneHead}>
+            <h2 className={capSectionSummaryTitle}>Personal packages</h2>
+            <span className={capCount}>{installedItemCards.length}</span>
+          </div>
+          <div className={capSectionBody}>
+            <p className={cn(mutedText, capSectionLeadTight)}>
+              Pi packages <strong>you installed yourself</strong> (npm, git, or a local path like the{' '}
+              <code>sylo-tools-*</code> bundles) — loaded <strong>in every workspace</strong> at broker start.{' '}
+              <strong>Load package for agent</strong> adds the spec to <code>packages[]</code> (global — broker loads the
+              whole package). Turn it <strong>off</strong> to stop the broker from loading that package for the AI; files
+              stay installed. To remove files from the machine, use <strong>Uninstall</strong> (<code>pi uninstall</code>);
+              restart the broker after either. Per-skill/per-extension <strong>disable</strong> (hide from AI only) is
+              under <strong>Skills</strong> and <strong>Extensions</strong> above.
+            </p>
+            <div className={capActions}>
+              <button
+                type="button"
+                className={btnGhostSm}
+                disabled={!!customPackBusy || customToolPacks.length === 0}
+                onClick={openExportCustom}
+              >
+                {customPackBusy === 'export' ? 'Exporting…' : 'Export custom tools…'}
+              </button>
+              <button
+                type="button"
+                className={btnGhostSm}
+                disabled={!!customPackBusy}
+                onClick={() => void runImportCustom()}
+              >
+                {customPackBusy === 'import' ? 'Importing…' : 'Import custom tools…'}
+              </button>
+            </div>
+            <p className={cn(mutedText, capSectionLeadTight)}>
+              Share <code>Custom/</code> tool bundles locally as a zip (dashboards and tools only — not saved data,
+              tokens, or <code>node_modules</code>). Import on another Sylo by picking that zip — Sylo will ask you to
+              restart so Dashboards and Tools menus appear.
+            </p>
+            {hostPlugins.length > 0 && (
               <div className="mb-3">
-                <div className={capPkgGroupDivider} title="First-party sylo-* packages pinned above the pi.dev ranking">
-                  <span className={capPkgGroupDividerLabel}>Sylo packages</span>
-                  <span className={capPkgGroupDividerLine} />
+                <div className={capSubhead}>
+                  <span className={capSubheadTitle}>Sylo host plugins</span>
+                  <span className={cn(mutedText, capSubheadHint)}>
+                    Loaded by the Sylo app itself — Settings cards, phone-app tabs, RPC tools. The switch loads the package for the agent; packages without a host-plugin card load from the list below.
+                  </span>
                 </div>
-                <ul className={capCatalogList}>
-                  {syloPinned.map((row) => {
-                    const canonFolder = folderIdFromSpec(
-                      knownPackagePrimarySpec(normalizeNpmInstallSpec(row.installSpec)),
-                    )
+                <ul className={rowList}>
+                  {hostPlugins.map((p) => {
+                    const dirBase = (p.dir.split(/[\\/]/).pop() ?? '').toLowerCase()
+                    const inv = invByDirBase.get(dirBase)
+                    const primary = inv ? knownPackagePrimarySpec(inv.source) : null
+                    const strip = primary ? alsoStripForPackageToggle(primary) : undefined
+                    const on = inv ? specsEquivalentTo(inv.source).some((x) => enabledPkgs.has(x)) : false
+                    const busy = inv ? cardBusy === inv.source : false
+                    const bundle = inv ? bundleItemsBySource.get(inv.source) : undefined
+                    const skillPaths = bundle
+                      ? [...bundle.values()]
+                          .flatMap((s) => s.skills.map((sk) => sk.path))
+                          .filter(Boolean)
+                      : []
                     return (
-                      <CatalogRowLi
-                        key={`sylo-pinned-${row.name}`}
-                        row={row}
-                        updateInfo={npmUpdateMap[row.name]}
-                        installedOnDisk={piDevRowLoadedByCanonFolder.has(canonFolder)}
-                        loadedForAgent={piDevRowLoadedByCanonFolder.get(canonFolder) === true}
-                        installBusy={installBusy}
-                        cardBusy={cardBusy}
-                        onInstall={runInstall}
-                        syloBadge
-                      />
+                    <li key={p.id} className={capSkillRow}>
+                      <div className={rowHeadline}>
+                        <span
+                          className={cn(
+                            capStatusDot,
+                            p.loaded && p.entryPresent ? capStatusDotOn : capStatusDotDisabled,
+                          )}
+                          title={
+                            p.loaded && p.entryPresent ?
+                              'Loaded into the Sylo host'
+                            : 'Discovered but not loaded (restart broker/Sylo)'
+                          }
+                          aria-label={p.loaded && p.entryPresent ? 'Loaded' : 'Not loaded'}
+                          role="img"
+                        />
+                        <code className={capPkgCardName}>{p.id}</code>
+                        <span className={capPkgCardHint}>{p.version ? `v${p.version}` : p.name}</span>
+                        {primary ? (
+                          <CapEnableSwitch
+                            checked={on}
+                            disabled={!!installBusy || busy}
+                            ariaLabel={
+                              on ?
+                                'Package loaded for agent — click to stop loading (files stay on disk)'
+                                : 'Package not loaded — click to add to packages[] for the agent'
+                            }
+                            label="Enable"
+                            className="mr-0"
+                            onClick={() =>
+                              void onTogglePackage(primary, !on, strip ?? undefined, { skillPaths })
+                            }
+                          />
+                        ) : null}
+                        <span className={rowSpacer} />
+                        <OriginBadge origin={p.source === 'npm' ? 'npm-package' : 'sylo-repo'} />
+                      </div>
+                      {p.description ? <p className={cn(mutedText, 'mt-1 text-sm')}>{p.description}</p> : null}
+                      <p className={cn(mutedText, 'mt-1 text-xs')}>{p.dir}</p>
+                      {!p.entryPresent ?
+                        <p className={cn(mutedText, 'mt-1 text-xs text-danger')}>
+                          Host entry missing on disk — cannot load.
+                        </p>
+                      : null}
+                    </li>
                     )
                   })}
                 </ul>
+              </div>
+            )}
+            {installedItemCards.length === 0 && (
+              <p className={cn(mutedText, capEmptyNote)}>
+                No packages installed yet — install from the catalog below, then Restart broker.
+              </p>
+            )}
+                      {visibleItemCards.map(
+              ({ cardKey, inv, title, titleHint, originTag, siblingCount, bundleLabel, brokerStaleBanner, merged, on }, cardIdx) => {
+          const primary = knownPackagePrimarySpec(inv.source)
+          const strip = alsoStripForPackageToggle(primary)
+          const busy = cardBusy === inv.source
+          const mergedHasAny = merged.extensions.length > 0 || merged.skills.length > 0
+          // Group boundary: first-party published Sylo packages (npm-installed sylo-*)
+          // sit above everything else; a labeled divider marks the transition.
+          const isNpmSyloCard = /^sylo-/i.test(title) && inv.source.startsWith('npm:')
+          const prevCard = cardIdx > 0 ? installedItemCards[cardIdx - 1] : null
+          const prevIsNpmSylo =
+            !!prevCard && /^sylo-/i.test(prevCard.title) && prevCard.inv.source.startsWith('npm:')
+          const showGroupDivider = !isNpmSyloCard && prevIsNpmSylo
+          return (
+                      <React.Fragment key={cardKey}>
+              {showGroupDivider && (
                 <div className={capPkgGroupDivider}>
-                  <span className={capPkgGroupDividerLabel}>pi.dev ranking</span>
+                  <span className={capPkgGroupDividerLabel}>other packages</span>
                   <span className={capPkgGroupDividerLine} />
                 </div>
-              </div>
-            )
-          })()}
-          {piDevResult && piDevResult.packages.length > 0 && (
-            <ul className={capCatalogList}>
-              {piDevResult.packages.map((row) => {
-                const canonFolder = folderIdFromSpec(
-                  knownPackagePrimarySpec(normalizeNpmInstallSpec(row.installSpec)),
-                )
-                    if (syloPinnedNames.has(row.name)) return null
-                const installedOnDisk = piDevRowLoadedByCanonFolder.has(canonFolder)
-                const loadedForAgent = piDevRowLoadedByCanonFolder.get(canonFolder) === true
-                return (
-                  <CatalogRowLi
-                    key={row.name}
-                    row={row}
-                    updateInfo={npmUpdateMap[row.name]}
-                    installedOnDisk={installedOnDisk}
-                    loadedForAgent={loadedForAgent}
-                    installBusy={installBusy}
-                    cardBusy={cardBusy}
-                    onInstall={runInstall}
-                  />
-                )
-              })}
-            </ul>
-          )}
-          {piDevResult && !piDevBusy && !piDevErr && piDevResult.packages.length === 0 && (
-            <p className={mutedText}>No packages on this page.</p>
-          )}
-        </div>
-          </div>
-
-          <div className={capSubhead}>
-            <span className={capSubheadTitle}>Install by exact spec</span>
-            <span className={cn(mutedText, capSubheadHint)}>
-              Use <code>npm:…</code> / <code>git:…</code> when you already know the Pi package string.
-            </span>
-          </div>
-          <div className={capInlineForm}>
-            <input
-              type="text"
-              className={capInlineInput}
-              value={customSpec}
-              onChange={(e) => setCustomSpec(e.target.value)}
-              placeholder="npm:package or git:…"
-            />
-            <button
-              type="button"
-              className={btnPrimary}
-              disabled={!!installBusy || !!cardBusy || !customSpec.trim()}
-              onClick={() => {
-                const spec = normalizeNpmInstallSpec(customSpec)
-                if (!spec) return
-                void (async () => {
-                  setInstallBusy('__custom')
-                  setInstallFlash(null)
-                  try {
-                    const r = await window.sylo.package.installSpec(spec, packageWorkspaceId)
-                    if (r.ok) {
-                      setInstallFlash(`${spec} — Pi CLI finished. Use Restart broker above when ready.`)
-                      await syncCapabilitiesAfterPackageOp()
-                    } else {
-                      alert(`Install failed:\n${r.detail ?? '(no detail)'}`)
-                    }
-                  } finally {
-                    setInstallBusy(null)
-                  }
-                })()
+              )}
+                      <details
+              className={capPkgCard}
+              open={pkgCardOpenBySource[cardKey] === true}
+              onToggle={(e) => {
+                setPkgCardOpenBySource((p) => ({
+                  ...p,
+                  [cardKey]: detailsOpenFromToggleEvent(e),
+                }))
               }}
             >
-              {installBusy === '__custom' ? 'Installing…' : 'Install'}
-            </button>
-          </div>
-        </div>
-      </details>
-
-      <details
-        className={capSection}
-        open={skillsSectionOpen}
-        onToggle={(e) => setSkillsSectionOpen(detailsOpenFromToggleEvent(e))}
-      >
-        <summary className={capSectionSummary}>
-          <h2 className={capSectionSummaryTitle}>Skills</h2>
-          <span className={capCount}>{skills.length}</span>
-          <span className={capSectionChevron} aria-hidden="true" />
-        </summary>
-        <div className={capSectionBody}>
-          <p className={cn(mutedText, capSectionLeadTight)}>
-            Skills from your Pi agent folder, this workspace&apos;s <code>.pi/skills</code>, and installed
-            packages. Optional: include this workspace&apos;s <code>.cursor/skills</code> (not other repos).{' '}
-            <strong>Disable</strong> (off) hides a skill from the AI without deleting files.{' '}
-            <strong>Remove</strong> deletes standalone folders from disk; package skills are removed via{' '}
-            <strong>Personal packages → Uninstall</strong>. Click a skill name to expand and edit{' '}
-            <code>SKILL.md</code> in place.
-          </p>
-          <div className={cn(rowHeadline, 'mb-2')}>
-            <span className={rowName}>Include Cursor skills</span>
-            <span className={cn(mutedText, 'font-normal')}>
-              Scan <code>&lt;workspace&gt;/.cursor/skills</code>
-            </span>
-            <span className={rowSpacer} />
-            <CapEnableSwitch
-              checked={includeCursorSkills}
-              disabled={includeCursorBusy}
-              ariaLabel={
-                includeCursorSkills ?
-                  'Cursor skills included — click to hide'
-                : 'Cursor skills hidden — click to include'
-              }
-              label={includeCursorSkills ? 'On' : 'Off'}
-              onClick={() => void setIncludeCursorSkillsPref(!includeCursorSkills)}
-            />
-          </div>
-          <div className="mb-3 flex flex-wrap gap-2">
-            <button type="button" className={btnGhostSm} onClick={onNewSkill}>
-              + New skill
-            </button>
-          </div>
-          {skills.length === 0 ? (
-            <p className={cn(mutedText, capEmptyNote)}>No skills discovered.</p>
-          ) : (
-            <ul className={rowList}>
-              {skillsSorted.map((s) => {
-                const key = s.path || s.name
-                return (
-                  <SkillRowCard
-                    key={key}
-                    skill={s}
-                    expanded={!!s.path && expandedSkillPath === s.path}
-                    onToggleExpand={() => {
-                      if (!s.path) return
-                      setExpandedSkillPath((cur) => (cur === s.path ? null : s.path))
+              <summary className={capPkgCardSummary}>
+                <div className={capPkgCardSummaryLead}>
+                  <div className={capPkgCardHeadline}>
+                    <code className={capPkgCardName}>{title}</code>
+                    {titleHint ? <span className={capPkgCardHint}>{titleHint}</span> : null}
+                  </div>
+                </div>
+                <div className={capPkgCardSummaryTrail}>
+                  <OriginBadge origin={originTag} />
+                  <span
+                    className={capPkgCardSummaryActions}
+                    onClick={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
                     }}
-                    installedFolderIds={installedFolderIds}
-                    skillSurfaceLintByPath={skillSurfaceLintByPath}
-                    exclusionWorkspaceId={exclusionWorkspaceId}
-                    skillRemoveBusy={skillRemoveBusy}
-                    pinned={pinnedSkillPaths.has(skillPathKey(s.path ?? ''))}
-                    onTogglePin={(path, pinned) => void togglePinnedSkill(path, pinned)}
-                    onPatchExclude={(path, excluded) =>
-                      void patchStandaloneExclude('skill', path, excluded)
+                    onKeyDown={(e) => {
+                      if (e.key === ' ' || e.key === 'Enter') e.stopPropagation()
+                    }}
+                  >
+                    <CapEnableSwitch
+                      checked={on}
+                      disabled={!!installBusy || busy}
+                      ariaLabel={
+                        on ?
+                          'Package loaded for agent — click to stop loading (files stay on disk)'
+                        : 'Package not loaded — click to add to packages[] for the agent'
+                      }
+                      label="Enable"
+                      className="mr-0"
+                      onClick={() =>
+                        void onTogglePackage(primary, !on, strip, {
+                          skillPaths: merged.skills.map(({ row }) => row.path).filter(Boolean),
+                        })
+                      }
+                    />
+                  </span>
+                </div>
+              </summary>
+              <div className={capPkgCardBody}>
+                <div className={capPkgCardToolbar}>
+                  <button
+                    type="button"
+                    className={btnGhost}
+                    disabled={!!installBusy || busy}
+                    onClick={() => void runUpdate(inv.source)}
+                  >
+                    {busy ? 'Working…' : 'Update'}
+                  </button>
+                                  <button
+                    type="button"
+                    className={btnDanger}
+                    disabled={!!installBusy || busy}
+                    title={
+                      siblingCount > 1 ?
+                        `Removes the whole ${bundleLabel} bundle (${siblingCount} packages)` :
+                        undefined
                     }
-                    onRequestRemove={(name, path) => setRemoveSkillModal({ name, path })}
-                    onOpenParams={(path, name) => void openSkillParamsEditor(path, name)}
-                  />
-                )
-              })}
-            </ul>
-          )}
-        </div>
-      </details>
+                    onClick={() => void runUninstall(inv.source)}
+                  >
+                    {siblingCount > 1 ? `Uninstall bundle (${siblingCount})` : 'Uninstall'}
+                  </button>
+                </div>
 
-      <details
-        className={capSection}
-        open={extensionsSectionOpen}
-        onToggle={(e) => setExtensionsSectionOpen(detailsOpenFromToggleEvent(e))}
-      >
-        <summary className={capSectionSummary}>
-          <h2 className={capSectionSummaryTitle}>Extensions</h2>
-          <span className={capCount}>{extensions.length}</span>
-          <span className={capSectionChevron} aria-hidden="true" />
-        </summary>
-        <div className={capSectionBody}>
-          <p className={cn(mutedText, capSectionLeadTight)}>
-            An <strong>extension</strong> is one loaded entry (often a package’s <code>index</code> file). Each extension
-            registers one or more <strong>tools</strong> (individual commands the model can call). Use the header{' '}
-            <strong>Enable</strong> for the whole extension, or each tool row’s <strong>Enable</strong> to hide only that
-            tool (stored in <code>~/.sylo/disabled.json</code>, merged with workspace exclusions). Turning{' '}
-            <strong>Enable</strong> off does not <strong>uninstall</strong> anything; use Personal packages →{' '}
-            <strong>Uninstall</strong> to remove files from disk.
-          </p>
-          {extensions.length === 0 ? (
-            <p className={cn(mutedText, capEmptyNote)}>
-              No extensions yet. Install from the <strong>catalog</strong>, <strong>Restart broker</strong>, and they
-              appear here.
+                {brokerStaleBanner ? (
+                  <div className={cn(capBanner, capBannerWarn, 'mb-2.5')}>
+                    {brokerStaleBanner}
+                  </div>
+                ) : null}
+
+                              <div className={capPkgCardMeta}>
+                  <span className={mutedText}>{siblingCount > 1 ? 'Bundle' : 'Installed at'}</span>
+                  <code className={capPath}>{siblingCount > 1 ? inv.source : inv.installedPath}</code>
+                </div>
+
+                {mergedHasAny ?
+                  <>
+                    <p className={cn(mutedText, capSectionLeadTight, 'mb-0 mt-2.5')}>
+                      {merged.skills.length} skill(s), {merged.extensions.length} extension(s)
+                      {siblingCount > 1 ? ` — part of the ${bundleLabel} bundle` : ''} — use{' '}
+                      <strong>Skills</strong> and <strong>Extensions</strong> to disable individual items for the AI.
+                    </p>
+                    {merged.skills.length > 0 ?
+                      <p className={cn(mutedText, 'mt-1.5 text-xs')}>
+                        Skills:{' '}
+                        {merged.skills.map(({ row }) => (
+                          <code key={row.path} className="mr-2">
+                            {row.name}
+                          </code>
+                        ))}
+                      </p>
+                    : null}
+                    {merged.extensions.length > 0 ?
+                      <p className={cn(mutedText, 'mt-1 text-xs')}>
+                        Extensions:{' '}
+                        {merged.extensions.map(({ row }) => (
+                          <code key={row.path} className="mr-2">
+                            {row.name}
+                          </code>
+                        ))}
+                      </p>
+                    : null}
+                  </>
+                : null}
+
+                {!mergedHasAny && (
+                  <p className={cn(mutedText, capPkgCardEmpty)}>
+                    No skills/extensions discovered for this install yet — use <strong>Load package for agent</strong>, then{' '}
+                    <strong>Restart broker</strong>.
+                  </p>
+                )}
+              </div>
+            </details>
+          </React.Fragment>
+          )
+        })}
+          </div>
+        </section>
+
+        {/* --- pi.dev catalog --- */}
+        <section className={cn(capSection, 'flex flex-col', activeCat !== 'catalog' && 'hidden')}>
+          <div className={capPaneHead}>
+            <h2 className={capSectionSummaryTitle}>Pi.dev package catalog</h2>
+            {piDevResult ? (
+              <span className={capCount}>{piDevResult.total.toLocaleString()}</span>
+            ) : null}
+          </div>
+          <div className={capSectionBody}>
+            <p className={cn(mutedText, capSectionLeadTight)}>
+              Browse packages on{' '}
+              <a href="https://pi.dev/packages" target="_blank" rel="noreferrer">
+                pi.dev
+              </a>
+              . <strong>Install</strong> runs <code>pi install</code>. When it finishes, use <strong>Developer → Restart broker</strong>{' '}
+              so installs show up; a <strong>Personal packages</strong> card appears below once Pi sees them on
+              disk.
             </p>
-          ) : (
-            <ul className={rowList}>
-              {extensionsSorted.map((x) => (
-                <ExtensionCapabilityCard
-                  key={x.path || x.name}
-                  x={x}
-                  brokerOk={!!capabilities?.brokerOk}
-                  hasConfigSchema={!!x.path && extensionConfigPaths.has(x.path)}
-                  onConfigure={
-                    x.path ?
-                      () => void openExtensionConfigEditor(x.path, x.name)
-                    : undefined
-                  }
-                  onPatchExtension={(path, excluded) => void patchStandaloneExclude('extension', path, excluded)}
-                  onPatchTool={(extensionPath, toolName, excluded) =>
-                    void patchToolExclude(extensionPath, toolName, excluded)
-                  }
-                />
-              ))}
-            </ul>
+
+            <div className={capCatalogCard}>
+              <div className={capCatalogToolbar}>
+                <label className={cn(capField, capFieldGrow, capCatalogToolbarLabel)}>
+                  <span className={fieldLabel}>Filter (pi.dev)</span>
+                  <input
+                    type="search"
+                    className={input}
+                    value={piDevNameInput}
+                    onChange={(e) => setPiDevNameInput(e.target.value)}
+                    placeholder="Name, description, author…"
+                    autoComplete="off"
+                  />
+                </label>
+                <label className={capField}>
+                  <span className={fieldLabel}>Type</span>
+                  <select
+                    className={select}
+                    value={piDevType}
+                    onChange={(e) => {
+                      setPiDevType(e.target.value as typeof piDevType)
+                      setPiDevPage(1)
+                    }}
+                  >
+                    <option value="">All types</option>
+                    <option value="extension">extension</option>
+                    <option value="skill">skill</option>
+                    <option value="theme">theme</option>
+                    <option value="prompt">prompt</option>
+                  </select>
+                </label>
+                <label className={capField}>
+                  <span className={fieldLabel}>Sort</span>
+                  <select
+                    className={select}
+                    value={piDevSort}
+                    onChange={(e) => {
+                      setPiDevSort(e.target.value as typeof piDevSort)
+                      setPiDevPage(1)
+                    }}
+                  >
+                    <option value="downloads">Most downloads</option>
+                    <option value="recent">Recently published</option>
+                    <option value="name">A–Z</option>
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className={btnGhost}
+                  disabled={piDevBusy || piDevPage <= 1}
+                  onClick={() => setPiDevPage((p) => Math.max(1, p - 1))}
+                >
+                  Previous page
+                </button>
+                <button
+                  type="button"
+                  className={btnGhost}
+                  disabled={piDevBusy || !piDevResult || piDevResult.rangeEnd >= piDevResult.total}
+                  onClick={() => setPiDevPage((p) => p + 1)}
+                >
+                  Next page
+                </button>
+              </div>
+
+          {piDevResult && !piDevBusy && !piDevErr && (
+            <div className={cn(capCatalogMeta, mutedText)}>
+              Showing {piDevResult.rangeStart}-{piDevResult.rangeEnd} of {piDevResult.total} · page {piDevPage} (
+              <a href={piDevResult.sourceUrl} target="_blank" rel="noreferrer">
+                open on pi.dev
+              </a>
+              )
+            </div>
           )}
-        </div>
-      </details>
 
+          <div className={capCatalogScroll}>
+            {piDevBusy && <p className={mutedText}>Loading pi.dev catalog…</p>}
+            {piDevErr && (
+              <p className={cn(mutedText, 'mt-0 text-danger')}>
+                {piDevErr}
+              </p>
+            )}
+            {(() => {
+              const syloPinned = piDevResult?.syloPinned ?? []
+              if (syloPinned.length === 0) return null
+              return (
+                <div className="mb-3">
+                  <div className={capPkgGroupDivider} title="First-party sylo-* packages pinned above the pi.dev ranking">
+                    <span className={capPkgGroupDividerLabel}>Sylo packages</span>
+                    <span className={capPkgGroupDividerLine} />
+                  </div>
+                  <ul className={capCatalogList}>
+                    {syloPinned.map((row) => {
+                      const canonFolder = folderIdFromSpec(
+                        knownPackagePrimarySpec(normalizeNpmInstallSpec(row.installSpec)),
+                      )
+                      return (
+                        <CatalogRowLi
+                          key={`sylo-pinned-${row.name}`}
+                          row={row}
+                          updateInfo={npmUpdateMap[row.name]}
+                          installedOnDisk={piDevRowLoadedByCanonFolder.has(canonFolder)}
+                          loadedForAgent={piDevRowLoadedByCanonFolder.get(canonFolder) === true}
+                          installBusy={installBusy}
+                          cardBusy={cardBusy}
+                          onInstall={runInstall}
+                          syloBadge
+                        />
+                      )
+                    })}
+                  </ul>
+                  <div className={capPkgGroupDivider}>
+                    <span className={capPkgGroupDividerLabel}>pi.dev ranking</span>
+                    <span className={capPkgGroupDividerLine} />
+                  </div>
+                </div>
+              )
+            })()}
+            {piDevResult && piDevResult.packages.length > 0 && (
+              <ul className={capCatalogList}>
+                {piDevResult.packages.map((row) => {
+                  const canonFolder = folderIdFromSpec(
+                    knownPackagePrimarySpec(normalizeNpmInstallSpec(row.installSpec)),
+                  )
+                      if (syloPinnedNames.has(row.name)) return null
+                  const installedOnDisk = piDevRowLoadedByCanonFolder.has(canonFolder)
+                  const loadedForAgent = piDevRowLoadedByCanonFolder.get(canonFolder) === true
+                  return (
+                    <CatalogRowLi
+                      key={row.name}
+                      row={row}
+                      updateInfo={npmUpdateMap[row.name]}
+                      installedOnDisk={installedOnDisk}
+                      loadedForAgent={loadedForAgent}
+                      installBusy={installBusy}
+                      cardBusy={cardBusy}
+                      onInstall={runInstall}
+                    />
+                  )
+                })}
+              </ul>
+            )}
+            {piDevResult && !piDevBusy && !piDevErr && piDevResult.packages.length === 0 && (
+              <p className={mutedText}>No packages on this page.</p>
+            )}
+          </div>
+            </div>
 
+            <div className={capSubhead}>
+              <span className={capSubheadTitle}>Install by exact spec</span>
+              <span className={cn(mutedText, capSubheadHint)}>
+                Use <code>npm:…</code> / <code>git:…</code> when you already know the Pi package string.
+              </span>
+            </div>
+            <div className={capInlineForm}>
+              <input
+                type="text"
+                className={capInlineInput}
+                value={customSpec}
+                onChange={(e) => setCustomSpec(e.target.value)}
+                placeholder="npm:package or git:…"
+              />
+              <button
+                type="button"
+                className={btnPrimary}
+                disabled={!!installBusy || !!cardBusy || !customSpec.trim()}
+                onClick={() => {
+                  const spec = normalizeNpmInstallSpec(customSpec)
+                  if (!spec) return
+                  void (async () => {
+                    setInstallBusy('__custom')
+                    setInstallFlash(null)
+                    try {
+                      const r = await window.sylo.package.installSpec(spec, packageWorkspaceId)
+                      if (r.ok) {
+                        setInstallFlash(`${spec} — Pi CLI finished. Use Restart broker above when ready.`)
+                        await syncCapabilitiesAfterPackageOp()
+                      } else {
+                        alert(`Install failed:\n${r.detail ?? '(no detail)'}`)
+                      }
+                    } finally {
+                      setInstallBusy(null)
+                    }
+                  })()
+                }}
+              >
+                {installBusy === '__custom' ? 'Installing…' : 'Install'}
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {/* --- Skills --- */}
+        <section className={cn(capSection, 'flex flex-col', activeCat !== 'skills' && 'hidden')}>
+          <div className={capPaneHead}>
+            <h2 className={capSectionSummaryTitle}>Skills</h2>
+            <span className={capCount}>{skills.length}</span>
+          </div>
+          <div className={capSectionBody}>
+            <p className={cn(mutedText, capSectionLeadTight)}>
+              Skills from your Pi agent folder, this workspace&apos;s <code>.pi/skills</code>, and installed
+              packages. Optional: include this workspace&apos;s <code>.cursor/skills</code> (not other repos).{' '}
+              <strong>Disable</strong> (off) hides a skill from the AI without deleting files.{' '}
+              <strong>Remove</strong> deletes standalone folders from disk; package skills are removed via{' '}
+              <strong>Personal packages → Uninstall</strong>. Click a skill name to expand and edit{' '}
+              <code>SKILL.md</code> in place.
+            </p>
+            <div className={cn(rowHeadline, 'mb-2')}>
+              <span className={rowName}>Include Cursor skills</span>
+              <span className={cn(mutedText, 'font-normal')}>
+                Scan <code>&lt;workspace&gt;/.cursor/skills</code>
+              </span>
+              <span className={rowSpacer} />
+              <CapEnableSwitch
+                checked={includeCursorSkills}
+                disabled={includeCursorBusy}
+                ariaLabel={
+                  includeCursorSkills ?
+                    'Cursor skills included — click to hide'
+                  : 'Cursor skills hidden — click to include'
+                }
+                label={includeCursorSkills ? 'On' : 'Off'}
+                onClick={() => void setIncludeCursorSkillsPref(!includeCursorSkills)}
+              />
+            </div>
+            <div className="mb-3 flex flex-wrap gap-2">
+              <button type="button" className={btnGhostSm} onClick={onNewSkill}>
+                + New skill
+              </button>
+            </div>
+            {skills.length === 0 ? (
+              <p className={cn(mutedText, capEmptyNote)}>No skills discovered.</p>
+            ) : (
+              <ul className={rowList}>
+                {skillsSorted.map((s) => {
+                  const key = s.path || s.name
+                  return (
+                    <SkillRowCard
+                      key={key}
+                      skill={s}
+                      expanded={!!s.path && expandedSkillPath === s.path}
+                      onToggleExpand={() => {
+                        if (!s.path) return
+                        setExpandedSkillPath((cur) => (cur === s.path ? null : s.path))
+                      }}
+                      installedFolderIds={installedFolderIds}
+                      skillSurfaceLintByPath={skillSurfaceLintByPath}
+                      exclusionWorkspaceId={exclusionWorkspaceId}
+                      skillRemoveBusy={skillRemoveBusy}
+                      pinned={pinnedSkillPaths.has(skillPathKey(s.path ?? ''))}
+                      onTogglePin={(path, pinned) => void togglePinnedSkill(path, pinned)}
+                      onPatchExclude={(path, excluded) =>
+                        void patchStandaloneExclude('skill', path, excluded)
+                      }
+                      onRequestRemove={(name, path) => setRemoveSkillModal({ name, path })}
+                      onOpenParams={(path, name) => void openSkillParamsEditor(path, name)}
+                    />
+                  )
+                })}
+              </ul>
+            )}
+          </div>
+        </section>
+
+        {/* --- Extensions — broker load errors surface before the cards. --- */}
+        <section className={cn(capSection, 'flex flex-col', activeCat !== 'extensions' && 'hidden')}>
+          {capabilities?.loadErrors && capabilities.loadErrors.length > 0 && (
+            <div className={cn(capBanner, capBannerError, 'mt-3')}>
+              <strong>Extension load errors:</strong>
+              <ul style={{ margin: '4px 0 0 16px' }}>
+                {capabilities.loadErrors.map((e) => (
+                  <li key={e.path}>
+                    <code>{e.path}</code>: {e.error}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <div className={capPaneHead}>
+            <h2 className={capSectionSummaryTitle}>Extensions</h2>
+            <span className={capCount}>{extensions.length}</span>
+          </div>
+          <div className={capSectionBody}>
+            <p className={cn(mutedText, capSectionLeadTight)}>
+              An <strong>extension</strong> is one loaded entry (often a package’s <code>index</code> file). Each extension
+              registers one or more <strong>tools</strong> (individual commands the model can call). Use the header{' '}
+              <strong>Enable</strong> for the whole extension, or each tool row’s <strong>Enable</strong> to hide only that
+              tool (stored in <code>~/.sylo/disabled.json</code>, merged with workspace exclusions). Turning{' '}
+              <strong>Enable</strong> off does not <strong>uninstall</strong> anything; use Personal packages →{' '}
+              <strong>Uninstall</strong> to remove files from disk.
+            </p>
+            {extensions.length === 0 ? (
+              <p className={cn(mutedText, capEmptyNote)}>
+                No extensions yet. Install from the <strong>catalog</strong>, <strong>Restart broker</strong>, and they
+                appear here.
+              </p>
+            ) : (
+              <ul className={rowList}>
+                {extensionsSorted.map((x) => (
+                  <ExtensionCapabilityCard
+                    key={x.path || x.name}
+                    x={x}
+                    brokerOk={!!capabilities?.brokerOk}
+                    hasConfigSchema={!!x.path && extensionConfigPaths.has(x.path)}
+                    onConfigure={
+                      x.path ?
+                        () => void openExtensionConfigEditor(x.path, x.name)
+                      : undefined
+                    }
+                    onPatchExtension={(path, excluded) => void patchStandaloneExclude('extension', path, excluded)}
+                    onPatchTool={(extensionPath, toolName, excluded) =>
+                      void patchToolExclude(extensionPath, toolName, excluded)
+                    }
+                  />
+                ))}
+                          </ul>
+            )}
+          </div>
+        </section>
+      </div>
 
       {removeSkillModal ?
         createPortal(
@@ -2116,7 +2125,6 @@ export function CapabilityManagerPanel({
         onClose={closeConfigModal}
         onSave={saveConfigModal}
       />
-
     </div>
   )
 }

@@ -15,6 +15,8 @@ export type SyloOptionalPackage = {
   preEnableScriptRelPath?: string
   /** Relative to Sylo repo root; Sylo runs pip on enable when set. */
   pythonRequirementsRelPath?: string
+  /** Relative to Sylo repo root; best-effort pip on enable (extra backend deps). A failure here is reported but does NOT fail the enable. */
+  pythonOptionalRequirementsRelPath?: string
   /** Relative to Sylo repo root; Python script run after pip succeeds (e.g. copy IDE scripts). */
   postEnableScriptRelPath?: string
   /** When true, package expects Sylo host UI (routes/widgets) — not required for all sylo-* names. */
@@ -91,10 +93,12 @@ export const SYLO_OPTIONAL_PACKAGES: readonly SyloOptionalPackage[] = [
     description:
       'Local text-to-speech (Kokoro + Orpheus). Agent tool sylo_tts_speak; ' +
       'default voice in extension config. Sidebar **Speech** tab for paste-and-generate. ' +
-      'GPU recommended; installs Kokoro Python deps on enable. Orpheus: optional pip file.',
+      'GPU recommended; installs both backends\u2019 Python deps on enable ' +
+      '(Orpheus best-effort — self-heals on first use).',
     extensionRelPath: 'packages/sylo-tts/extensions/index.ts',
     skillNames: ['tts'],
     pythonRequirementsRelPath: 'packages/sylo-tts/scripts/requirements.txt',
+    pythonOptionalRequirementsRelPath: 'packages/sylo-tts/scripts/requirements-orpheus.txt',
     requiresSyloUi: true,
   },
   // (sylo-logicforge → sylo-tools-controls bundle)

@@ -437,13 +437,15 @@ export class BrokerSupervisor {
         ...(this.cfg.subagentsExtension ?
           {
             SYLO_SUBAGENTS_EXTENSION: this.cfg.subagentsExtension,
-            // Resolved by the host (global pins + this workspace's pins + the focused chat's own),
-            // not read here, so the three pin layers and Settings have exactly one merge point.
+            // Resolved by the host (this workspace's pin → the Global SubAgents pin —
+            // one merge point), not read here.
             SYLO_SUBAGENTS_MODEL_BY_AGENT: this.cfg.subagentModelsByAgent ?? '',
-            // 'user' = bundled + operator-global personas only; 'both' adds this workspace's
-            // folder personas (a cloned repo must not carry its own trust flag, so this is a
-            // per-workspace host-side setting rather than a global one).
-            SYLO_SUBAGENTS_AGENT_SCOPE: this.cfg.subagentAgentScope ?? 'user',
+            // Persona availability is decided in the Subagents UI (unpinned repo
+            // personas list there; only picks make them runnable).
+            SYLO_SUBAGENTS_AGENT_SCOPE: 'both',
+            // Pause/resume mailbox (issue #27 P3): children park on await_user_input
+            // polling <dir>/<runId>.answer.json; subagent_answer writes it.
+            SYLO_AWAIT_MAILBOX: join(dirname(this.cfg.syloDbPath), 'subagent-mailbox'),
           }
         : {}),
         ...(this.cfg.schedulerExtension ?

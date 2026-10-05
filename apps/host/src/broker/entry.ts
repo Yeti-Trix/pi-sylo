@@ -720,6 +720,15 @@ function installSubagentTurnIdBridge(): void {
 
 installSubagentTurnIdBridge()
 
+/**
+ * Detached background subagent children must not linger when the broker child dies
+ * (host shutdown, Restart broker, crash): they are grandchildren of the OS tree with
+ * no other parent to reap them. Sync-safe kills only — `exit` cannot await.
+ */
+process.on('exit', () => {
+  cancelAllSubagentRuns()
+})
+
 let unsubscribe: (() => void) | undefined
 /** Pi resource loader; published to main on request so the Capability Manager sees Pi's loaded view. */
 let resourceLoader: ResourceLoader | undefined

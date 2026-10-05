@@ -19,7 +19,7 @@ export type CanvasPayload = {
 // Snapshot kinds are untouched — live is an additive, parallel path so the
 // existing svg/mermaid/markdown experience cannot regress.
 
-export type CanvasLiveKind = 'live-demo' | 'task-board'
+export type CanvasLiveKind = 'live-demo' | 'task-board' | 'subagent-runs'
 
 export type CanvasLiveSubscription = {
   liveId: string

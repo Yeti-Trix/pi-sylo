@@ -14,6 +14,18 @@ from pathlib import Path
 _ORIGINAL_STDOUT = sys.stdout
 
 
+def _error_chain(exc: BaseException, depth: int = 5) -> str:
+    """Flatten `__cause__`/`__context__` links — transformers wraps broken deps in a
+    cryptic 'Could not import module ...' ImportError and hides the real error."""
+    parts: list[str] = []
+    cur: BaseException | None = exc
+    while cur is not None and len(parts) < depth:
+        msg = str(cur)
+        parts.append(f"{type(cur).__name__}: {msg[:300]}")
+        cur = cur.__cause__ or cur.__context__
+    return " <- ".join(parts)
+
+
 def _configure_quiet_env() -> None:
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
     os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
@@ -95,11 +107,12 @@ def synth_kokoro(text: str, voice: str, lang_code: str, out_path: Path, *, speed
                 if arr.size:
                     chunks.append(arr)
     except ImportError as exc:
+        root = _error_chain(exc)
         return {
             "ok": False,
             "error": (
-                f"Kokoro import failed ({exc}). "
-                "Run: pip install -r packages/sylo-tts/scripts/requirements.txt "
+                f"Kokoro import failed. Root cause: {root}. "
+                "Fix: pip install -r packages/sylo-tts/scripts/requirements.txt "
                 "or re-enable Speech in Capability manager."
             ),
         }

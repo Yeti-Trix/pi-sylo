@@ -18,7 +18,7 @@ import { resolvePiSpawn } from './pi-cli.ts'
 import { resolveSubagentToolPolicy, toolCliArgs } from './pi-tool-policy.ts'
 import { subagentModelCliArgs } from './subagent-model.ts'
 import { killSubagentTree } from './subagent-kill.ts'
-import { cancelSubagentRun, consumeRunCancelled, registerSubagentRun, unregisterSubagentRun } from './subagent-run-registry.ts'
+import { cancelSubagentRun, consumeRunCancelled, findActiveRunByAgent, listActiveRunSummaries, registerSubagentRun, unregisterSubagentRun } from './subagent-run-registry.ts'
 import { resolveSubagentStallMs, resolveSubagentTimeoutMs } from './subagent-timeout.ts'
 import { newSubagentRunId, notifySyloSubagent, type SyloSubagentRunMode } from './sylo-host.ts'
 
@@ -53,6 +53,13 @@ const SUBAGENT_ABORTED_MESSAGE = 'Subagent was aborted'
 const MAX_PARALLEL_TASKS = 8
 const MAX_CONCURRENCY = 4
 const PER_TASK_OUTPUT_CAP = 50 * 1024
+/**
+ * Cap on detached (background) child runs alive at once. Counts children, not tool
+ * calls: a parallel dispatch of 4 needs 4 slots, a background chain needs 1 (its steps
+ * are sequential). Blocking (wait:true) runs never occupy slots — the turn itself waits.
+ */
+const MAX_BACKGROUND_RUNS = 8
+const activeBackgroundRuns = new Set<string>()
 /**
  * Coalescing window for live progress.
  *
@@ -92,6 +99,12 @@ const SUBAGENT_CHILD_MODE_BLOCK = [
   'The user message contains your assignment from the orchestrator. Execute it immediately, then stop.',
   'Do **not** call the `subagent` tool. Do **not** simulate another turn.',
   'Do **not** greet the user or ask what they want — just execute the task and report results.',
+  '',
+  '### If you are blocked on a decision only the operator can make',
+  'Call `await_user_input` ONCE with a crisp question (include the options you weighed and a two-sentence context recap).',
+  'Never guess a business decision, a secret, or a choice the operator has not stated anywhere.',
+  'The run parks and continues automatically when the answer arrives; after it does, do not re-ask.',
+  'If nobody answers in time (the tool tells you), proceed with best judgment, make it reversible, and note the assumption in your final output.',
 ].join('\n')
 
 function resolveDefaultAgentScope(): AgentScope {
@@ -166,6 +179,27 @@ function resolveBundledAgentsDir(): string {
   return SOURCE_RELATIVE_AGENTS_DIR
 }
 
+/** Sibling parking extension loaded into every subagent child (issue #27 P3). */
+function resolveAwaitInputExtensionPath(): string | null {
+  const ext = process.env.SYLO_SUBAGENTS_EXTENSION?.trim()
+  if (ext) {
+    const candidate = path.join(path.dirname(ext), 'await-user-input.ts')
+    if (fs.existsSync(candidate)) return candidate
+  }
+  const candidate = path.join(SOURCE_RELATIVE_AGENTS_DIR, '..', 'extensions', 'await-user-input.ts')
+  return fs.existsSync(candidate) ? candidate : null
+}
+
+/**
+ * Mailbox dir for the pause/resume protocol — the HOST publishes it in the broker
+ * env (SYLO_AWAIT_MAILBOX); the parent passes it + per-run ids into each child.
+ * Unset = the ask-back feature is off (manual pi usage, older host build).
+ */
+function resolveAwaitMailboxDir(): string | null {
+  const dir = process.env.SYLO_AWAIT_MAILBOX?.trim()
+  return dir ? dir : null
+}
+
 interface UsageStats {
   input: number
   output: number
@@ -229,6 +263,38 @@ const GUARD_FINALIZE_GRACE_MS = 10_000
 
 function isGuardKilledResult(result: SingleResult): boolean {
   return result.stopReason === 'stalled' || result.stopReason === 'timeout'
+}
+
+/**
+ * Terminal event for a detached (background) run — the host's only delivery signal:
+ * it persists a result card in the timeline and wakes the orchestrator.
+ */
+function emitSubagentRunCompleted(args: {
+  runId: string
+  mode: SyloSubagentRunMode
+  agent: string
+  task: string
+  result: SingleResult
+}): void {
+  const result = args.result
+  const failed = isFailedResult(result)
+  notifySyloSubagent({
+    type: 'subagent_run_completed',
+    runId: args.runId,
+    mode: args.mode,
+    agent: args.agent,
+    task: args.task,
+    status: failed ? 'failed' : 'succeeded',
+    resultText: failed ? undefined : getResultOutput(result),
+    ...(failed ? { error: getResultOutput(result) } : {}),
+    ...(result.model ? { model: result.model } : {}),
+    usage: {
+      input: result.usage.input,
+      output: result.usage.output,
+      cost: result.usage.cost,
+      turns: result.usage.turns,
+    },
+  })
 }
 
 function isFailedResult(result: SingleResult): boolean {
@@ -344,6 +410,8 @@ async function runSingleAgent(
   groupRunId: string,
   parentRunId?: string,
   goal?: string,
+  /** Detached: tool returns at once; a detached tail drives end/completed events async. */
+  background?: boolean,
 ): Promise<SingleResult> {
   const agent = agents.find((a) => a.name === agentName)
   const subagentModel = agent ? subagentModelCliArgs(agent.name) : { args: [] as string[] }
@@ -365,6 +433,7 @@ async function runSingleAgent(
     stepIndex: step,
     model: modelLabel,
     ...(goal?.trim() ? { goal: goal.trim() } : {}),
+    ...(background ? { background: true } : {}),
   })
 
   if (!agent) {
@@ -420,6 +489,35 @@ async function runSingleAgent(
 
   let tmpPromptDir: string | null = null
   let tmpPromptPath: string | null = null
+
+  /** Unlink the appended-system-prompt temp files once the child no longer needs them. */
+  const cleanupPromptFiles = () => {
+    if (tmpPromptPath) {
+      try {
+        fs.unlinkSync(tmpPromptPath)
+      } catch {
+        /* ignore */
+      }
+      tmpPromptPath = null
+    }
+    if (tmpPromptDir) {
+      try {
+        fs.rmdirSync(tmpPromptDir)
+      } catch {
+        /* ignore */
+      }
+      tmpPromptDir = null
+    }
+    const mailboxDir = resolveAwaitMailboxDir()
+    if (mailboxDir) {
+      // Pause/resume mailbox for THIS run — nothing left to answer after the end.
+      try {
+        fs.rmSync(path.join(mailboxDir, `${runId}.answer.json`), { force: true })
+      } catch {
+        /* ignore */
+      }
+    }
+  }
 
   const currentResult: SingleResult = {
     agent: agentName,
@@ -500,20 +598,85 @@ async function runSingleAgent(
     tmpPromptDir = tmp.dir
     tmpPromptPath = tmp.filePath
     args.push('--append-system-prompt', tmpPromptPath)
+    const childEnv: Record<string, string | undefined> = {}
+    const awaitExtPath = resolveAwaitInputExtensionPath()
+    const mailboxDir = resolveAwaitMailboxDir()
+    if (awaitExtPath && mailboxDir) {
+      // Pause/resume protocol (issue #27 P3): the child parks on await_user_input
+      // and polls <mailbox>/<runId>.answer.json, which subagent_answer writes.
+      args.push('-e', awaitExtPath)
+      childEnv.SYLO_AWAIT_RUN_ID = runId
+      childEnv.SYLO_AWAIT_MAILBOX = mailboxDir
+      // Park ceiling: after this long without an answer, the child's tool returns
+      // "proceed with best judgment" so nothing hangs forever.
+      childEnv.SYLO_AWAIT_CEILING_SECONDS = '600'
+    }
     // NOTE: task is piped via stdin (not as a CLI arg) to avoid Windows shell
     // mangling multi-line arguments when shell:true is used by resolvePiSpawn fallback.
     let wasAborted = false
 
-    const exitCode = await new Promise<number>((resolve) => {
+    /**
+     * Post-exit parse + end notifications + (background) run_completed — shared by the
+     * blocking path and by the detached tail that continues after the tool resolved.
+     */
+    const finalize = async (exitCode: number): Promise<SingleResult> => {
+      try {
+        currentResult.exitCode = exitCode
+        if (wasAborted || consumeRunCancelled(runId)) {
+          notifySyloSubagent({
+            type: 'subagent_run_end',
+            runId,
+            status: 'cancelled',
+            error: SUBAGENT_ABORTED_MESSAGE,
+          })
+          throw new Error(SUBAGENT_ABORTED_MESSAGE)
+        }
+
+        const failed = isFailedResult(currentResult)
+        const resultText = failed ? undefined : getResultOutput(currentResult)
+        notifySyloSubagent({
+          type: 'subagent_run_end',
+          runId,
+          status: failed ? 'failed' : 'succeeded',
+          resultText,
+          thinking: previewThinking() || undefined,
+          model: currentResult.model,
+          error: failed ? getResultOutput(currentResult) : undefined,
+          usage: {
+            input: currentResult.usage.input,
+            output: currentResult.usage.output,
+            cost: currentResult.usage.cost,
+            turns: currentResult.usage.turns,
+          },
+        })
+        if (background) {
+          emitSubagentRunCompleted({
+            runId,
+            mode,
+            agent: agentName,
+            task,
+            result: currentResult,
+          })
+          activeBackgroundRuns.delete(runId)
+        }
+        return currentResult
+      } finally {
+        cleanupPromptFiles()
+      }
+    }
+
+    const spawned = new Promise<number>((resolve) => {
       const invocation = resolvePiSpawn(args)
       const proc = spawn(invocation.command, invocation.args, {
         cwd: cwd ?? defaultCwd,
         shell: invocation.shell ?? false,
         stdio: ['pipe', 'pipe', 'pipe'],
+        ...(Object.keys(childEnv).length > 0 ? { env: { ...process.env, ...childEnv } } : {}),
       })
       // Pipe the task via stdin so it survives shell:true on Windows
       try { proc.stdin.write(task); proc.stdin.end() } catch { /* process may have exited early */ }
-      registerSubagentRun(runId, proc)
+      registerSubagentRun(runId, proc, { agent: agentName, task, mode })
+      if (background) activeBackgroundRuns.add(runId)
       const dropRegistry = () => unregisterSubagentRun(runId)
       let buffer = ''
       let timeout: ReturnType<typeof setTimeout> | undefined
@@ -603,11 +766,41 @@ async function runSingleAgent(
           return
         }
 
+        if (event.type === 'tool_execution_update') {
+          // Parked-run heartbeat (await_user_input) or a long tool — keeps the stall
+          // guard from killing a healthy quiet child.
+          if (typeof event.toolName === 'string' && event.toolName) liveToolName = event.toolName
+          bumpActivity()
+          scheduleUpdate()
+          return
+        }
+
         if (event.type === 'tool_execution_start') {
           liveToolName = typeof event.toolName === 'string' ? event.toolName : undefined
           liveToolPreview = summarizeToolArgs(event.args)
           bumpActivity()
           scheduleUpdate()
+          // Pause/resume protocol (issue #27 P3): the child just parked on
+          // await_user_input — relay the question to the host/operator.
+          if (liveToolName === 'await_user_input') {
+            const q = event.args as
+              | { question?: unknown; what_i_tried?: unknown; context_digest?: unknown }
+              | undefined
+            notifySyloSubagent({
+              type: 'subagent_run_awaiting_input',
+              runId,
+              mode,
+              agent: agentName,
+              task,
+              question:
+                typeof q?.question === 'string' && q.question.trim() ?
+                  q.question
+                : '(the agent did not phrase its question — ask it to clarify)',
+              ...(typeof q?.what_i_tried === 'string' && q.what_i_tried ? { what_i_tried: q.what_i_tried } : {}),
+              ...(typeof q?.context_digest === 'string' && q.context_digest ? { context_digest: q.context_digest } : {}),
+              ...(currentResult.model ? { model: currentResult.model } : {}),
+            })
+          }
           return
         }
 
@@ -682,51 +875,39 @@ async function runSingleAgent(
       }
     })
 
-    currentResult.exitCode = exitCode
-    if (wasAborted || consumeRunCancelled(runId)) {
-      notifySyloSubagent({
-        type: 'subagent_run_end',
-        runId,
-        status: 'cancelled',
-        error: SUBAGENT_ABORTED_MESSAGE,
-      })
-      throw new Error(SUBAGENT_ABORTED_MESSAGE)
+    if (background) {
+      // Detached: the tool call already resolved with its "started" result. Everything
+      // after spawn — parse, run_end, run_completed, temp-file cleanup — drives itself.
+      void spawned
+        .then((code) => finalize(code))
+        .then(() => undefined)
+        .catch((error: unknown) => {
+          // finalize threw after it had already notified run_end (cancelled/abort path,
+          // or an unexpected throw). The completed event is the host's only delivery
+          // signal for detached runs, so it must still land.
+          activeBackgroundRuns.delete(runId)
+          notifySyloSubagent({
+            type: 'subagent_run_completed',
+            runId,
+            mode,
+            agent: agentName,
+            task,
+            status: 'cancelled',
+            error: error instanceof Error ? error.message : String(error),
+          })
+        })
+      return currentResult
     }
 
-    const failed = isFailedResult(currentResult)
-    const resultText = failed ? undefined : getResultOutput(currentResult)
-    notifySyloSubagent({
-      type: 'subagent_run_end',
-      runId,
-      status: failed ? 'failed' : 'succeeded',
-      resultText,
-      thinking: previewThinking() || undefined,
-      model: currentResult.model,
-      error: failed ? getResultOutput(currentResult) : undefined,
-      usage: {
-        input: currentResult.usage.input,
-        output: currentResult.usage.output,
-        cost: currentResult.usage.cost,
-        turns: currentResult.usage.turns,
-      },
-    })
-
-    return currentResult
-  } finally {
-    if (tmpPromptPath) {
-      try {
-        fs.unlinkSync(tmpPromptPath)
-      } catch {
-        /* ignore */
-      }
-    }
-    if (tmpPromptDir) {
-      try {
-        fs.rmdirSync(tmpPromptDir)
-      } catch {
-        /* ignore */
-      }
-    }
+    return await finalize(await spawned)
+  } catch (error) {
+    // Setup failure before/without a spawn (temp-file write, synchronous spawn throw):
+    // free the slot and clean the prompt files here — finalize never ran.
+    activeBackgroundRuns.delete(runId)
+    cleanupPromptFiles()
+    tmpPromptPath = null
+    tmpPromptDir = null
+    throw error
   }
 }
 
@@ -889,6 +1070,12 @@ const SubagentParams = Type.Object({
       default: true,
     }),
   ),
+  /**
+   * Block until the run(s) finish and return results here. Default (false): run in the
+   * background — the tool returns at once with run ids, and every finished run posts its
+   * full result as a message you can act on. Chain/parallel: the whole unit detaches.
+   */
+  wait: Type.Optional(Type.Boolean({ default: false })),
   cwd: Type.Optional(Type.String({ description: 'Working directory for the agent process (single mode)' })),
 })
 
@@ -899,7 +1086,8 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
     description: [
       'Delegate tasks to specialized subagents with isolated context.',
       'Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).',
-      'Default agent scope is "user" (Sylo builtins + ~/.pi/agent/agents). Omit agentScope unless you specifically need the project agents dir.',
+      'Runs are BACKGROUND by default: the tool returns at once with run ids, and each finished run posts its full result as a message you can act on. Dispatch what the goal needs, then END YOUR TURN — completions wake you. Do not wait, poll, or re-dispatch while a run is in flight.',
+      'Pass wait:true only when this turn cannot proceed without the result in hand (e.g. the next step consumes it).',
       'Project personas (.pi/agents, repo-controlled) are listed in the Subagents modal but only run after the operator picked a model for them there — if a persona from that dir is missing here, it is not activated.',
     ].join(' '),
     parameters: SubagentParams,
@@ -971,65 +1159,153 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
       }
 
       if (params.chain && params.chain.length > 0) {
-        const results: SingleResult[] = []
-        let previousOutput = ''
-        const groupRunId = newSubagentRunId()
-        let parentRunId: string | undefined
+        const chainSteps = params.chain
+        const chainTask = chainSteps[0]?.task ?? params.task ?? ''
+        /**
+         * Drive the whole chain. Blocking mode awaits it here; background mode detaches
+         * it and reports one terminal run_completed for the unit (per-step run_end rows
+         * still stream either way).
+         */
+        const driveChain = async (): Promise<{
+          results: SingleResult[]
+          stopped: { step: number; agent: string; output: string } | null
+        }> => {
+          const results: SingleResult[] = []
+          let previousOutput = ''
+          const groupRunId = newSubagentRunId()
+          let parentRunId: string | undefined
 
-        for (let i = 0; i < params.chain.length; i++) {
-          const step = params.chain[i]!
-          const taskWithContext = formatTaskWithContext(
-            contextPacket,
-            step.task.replace(/\{previous\}/g, previousOutput),
-          )
-          const runId = newSubagentRunId()
+          for (let i = 0; i < chainSteps.length; i++) {
+            const step = chainSteps[i]!
+            const taskWithContext = formatTaskWithContext(
+              contextPacket,
+              step.task.replace(/\{previous\}/g, previousOutput),
+            )
+            const runId = newSubagentRunId()
 
-          const chainUpdate: OnUpdateCallback | undefined = onUpdate
-            ? (partial) => {
-                const currentResult = partial.details?.results[0]
-                if (currentResult) {
-                  onUpdate({
-                    content: partial.content,
-                    details: makeDetails('chain')([...results, currentResult]),
-                  })
-                }
+            const chainUpdate: OnUpdateCallback | undefined =
+              params.wait && onUpdate
+                ? (partial) => {
+                    const currentResult = partial.details?.results[0]
+                    if (currentResult) {
+                      onUpdate!({
+                        content: partial.content,
+                        details: makeDetails('chain')([...results, currentResult]),
+                      })
+                    }
+                  }
+                : undefined
+
+            const result = await runSingleAgent(
+              ctx.cwd,
+              agents,
+              step.agent,
+              taskWithContext,
+              step.cwd,
+              i + 1,
+              // A detached chain outlives the tool call — the per-call signal must not
+              // kill it, and a parked/running child is stopped via the run registry.
+              params.wait ? signal : undefined,
+              chainUpdate,
+              makeDetails('chain'),
+              'chain',
+              runId,
+              groupRunId,
+              parentRunId,
+              step.goal,
+              // Sequential steps block each other — the UNIT detaches, not each step.
+              false,
+            )
+            results.push(result)
+
+            if (isFailedResult(result)) {
+              return {
+                results,
+                stopped: { step: i + 1, agent: step.agent, output: getResultOutput(result) },
               }
-            : undefined
+            }
+            previousOutput = withTruncationNote(result, getFinalOutput(result.messages))
+            parentRunId = runId
+          }
 
-          const result = await runSingleAgent(
-            ctx.cwd,
-            agents,
-            step.agent,
-            taskWithContext,
-            step.cwd,
-            i + 1,
-            signal,
-            chainUpdate,
-            makeDetails('chain'),
-            'chain',
-            runId,
-            groupRunId,
-            parentRunId,
-            step.goal,
-          )
-          results.push(result)
+          return { results, stopped: null }
+        }
 
-          if (isFailedResult(result)) {
+        if (!params.wait) {
+          if (activeBackgroundRuns.size >= MAX_BACKGROUND_RUNS) {
             return {
               content: [
                 {
                   type: 'text',
-                  text: `Chain stopped at step ${i + 1} (${step.agent}): ${getResultOutput(result)}\n\n${FAILED_RESULT_NOTE}`,
+                  text: `Cannot start: ${activeBackgroundRuns.size} background runs are already in flight (max ${MAX_BACKGROUND_RUNS}). Wait for a completion message, or have a running task stopped first.`,
                 },
               ],
-              details: makeDetails('chain')(results),
+              details: makeDetails('chain')([]),
               isError: true,
             }
           }
-          previousOutput = withTruncationNote(result, getFinalOutput(result.messages))
-          parentRunId = runId
+          const chainSlot = newSubagentRunId()
+          activeBackgroundRuns.add(chainSlot)
+          const chainDescriptor = chainSteps.map((step) => step.agent).join(' → ')
+          void (async () => {
+            try {
+              const { results, stopped } = await driveChain()
+              const last = results[results.length - 1]
+              const failed = stopped !== null || !last || isFailedResult(last)
+              const deliverable =
+                stopped !== null
+                  ? stopped.output
+                  : last ? getResultOutput(last) : 'Chain produced no output.'
+              notifySyloSubagent({
+                type: 'subagent_run_completed',
+                // Delivery attribution resolves via an existing agent_tasks row — use
+                // the final step's runId (rows are per step; the group id has no row).
+                runId: last?.runId ?? newSubagentRunId(),
+                mode: 'chain',
+                agent: chainDescriptor,
+                task: chainTask,
+                status: failed ? 'failed' : 'succeeded',
+                ...(failed ? { error: deliverable } : { resultText: deliverable }),
+                ...(last?.model ? { model: last.model } : {}),
+              })
+            } catch (error) {
+              notifySyloSubagent({
+                type: 'subagent_run_completed',
+                runId: newSubagentRunId(),
+                mode: 'chain',
+                agent: chainDescriptor,
+                task: chainTask,
+                status: 'cancelled',
+                error: error instanceof Error ? error.message : String(error),
+              })
+            } finally {
+              activeBackgroundRuns.delete(chainSlot)
+            }
+          })()
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Started background chain of ${chainSteps.length} step${chainSteps.length === 1 ? '' : 's'}: ${chainDescriptor}.\nPer-step runs are tracked as usual; the final result arrives as a message when the chain ends. End your turn now — do not wait or poll. To block instead, re-dispatch with wait:true.`,
+              },
+            ],
+            details: makeDetails('chain')([]),
+          }
         }
 
+        const { results, stopped } = await driveChain()
+        if (stopped) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Chain stopped at step ${stopped.step} (${stopped.agent}): ${stopped.output}\n\n${FAILED_RESULT_NOTE}`,
+              },
+            ],
+            details: makeDetails('chain')(results),
+            isError: true,
+          }
+        }
         const lastStep = results[results.length - 1]!
         return {
           content: [
@@ -1090,6 +1366,74 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
 
         const groupRunId = newSubagentRunId()
 
+        if (!params.wait) {
+          if (activeBackgroundRuns.size + params.tasks.length > MAX_BACKGROUND_RUNS) {
+            const free = Math.max(0, MAX_BACKGROUND_RUNS - activeBackgroundRuns.size)
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `Cannot start ${params.tasks.length} background runs: ${activeBackgroundRuns.size} already in flight (max ${MAX_BACKGROUND_RUNS}, ${free} free). Dispatch fewer at a time, or wait for a completion message.`,
+                },
+              ],
+              details: makeDetails('parallel')([]),
+              isError: true,
+            }
+          }
+          const startedList: Array<{ agent: string; runId: string; taskLine: string }> = []
+          const failedNowList: Array<{ agent: string; reason: string }> = []
+          await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t) => {
+            const runId = newSubagentRunId()
+            const taskWithContext = formatTaskWithContext(contextPacket, t.task)
+            const result = await runSingleAgent(
+              ctx.cwd,
+              agents,
+              t.agent,
+              taskWithContext,
+              t.cwd,
+              undefined,
+              // Detached runs outlive the tool call — no per-call signal.
+              undefined,
+              undefined,
+              makeDetails('parallel'),
+              'parallel',
+              runId,
+              groupRunId,
+              undefined,
+              t.goal,
+              true,
+            )
+            if (result.exitCode === 1 && result.messages.length === 0) {
+              // pre-spawn rejection (unknown agent / policy / project not activated)
+              failedNowList.push({ agent: t.agent, reason: getResultOutput(result) })
+            } else {
+              const firstLine = taskWithContext.split('\n', 1)[0] ?? taskWithContext
+              startedList.push({ agent: t.agent, runId, taskLine: firstLine })
+            }
+            return result
+          })
+          const startedLines = startedList.map(
+            (s) => `- <${s.agent}> (run ${s.runId.slice(0, 8)}): ${s.taskLine.length > 120 ? `${s.taskLine.slice(0, 120)}…` : s.taskLine}`,
+          )
+          const failedLines = failedNowList.map((f) => `- <${f.agent}>: ${f.reason}`)
+          return {
+            content: [
+              {
+                type: 'text',
+                text: [
+                  `Started ${startedList.length} background subagent${startedList.length === 1 ? '' : 's'}:`,
+                  ...startedLines,
+                  ...(failedNowList.length > 0 ? ['', 'Failed to start:', ...failedLines] : []),
+                  '',
+                  'Each finished run posts its full result as a message you can act on. End your turn now — do not wait, poll, or re-dispatch. To block instead, re-dispatch with wait:true.',
+                ].join('\n'),
+              },
+            ],
+            details: makeDetails('parallel')([]),
+            ...(startedList.length === 0 ? { isError: true as const } : {}),
+          }
+        }
+
         const results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
           const runId = newSubagentRunId()
           const taskWithContext = formatTaskWithContext(contextPacket, t.task)
@@ -1148,6 +1492,66 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
       if (params.agent && params.task) {
         const runId = newSubagentRunId()
         const taskWithContext = formatTaskWithContext(contextPacket, params.task)
+
+        if (!params.wait) {
+          if (activeBackgroundRuns.size >= MAX_BACKGROUND_RUNS) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `Cannot start: ${activeBackgroundRuns.size} background runs are already in flight (max ${MAX_BACKGROUND_RUNS}). Wait for a completion message, or have a running task stopped first.`,
+                },
+              ],
+              details: makeDetails('single')([]),
+              isError: true,
+            }
+          }
+          const result = await runSingleAgent(
+            ctx.cwd,
+            agents,
+            params.agent,
+            taskWithContext,
+            params.cwd,
+            undefined,
+            // Detached runs outlive the tool call — no per-call signal, no live box:
+            // progress streams to the runs store/board, and completions arrive as messages.
+            undefined,
+            undefined,
+            makeDetails('single'),
+            'single',
+            runId,
+            runId,
+            undefined,
+            params.goal,
+            true,
+          )
+          if (result.exitCode === 1 && result.messages.length === 0) {
+            // pre-spawn rejection (unknown agent / tool policy / project not activated)
+            // — resolve synchronously so the model can correct course this turn.
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `Agent failed to start: ${getResultOutput(result)}\n\n${FAILED_RESULT_NOTE}`,
+                },
+              ],
+              details: makeDetails('single')([result]),
+              isError: true,
+            }
+          }
+          const firstLine = taskWithContext.split('\n', 1)[0] ?? taskWithContext
+          const taskShown = firstLine.length > 120 ? `${firstLine.slice(0, 120)}…` : firstLine
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Started background subagent <${params.agent}> (run ${runId.slice(0, 8)}): ${taskShown}\nLive progress flows to the Subagents runs board; the full result arrives here as a message when it finishes. End your turn now — do not wait, poll, or re-dispatch this task. To block instead, re-dispatch with wait:true.`,
+              },
+            ],
+            details: makeDetails('single')([]),
+          }
+        }
+
         const result = await runSingleAgent(
           ctx.cwd,
           agents,
@@ -1187,6 +1591,147 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
       return {
         content: [{ type: 'text', text: 'Invalid subagent parameters.' }],
         details: makeDetails('single')([]),
+      }
+    },
+  })
+
+  pi.registerTool({
+    name: 'subagent_cancel',
+    label: 'Subagent cancel',
+    description:
+      'Stop one background subagent run by run id (or by persona name — resolves the most recent live run for that persona), or with no args, the newest live run at all. The stopped run reports cancelled; results it did not produce are lost. Use when the operator asks to stop/wait or when the run\u2019s goal has been overtaken by events.',
+    parameters: Type.Object({
+      runId: Type.Optional(
+        Type.String({ description: 'Run id from the dispatch result (full or first 8 chars).' }),
+      ),
+      agent: Type.Optional(Type.String({ description: 'Persona name, e.g. "scout" — newest live run for it.' })),
+    }),
+    async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
+      const params = _params
+      const summaries = listActiveRunSummaries()
+      let target: string | undefined
+      if (params.runId?.trim()) {
+        const id = params.runId.trim().toLowerCase()
+        target =
+          summaries.find((s) => s.runId === id)?.runId ??
+          summaries.find((s) => s.runId.startsWith(id))?.runId
+      }
+      if (!target && params.agent?.trim()) {
+        target = findActiveRunByAgent(params.agent.trim()) ?? undefined
+      }
+      if (!target && !params.runId && !params.agent && summaries.length > 0) {
+        target = summaries[summaries.length - 1]?.runId
+      }
+      if (!target) {
+        const available =
+          summaries
+            .map((s) => `${s.agent ?? '?'} (${s.runId.slice(0, 8)})`)
+            .join(', ') || 'none'
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `No live run matched${params.agent ? ` "${params.agent}"` : ''}. Live runs now: ${available}.`,
+            },
+          ],
+          details: undefined,
+        }
+      }
+      const meta = summaries.find((s) => s.runId === target)
+      const ok = cancelSubagentRun(target)
+      return {
+        content: [
+          {
+            type: 'text',
+            text: ok ?
+              `Stopped run ${target.slice(0, 8)}${meta?.agent ? ` (<${meta.agent}>)` : ''}. It reports cancelled — results it did not produce are lost.`
+            : 'Run had already ended.',
+          },
+        ],
+        details: undefined,
+      }
+    },
+  })
+
+  pi.registerTool({
+    name: 'subagent_answer',
+    label: 'Subagent answer',
+    description:
+      'Deliver the operator\u2019s answer to a PAUSED background subagent — one whose dispatch reported "awaiting input" after calling await_user_input. Relay the decision faithfully (quote it rather than reinterpret). The agent unparks in the same session it parked and continues in the background; its final result arrives as a message later, so END YOUR TURN after delivering.',
+    parameters: Type.Object({
+      runId: Type.Optional(
+        Type.String({ description: 'Run id of the parked run (full or first 8 chars).' }),
+      ),
+      agent: Type.Optional(
+        Type.String({ description: 'Persona name of the parked run — resolves the newest live run for it.' }),
+      ),
+      answer: Type.String({
+        description:
+          'The operator\u2019s decision/answer, relayed verbatim (you may tidy obvious grammar, never the meaning). This text is written into the parked agent\u2019s mailbox.',
+      }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      const answer = (params.answer ?? '').trim()
+      if (!answer) {
+        return { content: [{ type: 'text', text: 'Refused: empty answer.' }], details: undefined }
+      }
+      const summaries = listActiveRunSummaries()
+      let target: string | undefined
+      if (params.runId?.trim()) {
+        const id = params.runId.trim().toLowerCase()
+        target =
+          summaries.find((s) => s.runId === id)?.runId ??
+          summaries.find((s) => s.runId.startsWith(id))?.runId
+      }
+      if (!target && params.agent?.trim()) {
+        target = findActiveRunByAgent(params.agent.trim()) ?? undefined
+      }
+      if (!target) {
+        const available =
+          summaries.map((s) => `${s.agent ?? '?'} (${s.runId.slice(0, 8)})`).join(', ') || 'none'
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `No live run to answer. Live runs now: ${available}. (The run may have already finished or been stopped.)`,
+            },
+          ],
+          details: undefined,
+        }
+      }
+      const mailboxDir = resolveAwaitMailboxDir()
+      if (!mailboxDir) {
+        return {
+          content: [{ type: 'text', text: 'Refused: the mailbox dir is not configured (older host?).' }],
+          details: undefined,
+        }
+      }
+      try {
+        fs.mkdirSync(mailboxDir, { recursive: true })
+        const answerPath = path.join(mailboxDir, `${target}.answer.json`)
+        const tmpPath = `${answerPath}.tmp`
+        fs.writeFileSync(tmpPath, JSON.stringify({ answer, answered_by: 'operator', at: Date.now() }))
+        fs.rmSync(answerPath, { force: true })
+        fs.renameSync(tmpPath, answerPath)
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Failed to deliver the answer: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
+          details: undefined,
+        }
+      }
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Answer delivered to run ${target.slice(0, 8)}${target ? '' : ''}. The agent unparks in its parked session and continues — its result arrives later as a message. End your turn now.`,
+          },
+        ],
+        details: undefined,
       }
     },
   })

@@ -12,7 +12,7 @@ import {
   tickReviewedGoals,
   writeCurrentPlan,
 } from '../../../../packages/sylo-subagents/extensions/plan-file.ts'
-import type { SyloSubagentHostEvent } from '../shared/subagent-tasks-types.js'
+import type { AgentTaskRow, SyloSubagentHostEvent } from '../shared/subagent-tasks-types.js'
 import { getConversation, getWorkspace } from './database.js'
 import { notifyPlanTodosChanged } from './plan-todos-host.js'
 import * as store from './subagent-tasks-db.js'
@@ -30,9 +30,9 @@ export function shutdownSubagentTaskHostSession(): void {
   currentHostSessionId = undefined
 }
 
-export function onBrokerExitOrphanTasks(): void {
-  if (!currentHostSessionId) return
-  store.orphanRunningTasksForHostSession(currentHostSessionId, 'broker_exit')
+export function onBrokerExitOrphanTasks(): AgentTaskRow[] {
+  if (!currentHostSessionId) return []
+  return store.orphanRunningTasksForHostSession(currentHostSessionId, 'broker_exit')
 }
 
 export function getCurrentHostSessionId(): string | undefined {
@@ -128,6 +128,15 @@ export function handleSubagentHostEvent(conversationId: string, event: SyloSubag
         toolName: event.toolName,
         toolPreview: event.toolPreview,
         model: event.model,
+      })
+      break
+    case 'subagent_run_awaiting_input':
+      // Parked on await_user_input (issue #27 P3) — visible in the runs board and
+      // relayed by the host into the owning chat.
+      store.markAgentTaskAwaitingInput(event.runId, {
+        question: event.question,
+        what_i_tried: event.what_i_tried,
+        context_digest: event.context_digest,
       })
       break
     case 'subagent_run_end':

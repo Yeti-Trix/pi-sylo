@@ -7,4 +7,15 @@
 kokoro>=0.9.4
 misaki[en]>=0.9.4
 soundfile>=0.12.0
-numpy>=1.26.0,<2.0
+# Kokoro 0.9.4 verified on numpy 2.x (2.5.3) with torch/scipy 1.16 — keep the
+# 2.x line so Orpheus (requirements-orpheus.txt) can share the same env.
+numpy>=1.26,<3.0
+
+# kokoro 0.9.4 is built against transformers 4.x — 5.x hard-imports scipy (via its
+# loss modules) at startup and breaks the AlbertModel import kokoro depends on.
+transformers>=4.46,<5.0
+huggingface-hub>=0.34,<1.0
+
+# transformers 4.x imports scipy.optimize at startup; scipy 1.17+ needs numpy>=2.0
+# which conflicts with the numpy<2.0 pin above (Kokoro/RTX-50 GPU stack stays on 1.x).
+scipy>=1.15,<1.17

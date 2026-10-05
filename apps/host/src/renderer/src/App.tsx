@@ -5667,30 +5667,28 @@ export function App(): React.ReactElement {
         )}
 
         {tab === 'skills' && (
-          <div className={panelShell}>
-            <CapabilityManagerPanel
-              capabilities={capabilities}
-              settingsJson={settingsJson}
-              skillSurfaceLintByPath={skillSurfaceLintByPath}
-              exclusionWorkspaceId={sidebarWorkspaceId}
-              exclusionWorkspaceName={
-                workspaces.find((w) => w.id === sidebarWorkspaceId)?.name ?? ''
-              }
-              onTogglePackage={togglePackage}
-              onRestartBroker={() =>
-                void (async () => {
-                  await window.sylo.broker.restart()
-                  await refreshCapabilities()
-                })()
-              }
-              onRefresh={() => {
-                void refreshCapabilities()
-                void refreshSkillRoutes()
-              }}
-              onAttachUi={() => void handleAttachUiFolder()}
-              onNewSkill={prefillNewSkill}
-            />
-          </div>
+          <CapabilityManagerPanel
+            capabilities={capabilities}
+            settingsJson={settingsJson}
+            skillSurfaceLintByPath={skillSurfaceLintByPath}
+            exclusionWorkspaceId={sidebarWorkspaceId}
+            exclusionWorkspaceName={
+              workspaces.find((w) => w.id === sidebarWorkspaceId)?.name ?? ''
+            }
+            onTogglePackage={togglePackage}
+            onRestartBroker={() =>
+              void (async () => {
+                await window.sylo.broker.restart()
+                await refreshCapabilities()
+              })()
+            }
+            onRefresh={() => {
+              void refreshCapabilities()
+              void refreshSkillRoutes()
+            }}
+            onAttachUi={() => void handleAttachUiFolder()}
+            onNewSkill={prefillNewSkill}
+          />
         )}
 
         {tab === 'skill-route' && activeSkillRoute ?

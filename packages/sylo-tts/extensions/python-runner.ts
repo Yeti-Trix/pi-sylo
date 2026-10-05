@@ -19,6 +19,76 @@ export function resolvePython(configured?: string): string {
   return process.platform === 'win32' ? 'python' : 'python3'
 }
 
+/** Real import chain per backend (runs the same modules synthesis needs). */
+const BACKEND_PROBE: Record<string, string> = {
+  kokoro: 'from kokoro import KPipeline; import soundfile as sf, numpy',
+  orpheus: 'from orpheus_cpp import OrpheusCpp; import llama_cpp',
+}
+
+const BACKEND_REQ_FILE: Record<string, string> = {
+  kokoro: 'requirements.txt',
+  orpheus: 'requirements-orpheus.txt',
+}
+
+const depsReadyByBackend = new Map<string, Promise<void>>()
+
+/**
+ * Self-heal TTS Python deps for one backend: probe the real import chain;
+ * on failure pip-install that backend's requirements, then re-probe and
+ * surface the surviving import error. Works standalone (vanilla Pi) — the
+ * host's Capability manager does the same install at enable time.
+ */
+async function ensureBackendDeps(python: string, backend: string): Promise<void> {
+  let cached = depsReadyByBackend.get(backend)
+  if (!cached) {
+    cached = (async () => {
+      const probeCode = BACKEND_PROBE[backend]
+      const reqFile = BACKEND_REQ_FILE[backend]
+      if (!probeCode || !reqFile) return
+      const importBroken = async (): Promise<boolean> => {
+        try {
+          await execFileAsync(python, ['-c', probeCode], {
+            cwd: SCRIPTS_DIR,
+            maxBuffer: 4 * 1024 * 1024,
+            windowsHide: true,
+            timeout: 120_000,
+          })
+          return false
+        } catch {
+          return true
+        }
+      }
+      if (await importBroken()) {
+        const reqPath = path.join(SCRIPTS_DIR, reqFile)
+        try {
+          await execFileAsync(python, ['-m', 'pip', 'install', '-r', reqPath], {
+            cwd: SCRIPTS_DIR,
+            maxBuffer: 8 * 1024 * 1024,
+            windowsHide: true,
+            timeout: 600_000,
+          })
+        } catch {
+          /* repair failed — the re-probe below surfaces the real import error */
+        }
+        if (await importBroken()) {
+          throw new Error(
+            `TTS Python deps for ${backend} are missing or broken. ` +
+              `Fix: pip install -r ${reqPath}`,
+          )
+        }
+      }
+    })()
+    depsReadyByBackend.set(backend, cached)
+  }
+  try {
+    await cached
+  } catch (err) {
+    // Drop the cached failure so the next call retries after a manual repair.
+    depsReadyByBackend.delete(backend)
+    throw err
+  }
+}
+
 export async function runPythonScript(
   scriptName: string,
   args: string[],
@@ -26,6 +96,8 @@ export async function runPythonScript(
 ): Promise<{ ok: true; data: unknown } | { ok: false; error: string }> {
   const scriptPath = path.join(SCRIPTS_DIR, scriptName)
   const python = resolvePython(pythonPath)
+  const backendArg = args.indexOf('--backend') >= 0 ? args[args.indexOf('--backend') + 1] : ''
+  await ensureBackendDeps(python, backendArg)
   try {
     const { stdout, stderr } = await execFileAsync(python, [scriptPath, ...args], {
       cwd: PACKAGE_ROOT,

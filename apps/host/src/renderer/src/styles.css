@@ -22,6 +22,7 @@
   --color-accent-muted: #525252;
   --color-danger: #f16a50;
   --color-success: #3dd68c;
+  --color-warning: #e3b341;
   --font-sans: system-ui, "Segoe UI", Roboto, sans-serif;
 }
 
@@ -37,6 +38,7 @@
   --accent-muted: #525252;
   --danger: #f16a50;
   --success: #3dd68c;
+  --warning: #e3b341;
   font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
 }
 

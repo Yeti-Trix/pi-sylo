@@ -77,6 +77,7 @@ type CatalogFile = {
 }
 
 let ttsPythonDepsReady: Promise<void> | null = null
+let orpheusDepsReady: Promise<void> | null = null
 
 function resolvePython(configured?: string): string {
   const t = configured?.trim()
@@ -86,25 +87,115 @@ function resolvePython(configured?: string): string {
   return resolvePythonExecutable()
 }
 
+/**
+ * Deep probe: `from kokoro import KPipeline` runs the real import chain
+ * (kokoro → transformers AlbertModel → scipy/numpy), not just top-level module
+ * metadata — a mixed/partial env can pass `import kokoro` and still break on
+ * the first Generate. Model weights are NOT downloaded at this stage.
+ */
+const TTS_DEPS_PROBE =
+  'import soundfile as sf, numpy; from kokoro import KPipeline'
+
+async function probeTtsDepsWith(probeCode: string, python: string): Promise<string | null> {
+  try {
+    await execFileAsync(python, ['-c', probeCode], {
+      windowsHide: true,
+      timeout: 120_000,
+    })
+    return null
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    const stderr =
+      err !== null && typeof err === 'object' && 'stderr' in err ?
+        String((err as { stderr?: string }).stderr ?? '')
+      : ''
+    return [stderr.trim(), message.trim()].filter(Boolean).join('\n')
+  }
+}
+
+function tail(text: string, max = 1500): string {
+  const s = text.trim()
+  return s.length <= max ? s : `…${s.slice(-max)}`
+}
+
 async function ensureTtsPythonDeps(repoRoot: string, python: string): Promise<void> {
   if (!ttsPythonDepsReady) {
     ttsPythonDepsReady = (async () => {
-      try {
-        await execFileAsync(python, ['-c', 'import kokoro, soundfile, numpy'], {
-          windowsHide: true,
-          timeout: 60_000,
-        })
-        return
-      } catch {
-        /* pip install below */
-      }
+      const firstProbe = await probeTtsDepsWith(TTS_DEPS_PROBE, python)
+      if (firstProbe === null) return
       const pip = await installOptionalPackagePythonDeps(repoRoot, 'sylo-tts')
       if (!pip.ok) {
-        throw new Error(pip.error)
+        throw new Error(
+          `TTS Python deps install failed.\n${pip.error}\n\n` +
+            `First import failure (root cause):
+${tail(firstProbe)}`,
+        )
+      }
+      // Re-verify after install: a corrupt "already satisfied" env can pass pip
+      // and still fail to import. Surface the real import error if so.
+      const retryProbe = await probeTtsDepsWith(TTS_DEPS_PROBE, python)
+      if (retryProbe !== null) {
+        throw new Error(
+          `TTS Python deps still failing after install.\n${tail(retryProbe)}\n\n` +
+            'Try: pip install --user --force-reinstall -r packages/sylo-tts/scripts/requirements.txt',
+        )
       }
     })()
   }
-  await ttsPythonDepsReady
+  try {
+    await ttsPythonDepsReady
+  } catch (err) {
+    // Drop the cached (rejected) promise so the next Generate re-probes and can
+    // recover after the operator repairs pip deps — no app restart required.
+    ttsPythonDepsReady = null
+    throw err
+  }
+}
+
+const ORPHEUS_DEPS_PROBE = 'from orpheus_cpp import OrpheusCpp; import llama_cpp'
+
+async function ensureOrpheusDeps(repoRoot: string, python: string): Promise<void> {
+  if (!orpheusDepsReady) {
+    orpheusDepsReady = (async () => {
+      const firstProbe = await probeTtsDepsWith(ORPHEUS_DEPS_PROBE, python)
+      if (firstProbe === null) return
+      const optReq = join('packages', 'sylo-tts', 'scripts', 'requirements-orpheus.txt')
+      const reqPath = join(repoRoot, optReq)
+      if (!existsSync(reqPath)) {
+        throw new Error(
+          'Orpheus Python deps missing and requirements-orpheus.txt not found in the dev repo.',
+        )
+      }
+      try {
+        await execFileAsync(python, ['-m', 'pip', 'install', '-r', reqPath], {
+          cwd: join(repoRoot, 'packages', 'sylo-tts', 'scripts'),
+          maxBuffer: 8 * 1024 * 1024,
+          windowsHide: true,
+          timeout: 600_000,
+        })
+      } catch (pipErr) {
+        const e = pipErr as NodeJS.ErrnoException & { stderr?: string; stdout?: string }
+        throw new Error(
+          `Orpheus Python deps install failed.\n` +
+            `${(e.stderr || e.stdout || e.message || '').trim() || firstProbe}\n\n` +
+            'Manual install: pip install -r packages/sylo-tts/scripts/requirements-orpheus.txt',
+        )
+      }
+      const retryProbe = await probeTtsDepsWith(ORPHEUS_DEPS_PROBE, python)
+      if (retryProbe !== null) {
+        throw new Error(
+          `Orpheus Python deps still failing after install.\n${tail(retryProbe)}\n\n` +
+            'Try: pip install --user --force-reinstall -r packages/sylo-tts/scripts/requirements-orpheus.txt',
+        )
+      }
+    })()
+  }
+  try {
+    await orpheusDepsReady
+  } catch (err) {
+    orpheusDepsReady = null
+    throw err
+  }
 }
 
 function readCatalogFile(path: string): TtsVoiceRow[] {
@@ -189,6 +280,7 @@ export async function generateTtsWav(
   const python = resolvePython(args.pythonPath)
   try {
     await ensureTtsPythonDeps(repoRoot, python)
+    if (voice.backend === 'orpheus') await ensureOrpheusDeps(repoRoot, python)
   } catch (err) {
     return {
       ok: false,

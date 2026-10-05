@@ -59,3 +59,10 @@ apps/host/test-fixtures/skill-surface/widgets/*
 
 # Chat transcript exports (private; sylo-user holds journal content)
 /journal/
+
+# Per-chat agent plans (private workspace state from other chats)
+.sylo/plans/
+
+# Windows NUL-device redirect accidents (bash creates a real file named NUL)
+NUL
+*.wav.tmp

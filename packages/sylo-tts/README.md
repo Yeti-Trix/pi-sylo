@@ -4,15 +4,20 @@ Local TTS for Sylo: **Kokoro** and **Orpheus** — preset voices, no reference W
 
 ## Enable
 
-1. Capability manager → **Speech / sylo-tts** → enable (auto pip install for Kokoro).
+1. Capability manager → **Speech / sylo-tts** → enable (auto pip install for both backends —
+   Orpheus installs best-effort and self-heals on first Orpheus Generate/speak if it was skipped).
 2. GPU PyTorch for Kokoro/Orpheus on RTX 50-series:
    ```powershell
    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
    ```
-3. **Orpheus** (optional):
+3. (Manual only, if auto-install was skipped) **Orpheus**:
    ```powershell
    pip install -r packages/sylo-tts/scripts/requirements-orpheus.txt
-   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu128
+   ```
+   That file includes `llama-cpp-python` (PyPI CPU wheels — no toolchain on Windows cp312).
+   For RTX 50-series GPU inference swap the CUDA wheel:
+   ```powershell
+   pip install llama-cpp-python --force-reinstall --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu128
    ```
    vLLM is **not** used on Windows — only orpheus-cpp. Sylo patches a known SNAC int32/int64 ONNX bug in orpheus-cpp 0.0.3.
 4. Restart broker after enable.
@@ -21,8 +26,8 @@ Local TTS for Sylo: **Kokoro** and **Orpheus** — preset voices, no reference W
 
 | Backend | Voices in catalog | Notes |
 |---------|-------------------|--------|
-| **Kokoro** | 12 | Default; good balance of quality/speed |
-| **Orpheus** | 8 | orpheus-cpp + llama-cpp-python (CUDA wheel on Windows). First run downloads GGUF + SNAC ONNX. |
+| **Kokoro** | 12 | Default; good balance of quality/speed. Verified on numpy 2.x. |
+| **Orpheus** | 8 | orpheus-cpp + llama-cpp-python (CPU wheel by default; CUDA wheel optional). First run downloads GGUF + SNAC ONNX. |
 
 Disable a backend: edit `voices/catalog.json` → `"disabled_backends": ["orpheus"]`.
 

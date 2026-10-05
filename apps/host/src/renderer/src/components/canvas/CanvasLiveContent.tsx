@@ -73,6 +73,10 @@ export function CanvasLiveContent({ sub }: Props): React.ReactElement {
     return <TaskBoard sub={sub} />
   }
 
+  if (sub.kind === 'subagent-runs') {
+    return <SubagentRunsBoard sub={sub} />
+  }
+
   return (
     <p className={cn(mutedText, 'p-2 text-[0.85rem]')}>
       Unknown live canvas kind: <code>{sub.kind}</code>
@@ -437,5 +441,168 @@ function TaskRow({
         </div>
       </div>
     </li>
+  )
+}
+// ── subagent-runs board ─────────────────────────────────────────────────────
+
+type SubagentRunStatus = 'running' | 'succeeded' | 'failed' | 'cancelled' | 'orphaned' | 'awaiting_input'
+
+type SubagentRunBoardRow = {
+  taskId: string
+  runId: string
+  agent: string
+  mode: 'single' | 'parallel' | 'chain'
+  status: SubagentRunStatus
+  startedAt: number | null
+  endedAt: number | null
+  model: string | null
+  stepIndex: number | null
+  toolName: string | null
+  toolPreview: string | null
+  partialTail: string | null
+  tokens: number | null
+  question: string | null
+}
+
+type SubagentBoardData = {
+  conversationId: string
+  workspaceKey: string
+  generatedAt: number
+  rows: SubagentRunBoardRow[]
+}
+
+const RUN_STATUS_DOT: Record<SubagentRunStatus, string> = {
+  running: '●',
+  awaiting_input: '⏸',
+  succeeded: '✓',
+  failed: '✕',
+  cancelled: '■',
+  orphaned: '?',
+}
+const RUN_STATUS_LABEL: Record<SubagentRunStatus, string> = {
+  running: 'running',
+  awaiting_input: 'awaiting your answer',
+  succeeded: 'finished',
+  failed: 'failed',
+  cancelled: 'stopped',
+  orphaned: 'lost (broker restart)',
+}
+const RUN_STATUS_CLASS: Record<SubagentRunStatus, string> = {
+  running: 'text-accent',
+  awaiting_input: 'text-warning',
+  succeeded: 'text-success',
+  failed: 'text-danger',
+  cancelled: 'text-text-secondary',
+  orphaned: 'text-danger',
+}
+
+function elapsedLabel(row: SubagentRunBoardRow): string {
+  const start = row.startedAt ?? Date.now()
+  const end = row.endedAt ?? Date.now()
+  const ms = Math.max(0, end - start)
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`
+  const min = Math.floor(ms / 60_000)
+  const sec = Math.round((ms % 60_000) / 1000)
+  return `${min}m${sec > 0 ? ` ${sec}s` : ''}`
+}
+
+/** Live tail for a running row — re-rendered on the board's own ~2s ticker while
+ *  the run is in flight (data patches already carry the tail). */
+function SubagentRunsBoard({ sub }: { sub: CanvasLiveSubscription }): React.ReactElement {
+  const [, tick] = useState(0)
+  useEffect(() => {
+    // Ticker keeps elapsed labels live between data patches.
+    const t = setInterval(() => tick((n) => n + 1), 2000)
+    return () => clearInterval(t)
+  }, [])
+
+  const data = sub.data as SubagentBoardData | undefined
+  const rows = data?.rows ?? []
+  const running = rows.filter((r) => r.status === 'running')
+  const awaiting = rows.filter((r) => r.status === 'awaiting_input')
+  const done = rows.filter((r) => r.status !== 'running' && r.status !== 'awaiting_input')
+  const shownDone = done.slice(-12)
+
+  if (rows.length === 0) {
+    return (
+      <div className="flex flex-col gap-2 p-3">
+        <p className={cn(mutedText, 'm-0 text-[0.85rem] leading-[1.5]')}>
+          No subagent runs for this conversation yet.
+        </p>
+        <p className={cn(mutedText, 'm-0 text-[0.8rem] leading-[1.5]')}>
+          The agent dispatches personas with the <code className="rounded bg-bg-tertiary px-1 font-mono text-[0.78rem]">subagent</code> tool
+          (background is the default — completions arrive as messages), or with an
+          {' @mention '}of a persona name. This board lists every run with live output.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-3 p-3">
+      {[
+        { key: 'running' as const, title: 'Running', list: running },
+        { key: 'awaiting' as const, title: 'Awaiting input', list: awaiting },
+        { key: 'done' as const, title: 'Finished', list: shownDone },
+      ].map((section) =>
+        section.list.length === 0 ? null : (
+          <div key={section.key} className="flex flex-col gap-2">
+            <p className="m-0 text-[0.72rem] font-semibold tracking-wide text-text-secondary uppercase">
+              {section.title} · {section.list.length}
+            </p>
+            {section.list.map((row) => (
+              <SubagentRunRow key={row.taskId} row={row} />
+            ))}
+          </div>
+        ),
+      )}
+      {done.length > shownDone.length ?
+        <p className={cn(mutedText, 'm-0 text-[0.72rem]')}>
+          {done.length - shownDone.length} older finished run{done.length - shownDone.length === 1 ? '' : 's'} hidden — full history in the Tasks view.
+        </p>
+      : null}
+    </div>
+  )
+}
+
+function SubagentRunRow({ row }: { row: SubagentRunBoardRow }): React.ReactElement {
+  const live = row.status === 'running'
+  const usage =
+    row.tokens != null && row.tokens > 0 ?
+      `${row.tokens > 1000 ? `${(row.tokens / 1000).toFixed(1)}k` : row.tokens} tok`
+    : null
+  const tail = row.partialTail ?? null
+  return (
+    <div className="flex flex-col gap-1 rounded-md border border-border bg-bg-tertiary/40 px-2.5 py-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={cn('text-[0.8rem] font-semibold', RUN_STATUS_CLASS[row.status])}>
+          {RUN_STATUS_DOT[row.status]} {RUN_STATUS_LABEL[row.status]}
+        </span>
+        <code className="font-mono text-[0.84rem] font-semibold text-text-primary">{row.agent}</code>
+        <span className={cn(mutedText, 'text-[0.72rem]')}>
+          {row.mode}
+          {row.stepIndex != null ? ` · step ${row.stepIndex}` : ''} · {elapsedLabel(row)}
+        </span>
+        {row.model ?
+          <span className={cn(mutedText, 'truncate text-[0.72rem]')} title={row.model}>
+            {row.model}
+          </span>
+        : null}
+        {usage ? <span className={cn(mutedText, 'text-[0.72rem]')}>{usage}</span> : null}
+      </div>
+      {row.question && row.status === 'awaiting_input' ?
+        <p className="m-0 text-[0.8rem] leading-[1.45] text-warning">❓ {row.question}</p>
+      : null}
+      {tail && row.toolName ?
+        <p className={cn(mutedText, 'm-0 truncate font-mono text-[0.74rem]')} title={row.toolPreview ?? ''}>
+          ⚙ {row.toolName} — {row.toolPreview ?? ''}
+        </p>
+      : null}
+      {tail ?
+        <pre className="m-0 max-h-24 overflow-hidden font-mono text-[0.74rem] leading-[1.4] whitespace-pre-wrap text-text-secondary">
+          {tail.length > 700 ? `${tail.slice(-700)}` : tail}
+        </pre>
+      : null}
+    </div>
   )
 }

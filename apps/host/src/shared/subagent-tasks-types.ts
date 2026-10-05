@@ -1,5 +1,6 @@
 export type SubagentTaskStatus =
   | 'running'
+  | 'awaiting_input'
   | 'succeeded'
   | 'failed'
   | 'cancelled'
@@ -18,12 +19,25 @@ export type SyloSubagentHostEvent =
       parentRunId?: string
       stepIndex?: number
       model?: string
-      /**
-       * Plan goal heading this run is working, when the orchestrator named one.
-       * A reviewer's verdict closes exactly this goal; without it a passing review
-       * is treated as covering the whole plan.
-       */
+      /** Plan goal heading this run is working, when the orchestrator named one.
+        * A reviewer's verdict closes exactly this goal; without it a passing review
+        * is treated as covering the whole plan.
+        */
       goal?: string
+      /** Detached run: the tool returned at once; the result arrives via run_completed. */
+      background?: boolean
+    }
+  | {
+      /** Child parked on await_user_input (issue #27 P3): relay the question to the operator. */
+      type: 'subagent_run_awaiting_input'
+      runId: string
+      mode: SubagentRunMode
+      agent: string
+      task: string
+      question: string
+      what_i_tried?: string
+      context_digest?: string
+      model?: string
     }
   | {
       type: 'subagent_run_update'
@@ -44,6 +58,28 @@ export type SyloSubagentHostEvent =
       thinking?: string
       model?: string
       error?: string
+      usage?: {
+        input: number
+        output: number
+        cost: number
+        turns: number
+      }
+    }
+  | {
+      /**
+       * Terminal event for a detached (background) run: the orchestrator tool call has
+       * long since resolved, so the host delivers this into the main chat as a result
+       * card + a wake turn for the orchestrator. Blocking runs never emit this.
+       */
+      type: 'subagent_run_completed'
+      runId: string
+      mode: SubagentRunMode
+      agent: string
+      task: string
+      status: 'succeeded' | 'failed' | 'cancelled'
+      resultText?: string
+      error?: string
+      model?: string
       usage?: {
         input: number
         output: number
@@ -90,4 +126,8 @@ export type AgentTaskSpec = {
   lastToolPreview?: string
   /** Provider/id the child was spawned with. */
   model?: string
+  /** Pause/resume (issue #27 P3): the question the parked agent is waiting on. */
+  question?: string
+  what_i_tried?: string
+  context_digest?: string
 }

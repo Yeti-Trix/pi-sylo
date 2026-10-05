@@ -1,8 +1,14 @@
 # Optional Orpheus backend (install when you want Orpheus voices in Speech / sylo_tts_speak).
-# Requires numpy 2.x — do NOT combine with requirements.txt on the same env if you
-# need numpy<2 for other tools (pandas, sklearn, etc.). Use a separate venv instead.
+# Same-environment safe with requirements.txt since 2026-10: Kokoro runs fine on
+# numpy 2.x (verified) and requirements.txt no longer pins numpy<2. Both files
+# agree on the numpy 2.x line, so a shared venv is fine.
 #
-# Windows may also need llama-cpp-python CUDA wheel (see README).
+# llama-cpp-python comes from PyPI (CPU wheels, no toolchain needed on Windows cp312).
+# For RTX 50-series GPU inference swap the CUDA wheel:
+#   pip install llama-cpp-python --force-reinstall \
+#     --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu128
+# vLLM is not used on Windows; orpheus-cpp 0.0.3 SNAC int32/int64 bug is patched in tts_synthesize.py.
 
 orpheus-cpp>=0.0.3
-numpy>=2.0
+llama-cpp-python>=0.3.0
+numpy>=2.0,<3.0

@@ -186,15 +186,22 @@ export function orphanRunningTasksForHostSession(
   hostSessionId: string,
   reason: string,
   now = Date.now(),
-): number {
-  const result = getDb()
+): AgentTaskRow[] {
+  const rows = getDb()
     .prepare(
-      `UPDATE agent_tasks
-       SET status = 'orphaned', status_reason = ?, ended_at = ?, updated_at = ?
-       WHERE host_session_id = ? AND status = 'running'`,
+      `SELECT * FROM agent_tasks WHERE host_session_id = ? AND status = 'running' ORDER BY started_at ASC`,
     )
-    .run(reason, now, now, hostSessionId)
-  return result.changes
+    .all(hostSessionId) as AgentTaskRow[]
+  if (rows.length > 0) {
+    getDb()
+      .prepare(
+        `UPDATE agent_tasks
+         SET status = 'orphaned', status_reason = ?, ended_at = ?, updated_at = ?
+         WHERE host_session_id = ? AND status = 'running'`,
+      )
+      .run(reason, now, now, hostSessionId)
+  }
+  return rows
 }
 
 export function insertAgentTaskStart(input: {
@@ -275,6 +282,32 @@ export function insertAgentTaskStart(input: {
       row.updated_at,
     )
   return row
+}
+
+/**
+ * Park on await_user_input (issue #27 P3): the child is alive but waiting on the
+ * operator — status flips to `awaiting_input` and the question rides spec_json for
+ * the runs board + the chat relay card.
+ */
+export function markAgentTaskAwaitingInput(
+  id: string,
+  info: { question: string; what_i_tried?: string; context_digest?: string },
+  now = Date.now(),
+): void {
+  const existing = getAgentTask(id)
+  if (!existing) return
+  let spec: AgentTaskSpec
+  try {
+    spec = JSON.parse(existing.spec_json) as AgentTaskSpec
+  } catch {
+    spec = { task: existing.title, mode: existing.mode, agent: existing.agent_name, groupRunId: existing.group_run_id ?? id }
+  }
+  spec.question = info.question
+  if (info.what_i_tried) spec.what_i_tried = info.what_i_tried
+  if (info.context_digest) spec.context_digest = info.context_digest
+  getDb()
+    .prepare('UPDATE agent_tasks SET spec_json = ?, status = ?, updated_at = ? WHERE id = ?')
+    .run(JSON.stringify(spec), 'awaiting_input', now, id)
 }
 
 export function updateAgentTaskProgress(

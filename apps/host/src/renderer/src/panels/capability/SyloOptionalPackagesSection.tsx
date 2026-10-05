@@ -12,11 +12,10 @@ import {
   capEmptyNote,
   capPkgCardHint,
   capPkgCardName,
+  capPaneHead,
   capSection,
   capSectionBody,
-  capSectionChevron,
   capSectionLeadTight,
-  capSectionSummary,
   capSectionSummaryTitle,
     capSkillRow,
   capCount,
@@ -31,7 +30,6 @@ export function SyloOptionalPackagesSection({
 }: {
   onSaved: (restartNote: string) => void
 }): React.ReactElement {
-  const [open, setOpen] = useState(false)
   const [pref, setPref] = useState<Record<string, boolean>>({})
   const [busy, setBusy] = useState<string | null>(null)
   const [installNote, setInstallNote] = useState<string | null>(null)
@@ -92,18 +90,13 @@ export function SyloOptionalPackagesSection({
   const enabledCount = SYLO_OPTIONAL_PACKAGES.filter((p) => pref[p.id] === true).length
 
   return (
-    <details
-      className={capSection}
-      open={open}
-      onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
-    >
-      <summary className={capSectionSummary}>
+    <section className={capSection}>
+      <div className={capPaneHead}>
         <h2 className={capSectionSummaryTitle}>Sylo built-in packages</h2>
         <span className={capCount}>
           {enabledCount}/{SYLO_OPTIONAL_PACKAGES.length}
         </span>
-        <span className={capSectionChevron} aria-hidden="true" />
-      </summary>
+      </div>
       <div className={capSectionBody}>
         <p className={cn(mutedText, capSectionLeadTight)}>
           First-party <strong>sylo-*</strong> Pi packages shipped in the Sylo repo but{' '}
@@ -166,7 +159,7 @@ export function SyloOptionalPackagesSection({
             ))}
           </ul>
         )}
-      </div>
-    </details>
+            </div>
+    </section>
   )
 }

@@ -182,6 +182,37 @@ export async function installOptionalPackagePythonDeps(
     const pipNote = tail ? `Python deps installed.\n${tail}` : 'Python deps installed.'
     message = message ? `${message}\n${pipNote}` : pipNote
 
+    // Optional/extra backend deps (e.g. sylo-tts Orpheus): best-effort. A failure
+    // here must not fail the enable — the core backend stays fully usable and the
+    // extra backend heals itself on first use (backend-aware ensure in tts-engine).
+    if (pkg.pythonOptionalRequirementsRelPath) {
+      const optPath = join(repoRoot, pkg.pythonOptionalRequirementsRelPath)
+      if (existsSync(optPath)) {
+        try {
+          const opt = await execFileAsync(
+            python,
+            ['-m', 'pip', 'install', '-r', optPath],
+            {
+              cwd: reqDir,
+              maxBuffer: 8 * 1024 * 1024,
+              windowsHide: true,
+              timeout: 300_000,
+            },
+          )
+          const optTail = (opt.stdout || opt.stderr || '').trim().split('\n').slice(-2).join('\n')
+          const note = optTail ? `Optional deps installed.\n${optTail}` : 'Optional deps installed.'
+          message = `${message}\n${note}`
+        } catch (optErr) {
+          const e = optErr as NodeJS.ErrnoException & { stderr?: string; stdout?: string }
+          const detail = [e.stderr, e.stdout, e.message].filter(Boolean).join('\n').trim()
+          const note =
+            `Optional extra deps did not install (${pkg.pythonOptionalRequirementsRelPath}); ` +
+            `they retry automatically on first use of that feature.${detail ? `\n${detail.split('\n').slice(-3).join('\n')}` : ''}`
+          message = `${message}\n${note}`
+        }
+      }
+    }
+
     const post = await runPostEnableScript(repoRoot, pkg, python)
     if (!post.ok) return { ok: false, error: post.error }
     if (post.message) message = `${message}\n${post.message}`

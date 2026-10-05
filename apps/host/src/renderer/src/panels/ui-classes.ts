@@ -147,6 +147,11 @@ export const capSectionChevron =
   'mr-1 h-2 w-2 shrink-0 rotate-[-45deg] border-b-2 border-r-2 border-text-secondary transition-transform duration-[180ms] group-open:rotate-45'
 
 
+/** Capability manager — static pane header (left/right pane layout, mirrors Settings). */
+export const capPaneHead =
+  'flex items-center gap-3 rounded-t-[10px] border border-b-0 border-border bg-bg-secondary px-3.5 py-2.5'
+
+
 
 export const capSectionBody =
 
@@ -1222,7 +1227,7 @@ export const chatCompactMenuPrimary =
 export const chatStopBtn =
   'shrink-0 cursor-pointer rounded-md border border-[rgb(241_106_80/0.55)] bg-[rgb(241_106_80/0.12)] text-[#f6b3a4] hover:bg-[rgb(241_106_80/0.22)] disabled:cursor-not-allowed disabled:opacity-50'
 
-/** Panel shell — skills tab, skill-route tab */
+/** Panel shell — evals, proposals, skill-route tabs (full-height scrolling). */
 export const panelShell =
   'box-border min-h-0 flex-1 w-full overflow-x-hidden overflow-y-auto overscroll-y-contain touch-pan-y p-4'
 

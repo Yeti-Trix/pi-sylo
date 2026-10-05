@@ -134,6 +134,14 @@ import {
   clearPersistedBoardBinding,
 } from './tasks-live.js'
 import { readSkillMd, writeSkillMd } from './skill-md-io.js'
+import {
+  disposeSubagentBoards,
+  rowsFromAgentTaskRows,
+  showSubagentBoard,
+  subagentBoardForWorkspace,
+  updateSubagentBoard,
+  type SubagentBoardData,
+} from './subagent-board.js'
 import { installCrashHandlers } from './crash-log.js'
 import { pinSyloUserDataDir, syncBundledSkills } from './packaged-runtime.js'
 import {
@@ -2205,6 +2213,372 @@ function emitChatRefresh(conversationId: string, kind: ChatRefreshKind): void {
 }
 
 /**
+ * Background subagent completions (issue #27).
+ *
+ * The subagent tool resolves at spawn time, so a finished detached run reaches the
+ * host as a `subagent_run_completed` fork event. Delivery = a result card in the
+ * timeline (always, even when the wake turn cannot start yet) + a wake turn for the
+ * orchestrator: idle → a real prompt turn (full pending-turn bookkeeping, so the
+ * reply streams into the timeline like any turn), busy → the open turn's followUp
+ * queue. A per-conversation batch window coalesces several completions into one wake.
+ */
+type SubagentCompletedItem = Extract<SyloSubagentHostEvent, { type: 'subagent_run_completed' }>
+
+type BackgroundDeliveryState = {
+  items: SubagentCompletedItem[]
+  timer: ReturnType<typeof setTimeout> | null
+  retries: number
+}
+const backgroundDeliveries = new Map<string, BackgroundDeliveryState>()
+const BACKGROUND_DELIVERY_BATCH_MS = 250
+const BACKGROUND_DELIVERY_RETRY_MS = 5000
+const BACKGROUND_DELIVERY_MAX_RETRIES = 24
+/** Per-item cap for the wake prompt — the orchestrator needs the substance to act. */
+const BACKGROUND_DELIVERY_TEXT_CAP = 24_000
+/** Timeline card cap — the card is for reading; the wake prompt carries more. */
+const BACKGROUND_CARD_TEXT_CAP = 8_000
+
+function shortRunId(runId: string): string {
+  return runId.slice(0, 8)
+}
+
+function firstTaskLine(task: string): string {
+  const line = task.trim().split('\n', 1)[0] ?? task
+  return line.length > 160 ? `${line.slice(0, 160)}…` : line
+}
+
+function completedItemText(item: SubagentCompletedItem): string {
+  return (item.status === 'failed' ? (item.error ?? '') : (item.resultText ?? '')).trim()
+}
+
+function backgroundResultCard(item: SubagentCompletedItem): string {
+  const model = item.model ? ` · ${item.model}` : ''
+  const head =
+    item.status === 'succeeded' ?
+      `⏹ **Background subagent <${item.agent}> finished** (run \`${shortRunId(item.runId)}\`${model})`
+    : item.status === 'failed' ?
+      `⚠️ **Background subagent <${item.agent}> failed** (run \`${shortRunId(item.runId)}\`${model})`
+    : `■ **Background subagent <${item.agent}> stopped** (run \`${shortRunId(item.runId)}\`${model})`
+  const body = completedItemText(item)
+  const capped =
+    body.length > BACKGROUND_CARD_TEXT_CAP ?
+      `${body.slice(0, BACKGROUND_CARD_TEXT_CAP)}\n\n_(result truncated)_`
+    : body
+  return [head, `**Task:** ${firstTaskLine(item.task)}`, '', capped || '_(no output)_'].join('\n')
+}
+
+function backgroundWakeSection(item: SubagentCompletedItem): string {
+  const body = completedItemText(item)
+  const capped =
+    body.length > BACKGROUND_DELIVERY_TEXT_CAP ?
+      `${body.slice(0, BACKGROUND_DELIVERY_TEXT_CAP)}\n(text truncated)`
+    : body
+  const statusLabel =
+    item.status === 'succeeded' ? 'Result' : item.status === 'failed' ? 'Failed' : 'Stopped (cancelled)'
+  return [
+    `### ${statusLabel} — <${item.agent}> (run ${shortRunId(item.runId)})`,
+    `Task: ${firstTaskLine(item.task)}`,
+    '',
+    capped || '_(no output)_',
+  ].join('\n')
+}
+
+function composeBackgroundWakePrompt(items: SubagentCompletedItem[]): string {
+  return [
+    '[Background subagent results]',
+    '',
+    ...items.flatMap((item, i) => (i === 0 ? [backgroundWakeSection(item)] : ['---', backgroundWakeSection(item)])),
+    '',
+    'Act on these results toward the operator\u2019s goal: apply what matters (read/edit/verify), then reply with a brief digest. A failed section: report the failure and propose the next step. A cancelled section: the operator stopped that run — do not restart it unless asked. Never re-run a completed task.',
+  ].join('\n')
+}
+
+function handleBackgroundRunCompleted(conversationId: string, item: SubagentCompletedItem): void {
+  // The card lands in the timeline immediately, whether or not the wake turn can
+  // start: the operator always sees what finished.
+  db.insertMessage(conversationId, 'system', backgroundResultCard(item), 'complete')
+  emitChatRefresh(conversationId, 'messages')
+  let state = backgroundDeliveries.get(conversationId)
+  if (!state) {
+    state = { items: [], timer: null, retries: 0 }
+    backgroundDeliveries.set(conversationId, state)
+  }
+  state.items.push(item)
+  if (!state.timer) {
+    state.timer = setTimeout(() => {
+      const buffered = backgroundDeliveries.get(conversationId)
+      if (buffered) buffered.timer = null
+      void flushBackgroundDeliveries(conversationId)
+    }, BACKGROUND_DELIVERY_BATCH_MS)
+  }
+}
+
+function scheduleBackgroundDeliveryRetry(conversationId: string): void {
+  const state = backgroundDeliveries.get(conversationId)
+  if (!state) return
+  state.retries += 1
+  if (state.retries > BACKGROUND_DELIVERY_MAX_RETRIES) {
+    // Give up on auto-delivery: the results are in the timeline; the next operator
+    // message is the natural recovery. (Hardening task covers folding undelivered
+    // results into the next prompt automatically.)
+    backgroundDeliveries.delete(conversationId)
+    return
+  }
+  if (!state.timer) {
+    state.timer = setTimeout(() => {
+      const buffered = backgroundDeliveries.get(conversationId)
+      if (buffered) buffered.timer = null
+      void flushBackgroundDeliveries(conversationId)
+    }, BACKGROUND_DELIVERY_RETRY_MS)
+  }
+}
+
+async function flushBackgroundDeliveries(conversationId: string): Promise<void> {
+  const state = backgroundDeliveries.get(conversationId)
+  if (!state || state.items.length === 0) return
+  if (db.getPref('sylo.safe_mode', false)) return // wake resumes when safe mode clears
+  if (!broker || !brokerAgentReady) {
+    scheduleBackgroundDeliveryRetry(conversationId)
+    return
+  }
+  if (compactingConversations.has(conversationId)) {
+    // Delivery mid-compaction would race the context rewrite; the compaction
+    // finish path (and the retry timer) flushes again when it is done.
+    scheduleBackgroundDeliveryRetry(conversationId)
+    return
+  }
+  const promptText = composeBackgroundWakePrompt(state.items)
+  const active = findPendingTurnForConversation(conversationId)
+  if (active) {
+    // The orchestrator is mid-turn: ride the followUp queue (same mechanism the
+    // queued user message uses; pi runs it right after the current work, inside
+    // the still-open turn — nothing is lost unless the operator Stops).
+    const [turnId] = active
+    const assigned = turnBrokerPool.supervisorForTurn(turnId) ?? broker
+    if (!assigned || !isSupervisorReady(assigned)) {
+      scheduleBackgroundDeliveryRetry(conversationId)
+      return
+    }
+    assigned.sendFollowUp(promptText)
+    backgroundDeliveries.delete(conversationId)
+    return
+  }
+  const started = await startDeliveryTurn(conversationId, promptText)
+  if (!started.ok) {
+    scheduleBackgroundDeliveryRetry(conversationId)
+    return
+  }
+  backgroundDeliveries.delete(conversationId)
+}
+
+/**
+ * Detached background runs died with the broker — agent_tasks rows were orphaned
+ * (onBrokerExitOrphanTasks). Post a lost-run card per affected conversation so the
+ * operator isn't left waiting for a completion message that will never come.
+ */
+function notifyOrphanedBackgroundRuns(rows: Awaited<ReturnType<typeof onBrokerExitOrphanTasks>>): void {
+  const running = rows.filter((row) => row.status === 'running' || row.status === 'orphaned')
+  if (running.length === 0) return
+  const byConversation = new Map<string, typeof running>()
+  for (const row of running) {
+    const list = byConversation.get(row.conversation_id) ?? []
+    list.push(row)
+    byConversation.set(row.conversation_id, list)
+  }
+  for (const [conversationId, orphans] of byConversation) {
+    const lines: string[] = ['■ **Broker restarted while background agents were running.**']
+    for (const row of orphans) {
+      lines.push(
+        `- <${row.agent_name}> (run \`${row.id.slice(0, 8)}\`) was lost — re-dispatch the task if it is still needed.`,
+      )
+    }
+    db.insertMessage(conversationId, 'system', lines.join('\n'), 'complete')
+    emitChatRefresh(conversationId, 'messages')
+    scheduleSubagentBoardUpdate(conversationId, true)
+  }
+}
+
+/**
+ * A background subagent parked on `await_user_input` (issue #27 P3): post the
+ * question card in the owning chat, then wake the orchestrator to relay it.
+ * The run itself keeps polling its mailbox — the orchestrator delivers the answer
+ * with `subagent_answer` on the operator's reply.
+ */
+function handleSubagentAwaitingInput(
+  conversationId: string,
+  item: Extract<SyloSubagentHostEvent, { type: 'subagent_run_awaiting_input' }>,
+): void {
+  const runId = shortRunId(item.runId)
+  const lines = [
+    `⏸ **Background subagent <${item.agent}> is waiting on you** (run \`${runId}\`)`,
+    `**Question:** ${item.question}`,
+  ]
+  if (item.context_digest) lines.push(`**Where it stands:** ${item.context_digest}`)
+  if (item.what_i_tried) lines.push(`**Already tried:** ${item.what_i_tried}`)
+  lines.push('', 'Reply here and the answer goes straight back into that agent — it continues in the same session it parked.')
+  db.insertMessage(conversationId, 'system', lines.join('\n'), 'complete')
+  emitChatRefresh(conversationId, 'messages')
+  const wake = [
+    '[Background subagent awaiting input]',
+    `Run <${item.agent}> (${runId}) parked on await_user_input and asked the operator:`,
+    `"${item.question}"`,
+    item.context_digest ? `Where it stands: ${item.context_digest}` : '',
+    item.what_i_tried ? `Already tried: ${item.what_i_tried}` : '',
+    'Relay the question to the operator VERBATIM as your reply, then END YOUR TURN — do not answer it yourself. The operator\u2019s next reply carries the decision; deliver it with the subagent_answer tool (runId above). If the operator\u2019s latest message already answers the question, deliver it now instead of re-asking.',
+  ]
+    .filter((line) => line !== '')
+    .join('\n')
+  dispatchAwaitingWake(conversationId, wake, 0)
+}
+
+const awaitingWakeTimer = new Map<string, ReturnType<typeof setTimeout>>()
+
+function dispatchAwaitingWake(conversationId: string, wake: string, attempt: number): void {
+  if (attempt > BACKGROUND_DELIVERY_MAX_RETRIES) return // card is in the timeline; operator message recovers
+  const active = findPendingTurnForConversation(conversationId)
+  if (active) {
+    const [turnId] = active
+    const assigned = turnBrokerPool.supervisorForTurn(turnId) ?? broker
+    if (assigned && isSupervisorReady(assigned)) {
+      assigned.sendFollowUp(wake)
+      return
+    }
+  } else if (broker && brokerAgentReady && isSupervisorReady(broker)) {
+    void (async () => {
+      const started = await startDeliveryTurn(conversationId, wake)
+      if (!started.ok) scheduleAwaitingWakeRetry(conversationId, wake, attempt)
+    })()
+    return
+  }
+  scheduleAwaitingWakeRetry(conversationId, wake, attempt)
+}
+
+function scheduleAwaitingWakeRetry(conversationId: string, wake: string, attempt: number): void {
+  const existing = awaitingWakeTimer.get(conversationId)
+  if (existing) clearTimeout(existing)
+  awaitingWakeTimer.set(
+    conversationId,
+    setTimeout(() => {
+      awaitingWakeTimer.delete(conversationId)
+      dispatchAwaitingWake(conversationId, wake, attempt + 1)
+    }, BACKGROUND_DELIVERY_RETRY_MS),
+  )
+}
+
+async function startDeliveryTurn(
+  conversationId: string,
+  promptText: string,
+): Promise<{ ok: boolean; error?: string }> {
+  finalizeOrphanStreamingAssistants(conversationId)
+  const assignedBroker = await acquireBrokerForTurn(conversationId)
+  if (!assignedBroker) return { ok: false, error: 'broker_busy' }
+  const assistant = db.insertMessage(conversationId, 'assistant', '', 'streaming')
+  const turnId = randomUUID()
+  try {
+    const conv = db.getConversation(conversationId)
+    const wsCwd = conv?.workspace_id ? effectivePiCwdForWorkspace(conv.workspace_id) : ''
+    const captured = wsCwd ? captureTurnStart(conversationId, wsCwd, assistant.id) : null
+    reconcileDeferredCapture(conversationId, assistant.id, captured !== null)
+  } catch {
+    /* checkpoints are best-effort */
+  }
+  pendingTurns.set(turnId, {
+    convId: conversationId,
+    assistantId: assistant.id,
+    chunks: '',
+    pendingParagraphBreak: false,
+    slashCommand: false,
+    commandLines: [],
+    contentDirty: false,
+    contentFlushTimer: null,
+    toolEventsBuffer: [],
+    toolEventsPersisted: [],
+    toolJsonChars: 0,
+    toolFlushTimer: null,
+  })
+  syncTurnPowerBlocker()
+  turnBrokerPool.assignTurn(turnId, assignedBroker)
+  try {
+    await ensureBrokerSessionForConversation(conversationId)
+  } catch (e) {
+    flushPendingTurnBuffers(pendingTurns.get(turnId)!)
+    dropPendingTurn(turnId)
+    turnBrokerPool.releaseTurn(turnId, broker)
+    db.updateMessageContent(assistant.id, `(error) ${e instanceof Error ? e.message : String(e)}`, 'failed')
+    emitChatRefresh(conversationId, 'turnFinished')
+    return { ok: false, error: 'broker_not_ready' }
+  }
+  emitChatRefresh(conversationId, 'turnStarted')
+  assignedBroker.sendPrompt(turnId, promptText)
+  return { ok: true }
+}
+
+/**
+ * Per-workspace "Subagents — Runs" live board (issue #27 P2): registers on the first
+ * background dispatch of a workspace, then rides `canvas:live-update` as run events land.
+ * Updates are debounced per conversation — run_update events arrive per token-flush.
+ */
+const subagentBoardUpdateTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function workspaceKeyForConversation(conversationId: string): string | null {
+  const conv = db.getConversation(conversationId)
+  if (!conv?.workspace_id) return null
+  const wk = effectivePiCwdForWorkspace(conv.workspace_id)
+  return wk ? wk : null
+}
+
+function scheduleSubagentBoardUpdate(conversationId: string, immediate = false): void {
+  const wk = workspaceKeyForConversation(conversationId)
+  if (!wk) return
+  if (immediate) {
+    const t = subagentBoardUpdateTimers.get(conversationId)
+    if (t) {
+      clearTimeout(t)
+      subagentBoardUpdateTimers.delete(conversationId)
+    }
+    pushSubagentBoard(conversationId, wk, true)
+    return
+  }
+  if (subagentBoardUpdateTimers.has(conversationId)) return
+  subagentBoardUpdateTimers.set(
+    conversationId,
+    setTimeout(() => {
+      subagentBoardUpdateTimers.delete(conversationId)
+      const workspaceKey = workspaceKeyForConversation(conversationId)
+      if (workspaceKey) pushSubagentBoard(conversationId, workspaceKey, false)
+    }, 300),
+  )
+}
+
+function pushSubagentBoard(conversationId: string, workspaceKey: string, forceShow: boolean): void {
+  const rows = rowsFromAgentTaskRows(subagentTaskStore.listAgentTasksForConversation(conversationId)).slice(0, 50)
+  const data: SubagentBoardData = {
+    conversationId,
+    workspaceKey,
+    generatedAt: Date.now(),
+    rows,
+  }
+  const existing = subagentBoardForWorkspace(workspaceKey)
+  if ((forceShow && rows.length > 0) || !existing || existing.conversationId !== conversationId) {
+    if (rows.length === 0 && existing) {
+      updateSubagentBoard(workspaceKey, conversationId, rows)
+      return
+    }
+    // First run for the workspace (or a different conversation of it): bind + show.
+    const liveId = showSubagentBoard(workspaceKey, conversationId, rows)
+    mainWindow?.webContents.send('canvas:live-show', {
+      liveId,
+      kind: 'subagent-runs',
+      title: 'Subagents — Runs',
+      data,
+      workspaceKey,
+    })
+    return
+  }
+  updateSubagentBoard(workspaceKey, conversationId, rows)
+}
+
+/**
  * Derive and persist a title from the operator's first user message.
  *
  * Called from every site that inserts a `'user'` row, so deferred turns and
@@ -4228,20 +4602,38 @@ function handleBrokerOutMessage(
   }
   if (msg.type === 'sylo_subagent') {
     // Operator-forced runs happen before the Pi turn exists, so their turn id is
-    // not in `pendingTurns` yet — fall back to the forced-run map or the run
-    // loses its conversation (no Tasks row, no per-run cancel).
+    // not in `pendingTurns` yet — fall back to the forced-run map. Background runs
+    // complete long after their dispatch turn ended (entry stamps turnId only from
+    // the active prompt), so the third fallback resolves via the agent_tasks row
+    // itself — rows are keyed by run id.
+    const se = msg.event as SyloSubagentHostEvent
     const convId =
-      msg.turnId ?
+      (msg.turnId ?
         (pendingTurns.get(msg.turnId)?.convId ?? forcedSubagentTurnConvIds.get(msg.turnId))
-      : undefined
+      : undefined) ?? subagentTaskStore.getAgentTask(se.runId)?.conversation_id
     if (convId) {
-      handleSubagentHostEvent(convId, msg.event as SyloSubagentHostEvent)
+      handleSubagentHostEvent(convId, se)
+      if (se.type === 'subagent_run_start' && se.background) {
+        // First detached dispatch of a workspace: register + show its runs board now.
+        scheduleSubagentBoardUpdate(convId, true)
+      } else if (se.type !== 'subagent_run_completed') {
+        // run_update / run_end of any run: refresh the board (debounced).
+        scheduleSubagentBoardUpdate(convId)
+      }
     }
     mainWindow?.webContents.send('subagents:lifecycle', {
       conversationId: convId ?? null,
       turnId: msg.turnId,
-      ...(msg.event as Record<string, unknown>),
+      ...(se as unknown as Record<string, unknown>),
     })
+    if (se.type === 'subagent_run_completed' && convId) {
+      scheduleSubagentBoardUpdate(convId, true)
+      handleBackgroundRunCompleted(convId, se)
+    }
+    if (se.type === 'subagent_run_awaiting_input' && convId) {
+      scheduleSubagentBoardUpdate(convId, true)
+      handleSubagentAwaitingInput(convId, se)
+    }
     return
   }
   if (msg.type === 'sylo_web_access') {
@@ -4921,7 +5313,10 @@ function registerBroker(): void {
           broker,
           error: 'Cancelled: broker exited',
         })
-        onBrokerExitOrphanTasks()
+        // Detached background runs died with the broker — their agent_tasks rows were
+        // orphaned above; tell each affected chat so the operator isn't left waiting
+        // for a completion message that will never come.
+        notifyOrphanedBackgroundRuns(onBrokerExitOrphanTasks())
         const wasReady = brokerAgentReady
         brokerAgentReady = false
         brokerResolvedModel = null
@@ -6460,7 +6855,10 @@ function registerIpc(): void {
     if (!id) return { ok: false as const, error: 'bad_id' as const }
     const row = subagentTaskStore.getAgentTask(id)
     if (!row) return { ok: false as const, error: 'not_found' as const }
-    if (row.status !== 'running') return { ok: false as const, error: 'not_running' as const }
+    // Awaiting-input rows cancel too: the parked child is alive and holding a slot.
+    if (row.status !== 'running' && row.status !== 'awaiting_input') {
+      return { ok: false as const, error: 'not_running' as const }
+    }
 
     let killed = false
     if (broker && isSupervisorReady(broker)) {
