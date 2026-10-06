@@ -1415,6 +1415,24 @@ export function listCompactionInProgressRows(): { id: string; conversation_id: s
     )
     .all() as { id: string; conversation_id: string; content: string }[]
 }
+
+/** The conversation's most recently created compaction notice row (any state), or
+ *  null. Used to coalesce identical consecutive failure cards instead of stacking a
+ *  new row for every failed attempt. `excludeId` skips the in-progress banner that
+ *  is about to be settled (it is itself the newest compaction row while settling). */
+export function getLatestCompactionRow(
+  conversationId: string,
+  excludeId?: string,
+): { id: string; content: string; created_at: number } | null {
+  const row = getDb()
+    .prepare(
+      "SELECT id, content, created_at FROM messages WHERE conversation_id = ? AND role = 'system' AND content LIKE '%\"kind\":\"compaction\"%' AND id != COALESCE(?, '') ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
+    .get(conversationId, excludeId ?? null) as
+    | { id: string; content: string; created_at: number }
+    | undefined
+  return row ?? null
+}
 /** 0-based index of a message AMONG the conversation's user rows, ordered the
  *  same way listMessages orders (created_at, rowid). Aligns the DB timeline
  *  with the pi session's user-entry sequence for edit-resend rewinds. */

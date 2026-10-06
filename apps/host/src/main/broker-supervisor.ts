@@ -189,7 +189,11 @@ export type BrokerOutMessage =
       modelId?: string
     }
   | { type: 'system_prompt_stats'; stats: SystemPromptStats }
-  | { type: 'context_window_stats'; actualMessageTokens: number; includesSystemPrompt?: boolean }
+  | { type: 'context_window_stats'; actualMessageTokens: number; includesSystemPrompt?: boolean; /**
+     * True when the bound session's branch currently ENDS with a compaction entry —
+     * Pi would refuse another compaction ("Already compacted") until fresh turns
+     * append entries after it. The host skips deferred auto-compact in this state. */
+    endsWithCompaction?: boolean }
   | {
       type: 'compact_now_result'
       requestId: string

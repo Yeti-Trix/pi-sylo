@@ -1820,8 +1820,12 @@ export function App(): React.ReactElement {
     [workspaces],
   )
 
-  const refreshConversations = useCallback(async () => {
-    const wid = sidebarWorkspaceId.trim()
+  const refreshConversations = useCallback(async (widOverride?: string) => {
+    // Optional widOverride: callers that already know the target workspace (the
+    // new-chat flow) must be able to refresh THAT list even in the same tick as
+    // the workspace switch — the callback identity still belongs to the render
+    // the click happened in, i.e. the PREVIOUSLY active workspace.
+    const wid = (widOverride ?? sidebarWorkspaceId).trim()
     if (!wid) {
       setConversations([])
       setArchivedConversations([])
@@ -3741,23 +3745,53 @@ export function App(): React.ReactElement {
     prefillChatPrompt('/skill:sylo-skill-author ')
   }, [prefillChatPrompt])
 
+  /** New chat in a SPECIFIC workspace. The single implementation behind both the
+   *  per-project + and the top "+ New chat". Besides creating the row it commits
+   *  to that workspace: switch (state + pref), open the section, drop any peek
+   *  flag for it, and refresh THAT workspace's list explicitly (see
+   *  refreshConversations' widOverride — the identity the click sees belongs to
+   *  the previously active workspace). */
   const newChatIn = async (wid: string) => {
     const id = wid.trim()
     if (!id) return
+    if (id !== sidebarWorkspaceId) {
+      setSidebarWorkspaceId(id)
+      void window.sylo.prefs.set('sylo.ui.active_workspace_id', id)
+    }
+    setActiveWsOpen(true)
+    setPeekOpenWs((prev) => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+    setTab('chat')
     const reuseId = await window.sylo.conversations.findLatestEmpty(id)
     if (reuseId) {
       await window.sylo.plan.clearForNewChat(id)
-      await refreshConversations()
+      await refreshConversations(id)
       setActiveId(reuseId)
-      setTab('chat')
       return
     }
     const c = await window.sylo.conversations.create('', id)
-    await refreshConversations()
+    await refreshConversations(id)
     setActiveId(c.id)
-    setTab('chat')
   }
-  const newChat = () => void newChatIn(sidebarWorkspaceId)
+  /** Top "+ New chat": when the operator is merely BROWSING another project's
+   *  section (peek-open, Cursor-style) that project has never become the active
+   *  workspace — and the old behavior created the chat in the previously active
+   *  project ("pressed + and it landed in the wrong project"). The project the
+   *  operator is looking at is the one they mean: most recently opened peeked
+   *  section wins; with none open this stays "new chat in the active project". */
+  const newChat = () => {
+    if (convSearch.trim() === '') {
+      const peeked = [...peekOpenWs].filter((x) => x !== sidebarWorkspaceId)
+      const target = peeked.length > 0 ? peeked[peeked.length - 1]! : sidebarWorkspaceId
+      void newChatIn(target)
+      return
+    }
+    void newChatIn(sidebarWorkspaceId)
+  }
 
   /** "Share" on a terminal pane: drop its buffer into the chat composer as a
    *  fenced block so the agent can read what the operator is looking at. */
@@ -4845,11 +4879,8 @@ export function App(): React.ReactElement {
                     onClick={(e) => {
                       e.preventDefault()
                       e.stopPropagation()
-                      if (!wsActive) {
-                        setSidebarWorkspaceId(ws.id)
-                        void window.sylo.prefs.set('sylo.ui.active_workspace_id', ws.id)
-                      }
-                      setActiveWsOpen(true)
+                      // newChatIn commits the workspace switch (state + pref),
+                      // opens the section, and drops this section's peek flag.
                       void newChatIn(ws.id)
                     }}
                   >

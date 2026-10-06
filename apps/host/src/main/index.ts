@@ -3246,24 +3246,33 @@ async function ensureBrokerSessionForConversation(
   ) {
     return
   }
-  await supervisor.switchSession(sessionAbs, sessionCwd, {
-    disabledSkillPaths: mergedDisabled.skillPaths,
-    disabledExtensionPaths: mergedDisabled.extensionPaths,
-    disabledTools: planModeBlock.length > 0 ? [...mergedDisabled.disabledTools, ...planModeBlock] : mergedDisabled.disabledTools,
-    includeCursorSkills: readIncludeCursorSkillsPref(),
-    // Plan turns override the session tool policy; normal turns pass nothing
-    // (undefined = keep current) so operator prefs set at spawn keep holding.
-    ...(planEnabled ? { piBuiltinTools: PLAN_MODE_PI_BUILTIN_TOOLS } : {}),
-    alwaysApplySkillPaths,
-        modelProvider: eff.provider,
-    modelId: eff.modelId,
-    compactionReserveTokens: compactionReserveTokensForModel(eff.provider, eff.modelId),
-    imageModelId: eff.imageModelId,
-    imageModelProvider: eff.imageModelProvider,
-    thinkingLevel: eff.thinkingLevel ?? '',
-    subagentModelsByAgent: eff.subagentModelsByAgent,
-    subagentAgentScope: eff.subagentAgentScope,
-  })
+  // Mark the switch in flight so the rebind's context_window_stats broadcast (which
+  // arrives BEFORE switch_session_result, stamped with the still-outgoing
+  // conversation) can't drive auto-compact decisions with misattributed numbers.
+  brokerSwitchInFlightSupervisors.add(supervisor)
+  try {
+    await supervisor.switchSession(sessionAbs, sessionCwd, {
+      disabledSkillPaths: mergedDisabled.skillPaths,
+      disabledExtensionPaths: mergedDisabled.extensionPaths,
+      disabledTools: planModeBlock.length > 0 ? [...mergedDisabled.disabledTools, ...planModeBlock] : mergedDisabled.disabledTools,
+      includeCursorSkills: readIncludeCursorSkillsPref(),
+      // Plan turns override the session tool policy; normal turns pass nothing
+      // (undefined = keep current) so operator prefs set at spawn keep holding.
+      ...(planEnabled ? { piBuiltinTools: PLAN_MODE_PI_BUILTIN_TOOLS } : {}),
+      alwaysApplySkillPaths,
+      modelProvider: eff.provider,
+      modelId: eff.modelId,
+      compactionReserveTokens: compactionReserveTokensForModel(eff.provider, eff.modelId),
+      imageModelId: eff.imageModelId,
+      imageModelProvider: eff.imageModelProvider,
+      thinkingLevel: eff.thinkingLevel ?? '',
+      subagentModelsByAgent: eff.subagentModelsByAgent,
+      subagentAgentScope: eff.subagentAgentScope,
+    })
+  } finally {
+    // Stats arriving after this point correspond to the settled binding.
+    brokerSwitchInFlightSupervisors.delete(supervisor)
+  }
   if (supervisor === broker) {
     brokerFocusedConversationId = convId
     brokerLastSessionAbs = sessionAbs
@@ -4504,10 +4513,46 @@ function cancelCompactionNotices(convId?: string): void {
  *  settle) — keeps this decision function decoupled from broker wiring. */
 let compactNowRunner: ((convId: string) => Promise<unknown>) | null = null
 
+/**
+ * Latest context_window_stats flag per conversation: the bound session's branch
+ * currently ENDS with a compaction entry, so Pi would immediately refuse another
+ * compaction ("Already compacted" — prepareCompaction returns undefined) until a
+ * fresh turn appends entries after it. Without this skip, every stats broadcast
+ * (switch rebind, turn end, override push) for a just-compacted chat re-fired an
+ * attempt that always failed — the unbounded failed-card loop.
+ */
+const brokerStatsEndsWithCompaction = new Map<string, boolean>()
+
+/**
+ * Per-conversation auto-compact retry cooldown: when a deferred auto attempt fails,
+ * suppress further auto attempts for this long so repeated stats broadcasts can't
+ * hammer the same failing compaction. Manual compactions ignore and clear it.
+ */
+const autoCompactRetryBlockedUntil = new Map<string, number>()
+const AUTO_COMPACT_RETRY_COOLDOWN_MS = 5 * 60 * 1000
+
+/**
+ * Supervisors with a switchSession in flight right now. A rebind's context_window_stats
+ * broadcast lands BEFORE switch_session_result resolves, so the host's conversation
+ * stamping (brokerFocusedConversationId / slot boundConversationId) still points at the
+ * OUTGOING conversation while the token + endsWithCompaction payload describes the
+ * INCOMING session. Stats arriving mid-switch were stamped with the wrong conversation
+ * id and drove auto-compact attempts for chats the operator had merely LEFT — one of
+ * the card-factory loops. Post-result broadcasts restamp everything; mid-switch ones
+ * are simply ignored for auto-compact + flag purposes.
+ */
+const brokerSwitchInFlightSupervisors = new Set<BrokerSupervisor>()
+
 function maybeAutoCompactForConversation(convId: string | null, actualTokens: number): void {
   if (!convId || !(actualTokens > 0)) return
   if (!brokerAgentReady || primaryCompactionInFlight) return
   if (compactingConversations.has(convId)) return
+  // Session just compacted (branch ends with the compaction entry) — Pi would refuse
+  // immediately ("Already compacted"); nothing has followed it that could be compacted.
+  if (brokerStatsEndsWithCompaction.get(convId) === true) return
+  // A recent auto attempt failed — cool down instead of retrying on every broadcast.
+  const retryBlockedUntil = autoCompactRetryBlockedUntil.get(convId)
+  if (retryBlockedUntil != null && Date.now() < retryBlockedUntil) return
   const conv = db.getConversation(convId)
   if (!conv || conv.archived_at != null) return
   // Defer while anything is in flight (turn, queued send, retry, compaction).
@@ -4871,10 +4916,23 @@ function handleBrokerOutMessage(
     return
   }
   if (msg.type === 'context_window_stats') {
+    // Mid-switch broadcasts are stamped with the outgoing conversation while carrying
+    // the incoming session's numbers — ignore them for auto-compact + refusal flags.
+    const statsSupervisor = ctx.isPrimary ? broker : ctx.overflowSlot?.supervisor
+    const switchInFlight =
+      statsSupervisor != null && brokerSwitchInFlightSupervisors.has(statsSupervisor)
     if (ctx.isPrimary) {
       brokerActualMessageTokens = msg.actualMessageTokens
       brokerContextStatsConvId = brokerFocusedConversationId ?? null
       brokerContextStatsIncludesSystem = msg.includesSystemPrompt === true
+      if (brokerContextStatsConvId && !switchInFlight) {
+        // Track would-refuse state per conversation so the deferred auto-compact
+        // never fires when Pi would just reject (branch ends with a compaction).
+        brokerStatsEndsWithCompaction.set(
+          brokerContextStatsConvId,
+          msg.endsWithCompaction === true,
+        )
+      }
       mainWindow?.webContents.send('broker:context-window-stats', {
         conversationId: brokerContextStatsConvId,
         actualMessageTokens: msg.actualMessageTokens,
@@ -4882,7 +4940,9 @@ function handleBrokerOutMessage(
       })
       // Deferred auto-compact: an idle chat over its trigger compacts now; a
       // busy one waits for the next broadcast (which lands at the turn's end).
-      maybeAutoCompactForConversation(brokerContextStatsConvId, msg.actualMessageTokens)
+      if (!switchInFlight) {
+        maybeAutoCompactForConversation(brokerContextStatsConvId, msg.actualMessageTokens)
+      }
       return
     }
     // Temporary overflow brokers (extra agent for one chat while the primary is
@@ -4896,12 +4956,17 @@ function handleBrokerOutMessage(
       brokerActualMessageTokens = msg.actualMessageTokens
       brokerContextStatsConvId = boundConv
       brokerContextStatsIncludesSystem = msg.includesSystemPrompt === true
+      if (!switchInFlight) {
+        brokerStatsEndsWithCompaction.set(boundConv, msg.endsWithCompaction === true)
+      }
       mainWindow?.webContents.send('broker:context-window-stats', {
         conversationId: boundConv,
         actualMessageTokens: msg.actualMessageTokens,
         includesSystemPrompt: brokerContextStatsIncludesSystem,
       })
-      maybeAutoCompactForConversation(boundConv, msg.actualMessageTokens)
+      if (!switchInFlight) {
+        maybeAutoCompactForConversation(boundConv, msg.actualMessageTokens)
+      }
     }
     return
   }
@@ -8001,32 +8066,69 @@ function registerIpc(): void {
   })
 
   /**
-   * Settle the manual compaction's in-progress banner based on its result: success
-   * keeps the row and writes the result payload; a genuine Pi-side failure keeps the
-   * row as a "compaction failed" card (same as auto-compaction's persisted errors).
-   * Pre-start failures (busy broker, spawn refused) are settled by the handler by
-   * deleting the row instead — no compaction ever ran.
+   * Settle a compaction attempt's in-progress banner based on its result. Success
+   * keeps the row and writes the result payload bearing the attempt's OWN trigger
+   * reason (deferred auto attempts used to be mislabeled 'manual' here). A genuine
+   * Pi-side failure keeps the row as a "compaction failed" card — coalesced into the
+   * conversation's existing failure card when it is identical (same trigger + same
+   * error) instead of stacking yet another row. Auto-path benign refusals ("Already
+   * compacted" — the session branch ends with a compaction entry) settle with no
+   * card at all: nothing can be compacted, so nothing is worth persisting. Any
+   * auto-path failure also starts the per-conversation retry cooldown. Pre-start
+   * failures (busy broker, spawn refused) are settled by the caller by deleting the
+   * row instead — no compaction ever ran.
    */
-  const settleManualCompactionResult = (
+  const settleCompactionAttemptResult = (
     convId: string,
     noticeId: string | null,
+    reason: CompactionNoticePayload['reason'],
     r: { ok: boolean; summary?: string; tokensBefore?: number; tokensAfter?: number; error?: string },
   ): void => {
     if (!noticeId) return
     if (r.ok) {
+      autoCompactRetryBlockedUntil.delete(convId)
       settleCompactionNotice(convId, noticeId, {
         kind: 'compaction',
-        reason: 'manual',
+        reason,
         summary: r.summary,
         tokensBefore: r.tokensBefore,
         tokensAfter: r.tokensAfter,
       })
       return
     }
+    const errorMessage = r.error || 'Compaction failed'
+    if (reason !== 'manual') {
+      // Auto attempt failed — put the conversation on the retry cooldown so repeated
+      // stats broadcasts don't re-attempt (the would-refuse skip covers the common
+      // case; this also catches summarizer/model errors).
+      autoCompactRetryBlockedUntil.set(convId, Date.now() + AUTO_COMPACT_RETRY_COOLDOWN_MS)
+      if (errorMessage === 'Already compacted') {
+        // Benign refusal: the session was already compacted and nothing has followed
+        // it. Drop the banner silently — not a card-worthy outcome.
+        settleCompactionNotice(convId, noticeId, null)
+        return
+      }
+    }
+    // Coalesce identical consecutive failure cards: when the conversation's latest
+    // settled compaction card is a failure with the same trigger and same error, it
+    // already represents this attempt — drop the fresh banner instead of appending a
+    // duplicate row.
+    const prev = db.getLatestCompactionRow(convId, noticeId)
+    const prevPayload = prev ? parseCompactionNoticeContent(prev.content) : null
+    if (
+      prevPayload &&
+      !isCompactionNoticeInProgress(prevPayload) &&
+      prevPayload.errorMessage &&
+      prevPayload.reason === reason &&
+      prevPayload.errorMessage === errorMessage
+    ) {
+      settleCompactionNotice(convId, noticeId, null)
+      return
+    }
     settleCompactionNotice(convId, noticeId, {
       kind: 'compaction',
-      reason: 'manual',
-      errorMessage: r.error || 'Compaction failed',
+      reason,
+      errorMessage,
     })
   }
 
@@ -8097,6 +8199,10 @@ function registerIpc(): void {
   // the exact same claim / banner / settle path as the button.
   const compactConversationNow = async (
     id: string,
+    /** Who asked: 'manual' (button / slash command) or 'threshold' (deferred
+     *  auto-compact when an idle chat is over its trigger). Labels the persisted
+     *  card correctly and gates the auto-path refusal/cooldown handling. */
+    reason: CompactionNoticePayload['reason'] = 'manual',
   ): Promise<
     { ok: true; summary?: string; tokensBefore?: number; tokensAfter?: number } | { ok: false; error: string }
   > => {
@@ -8118,7 +8224,7 @@ function registerIpc(): void {
     // chat and back (previously there was nothing until the final notice). The
     // settle is guarded on the row still being in-progress, so success/failure/
     // cleanup paths can run in any order without double-writing.
-    const noticeId = insertCompactionInProgressNotice(id, 'manual')
+    const noticeId = insertCompactionInProgressNotice(id, reason)
     try {
       // While a manual compaction streams through the primary, don't touch the
       // primary at all (Pi's session.compact() aborts in-flight operations).
@@ -8128,7 +8234,7 @@ function registerIpc(): void {
         !supervisorHasInFlightTurn(broker)
       ) {
         const r = await compactOnPrimary(id)
-        settleManualCompactionResult(id, noticeId, r)
+        settleCompactionAttemptResult(id, noticeId, reason, r)
         return r
       }
       // Primary is bound elsewhere (or mid-turn / mid-compaction there). A ui-focus
@@ -8141,7 +8247,7 @@ function registerIpc(): void {
         }
         if (brokerFocusedConversationId === id && !supervisorHasInFlightTurn(broker)) {
           const r = await compactOnPrimary(id)
-          settleManualCompactionResult(id, noticeId, r)
+          settleCompactionAttemptResult(id, noticeId, reason, r)
           return r
         }
       }
@@ -8154,7 +8260,7 @@ function registerIpc(): void {
           // error explains) instead of a phantom "compaction failed" card.
           settleCompactionNotice(id, noticeId, null)
         } else {
-          settleManualCompactionResult(id, noticeId, r)
+          settleCompactionAttemptResult(id, noticeId, reason, r)
         }
         return r
       }
@@ -8164,7 +8270,12 @@ function registerIpc(): void {
       return { ok: false as const, error: 'broker_busy' }
     } catch (e) {
       // Unexpected throw after the claim: nothing was compacted; drop the banner.
+      // Auto attempts still earn the retry cooldown — a persistent throw would
+      // otherwise re-fire on every stats broadcast.
       settleCompactionNotice(id, noticeId, null)
+      if (reason !== 'manual') {
+        autoCompactRetryBlockedUntil.set(id, Date.now() + AUTO_COMPACT_RETRY_COOLDOWN_MS)
+      }
       throw e
     } finally {
       compactingConversations.delete(id)
@@ -8178,8 +8289,9 @@ function registerIpc(): void {
     if (!id) return Promise.resolve({ ok: false as const, error: 'missing_conversation_id' })
     return compactConversationNow(id)
   })
-  // Let the deferred auto-compact evaluation drive the same claim/banner/settle path.
-  compactNowRunner = (convId: string) => compactConversationNow(convId)
+  // Let the deferred auto-compact evaluation drive the same claim/banner/settle path,
+  // labeled 'threshold' so its cards don't claim the operator pressed /compact.
+  compactNowRunner = (convId: string) => compactConversationNow(convId, 'threshold')
 
     ipcMain.handle('broker:status:get', () => {
     const modelInput =

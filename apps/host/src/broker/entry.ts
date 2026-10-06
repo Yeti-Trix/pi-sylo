@@ -27,6 +27,7 @@ import {
   type ResourceDiagnostic,
 } from '@earendil-works/pi-coding-agent'
 import { getSupportedThinkingLevels } from '@earendil-works/pi-ai'
+import { readBranchCompactionState } from './branch-compaction-state.js'
 
 import {
   applySyloActiveToolsFromBrokerPolicy,
@@ -414,13 +415,15 @@ function sendContextWindowStats(): void {
   if (!session) return
   try {
     const messages = session.messages
+    const branchCompaction = readBranchCompactionState(session)
     let actualMessageTokens = 0
     let lastUsageTokens = 0
     let lastUsageIndex = -1
-    // Compaction invalidates older usage readings (they describe the pre-compaction
-    // context). Only apply the guard to the session the compaction ran in.
-    const compactionGuardAt =
-      lastCompaction && lastCompaction.session === session ? lastCompaction.at : null
+    // Compaction / branch-summary entries invalidate older usage readings (they
+    // describe the pre-compaction context). Derived from the session branch itself
+    // so the guard survives switchSession reloads (which replace the session
+    // object) and covers compactions that ran on an overflow/dedicated broker.
+    const compactionGuardAt = branchCompaction.guardAt
     // Find last assistant message with valid usage for an accurate baseline
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i] as unknown as Record<string, unknown>
@@ -451,7 +454,14 @@ function sendContextWindowStats(): void {
     // usage-based totals already include the system prompt; the estimate
     // fallback counts session.messages only (system prompt excluded) — the host
     // uses this flag to decide whether to add system prompt tokens on top.
-    process.send?.({ type: 'context_window_stats', actualMessageTokens, includesSystemPrompt: lastUsageIndex >= 0 })
+    // endsWithCompaction: Pi would refuse another compaction right now ("Already
+    // compacted") — the host uses this to skip deferred auto-compact attempts.
+    process.send?.({
+      type: 'context_window_stats',
+      actualMessageTokens,
+      includesSystemPrompt: lastUsageIndex >= 0,
+      endsWithCompaction: branchCompaction.endsWithCompaction,
+    })
   } catch (e) {
     console.error('[broker] sendContextWindowStats failed:', e instanceof Error ? e.message : String(e))
   }
@@ -645,14 +655,6 @@ const forcedRunTurnIdStore = new AsyncLocalStorage<string>()
 
 /** In-flight forced chains by turn id, so a timeout or abort can stop them. */
 const forcedRunAborts = new Map<string, AbortController>()
-/**
- * Set on successful compaction_end. A provider usage reading taken before a
- * compaction describes the PRE-compaction context — until a fresh post-compaction
- * reading lands (next turn), such readings must be ignored so the token counter
- * doesn't sit at the stale pre-compaction value. Tracked per session object so a
- * compaction in one conversation doesn't affect another session's stats.
- */
-let lastCompaction: { session: unknown; at: number } | null = null
 /**
  * Effective main model for the active session. Promoted to module scope (not a
  * `handleInit` closure capture) so `handleSwitchSession` can update them before
@@ -1611,9 +1613,9 @@ async function handlePrompt(msg: BrokerPrompt): Promise<void> {
         !slim.errorMessage
       ) {
         // Any usage reading taken before this point describes the pre-compaction
-        // context — invalidate it for context-window stats until a fresh
-        // post-compaction usage arrives with the next model response.
-        lastCompaction = { session: currentSession, at: Date.now() }
+        // context. Staleness is derived from the branch itself (see
+        // readBranchCompactionState) — Pi has already appended the compaction entry
+        // by the time compaction_end fires, so no in-memory bookkeeping needed.
         let tokensAfter: number | undefined
         try {
           let sum = 0
@@ -1827,9 +1829,8 @@ async function handleCompactNow(msg: BrokerCompactNow): Promise<void> {
   try {
     const result = await session.compact()
     // A usage reading taken before this compaction describes the PRE-compaction context —
-    // invalidate it for context-window stats until a fresh reading lands (same as the
-    // prompt-path compaction_end handling).
-    lastCompaction = { session, at: Date.now() }
+    // staleness is derived from the branch itself (Pi appended the compaction entry
+    // inside session.compact(), before this returns), so no in-memory guard is needed.
     sendContextWindowStats()
     reply({
       ok: true,

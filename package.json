@@ -15,7 +15,6 @@
     "stage:installer": "node ./scripts/stage-package.mjs",
     "dist:win": "node ./scripts/make-installer.mjs",
     "sync-skill-surfaces": "node ./scripts/sync-smoke-skills.mjs",
-    "boostrap-pi": "npm run bootstrap-pi",
     "rebuild:native": "npm run rebuild:native -w apps/host",
     "changelog:release": "node ./scripts/changelog-release.mjs",
     "changelog:release:dry-run": "node ./scripts/changelog-release.mjs --dry-run",
