@@ -140,8 +140,8 @@ import {
   showSubagentBoard,
   subagentBoardForWorkspace,
   updateSubagentBoard,
-  type SubagentBoardData,
 } from './subagent-board.js'
+import { firstTaskLine } from './subagent-text.js'
 import { installCrashHandlers } from './crash-log.js'
 import { pinSyloUserDataDir, syncBundledSkills } from './packaged-runtime.js'
 import {
@@ -328,7 +328,11 @@ import {
   readPlanTodos,
   setPlanTodosListener,
 } from './plan-todos-host.js'
-import type { SyloSubagentHostEvent } from '../shared/subagent-tasks-types.js'
+import type {
+  ChatPresenceRow,
+  SubagentBoardData,
+  SyloSubagentHostEvent,
+} from '../shared/subagent-tasks-types.js'
 import type { SyloWebAccessEvent } from '../shared/web-access-events.js'
 import {
   tasksDbListCreate,
@@ -2242,11 +2246,6 @@ function shortRunId(runId: string): string {
   return runId.slice(0, 8)
 }
 
-function firstTaskLine(task: string): string {
-  const line = task.trim().split('\n', 1)[0] ?? task
-  return line.length > 160 ? `${line.slice(0, 160)}…` : line
-}
-
 function completedItemText(item: SubagentCompletedItem): string {
   return (item.status === 'failed' ? (item.error ?? '') : (item.resultText ?? '')).trim()
 }
@@ -2514,9 +2513,11 @@ async function startDeliveryTurn(
 }
 
 /**
- * Per-workspace "Subagents — Runs" live board (issue #27 P2): registers on the first
- * background dispatch of a workspace, then rides `canvas:live-update` as run events land.
- * Updates are debounced per conversation — run_update events arrive per token-flush.
+ * Per-workspace "Subagents — Runs" live board (issue #27 P2, workspace-scoped F1/F2):
+ * registers on the first background dispatch of the CURRENT workspace (any chat), then
+ * rides `canvas:live-update` as run events land — from ALL chats of the workspace, plus
+ * a presence section for each chat's main agent. Updates are debounced per workspace —
+ * run_update events arrive per token-flush.
  */
 const subagentBoardUpdateTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
@@ -2527,45 +2528,84 @@ function workspaceKeyForConversation(conversationId: string): string | null {
   return wk ? wk : null
 }
 
+/** (workspace board presence) one row per chat: what its main agent is on. */
+function buildChatPresenceRows(conversations: ReturnType<typeof db.listConversationsForWorkspaceCwd>): ChatPresenceRow[] {
+  const out: ChatPresenceRow[] = []
+  for (const conv of conversations) {
+    const activeTurn = findPendingTurnForConversation(conv.id) != null
+    const modelLabel =
+      conv.model_provider?.trim() && conv.model_id?.trim() ?
+        `${conv.model_provider.trim()}/${conv.model_id.trim()}`
+      : conv.model_id?.trim() || null
+    const lastPrompt = activeTurn ? db.getLatestUserMessageFirstLine(conv.id) : null
+    out.push({
+      conversationId: conv.id,
+      title: conv.title?.trim() || 'Untitled chat',
+      activeTurn,
+      lastPrompt,
+      model: modelLabel,
+      updatedAt: conv.updated_at,
+    })
+  }
+  // Active turns first, then most-recently-active chats.
+  return out.sort((a, b) => {
+    if (a.activeTurn !== b.activeTurn) return a.activeTurn ? -1 : 1
+    return b.updatedAt - a.updatedAt
+  })
+}
+
+/**
+ * One shared snapshot builder — used by the live board push and the `sylo_runs_list`
+ * host RPC (an agent checks every chat's activity before dispatching or editing files,
+ * F2: prevents two chats from colliding on the same files).
+ */
+function buildWorkspaceRunsSnapshot(workspaceKey: string): SubagentBoardData {
+  const conversations = db.listConversationsForWorkspaceCwd(workspaceKey).slice(0, 30)
+  const conversationIds = conversations.map((c) => c.id)
+  const titles = new Map(conversations.map((c) => [c.id, c.title] as const))
+  const rows = rowsFromAgentTaskRows(
+    subagentTaskStore.listAgentTasksForConversationIds(conversationIds),
+    titles,
+  ).slice(0, 100)
+  return {
+    workspaceKey,
+    generatedAt: Date.now(),
+    chats: buildChatPresenceRows(conversations),
+    rows,
+  }
+}
+
 function scheduleSubagentBoardUpdate(conversationId: string, immediate = false): void {
   const wk = workspaceKeyForConversation(conversationId)
   if (!wk) return
   if (immediate) {
-    const t = subagentBoardUpdateTimers.get(conversationId)
+    const t = subagentBoardUpdateTimers.get(wk)
     if (t) {
       clearTimeout(t)
-      subagentBoardUpdateTimers.delete(conversationId)
+      subagentBoardUpdateTimers.delete(wk)
     }
-    pushSubagentBoard(conversationId, wk, true)
+    pushSubagentBoard(wk, true)
     return
   }
-  if (subagentBoardUpdateTimers.has(conversationId)) return
+  if (subagentBoardUpdateTimers.has(wk)) return
   subagentBoardUpdateTimers.set(
-    conversationId,
+    wk,
     setTimeout(() => {
-      subagentBoardUpdateTimers.delete(conversationId)
-      const workspaceKey = workspaceKeyForConversation(conversationId)
-      if (workspaceKey) pushSubagentBoard(conversationId, workspaceKey, false)
+      subagentBoardUpdateTimers.delete(wk)
+      // The conversation that triggered this may have been deleted mid-drain; the
+      // board itself only needs the workspace key, which is stable.
+      pushSubagentBoard(wk, false)
     }, 300),
   )
 }
 
-function pushSubagentBoard(conversationId: string, workspaceKey: string, forceShow: boolean): void {
-  const rows = rowsFromAgentTaskRows(subagentTaskStore.listAgentTasksForConversation(conversationId)).slice(0, 50)
-  const data: SubagentBoardData = {
-    conversationId,
-    workspaceKey,
-    generatedAt: Date.now(),
-    rows,
-  }
+function pushSubagentBoard(workspaceKey: string, forceShow: boolean): void {
+  const data = buildWorkspaceRunsSnapshot(workspaceKey)
   const existing = subagentBoardForWorkspace(workspaceKey)
-  if ((forceShow && rows.length > 0) || !existing || existing.conversationId !== conversationId) {
-    if (rows.length === 0 && existing) {
-      updateSubagentBoard(workspaceKey, conversationId, rows)
-      return
-    }
-    // First run for the workspace (or a different conversation of it): bind + show.
-    const liveId = showSubagentBoard(workspaceKey, conversationId, rows)
+  if (!existing) {
+    // First run for the workspace (or an earlier empty-drain disposed it): create + show.
+    if (data.rows.length === 0) return // no run history — presence does not self-open the board
+    const liveId = showSubagentBoard(workspaceKey, data)
     mainWindow?.webContents.send('canvas:live-show', {
       liveId,
       kind: 'subagent-runs',
@@ -2575,7 +2615,7 @@ function pushSubagentBoard(conversationId: string, workspaceKey: string, forceSh
     })
     return
   }
-  updateSubagentBoard(workspaceKey, conversationId, rows)
+  updateSubagentBoard(workspaceKey, data)
 }
 
 /**
@@ -4652,10 +4692,32 @@ function handleBrokerOutMessage(
     // the active prompt), so the third fallback resolves via the agent_tasks row
     // itself — rows are keyed by run id.
     const se = msg.event as SyloSubagentHostEvent
-    const convId =
-      (msg.turnId ?
+    // Attribution: the agent_tasks row is authoritative the moment run_start inserts it
+    // (inside the dispatching turn). entry.ts stamps `turnId` from the broker child's
+    // CURRENTLY active prompt, so a background run's end/completed events can arrive while
+    // the same child is streaming a different conversation's prompt — trusting that stamp
+    // delivered the result card to the WRONG chat (lost completion, B1) and left the owning
+    // chat's runs strip on a stale count (B2). Row first for everything past run_start;
+    // groupRunId as the third fallback for completed chain units whose rows may be absent.
+    const rowConv = subagentTaskStore.getAgentTask(se.runId)?.conversation_id
+    const groupConv =
+      se.type === 'subagent_run_completed' && se.groupRunId ?
+        (subagentTaskStore.getLatestAgentTaskForGroupRunId(se.groupRunId)?.conversation_id ?? undefined)
+      : undefined
+    const turnConv =
+      msg.turnId ?
         (pendingTurns.get(msg.turnId)?.convId ?? forcedSubagentTurnConvIds.get(msg.turnId))
-      : undefined) ?? subagentTaskStore.getAgentTask(se.runId)?.conversation_id
+      : undefined
+    const convId =
+      se.type === 'subagent_run_start' ? (turnConv ?? rowConv ?? groupConv) : (rowConv ?? groupConv ?? turnConv)
+    if (!convId && se.type === 'subagent_run_completed') {
+      // Delivery diagnostics (B1): without a conversation the result card is dropped
+      // silently. Log exactly what the funnel saw so the next occurrence explains itself.
+      console.error(
+        `[subagent delivery] UNRESOLVED background completion — runId=${se.runId} agent=${se.agent} status=${se.status} turnId=${msg.turnId ?? '(none)'}`,
+      )
+      console.error(`[subagent delivery] task was: ${firstTaskLine(se.task)}`)
+    }
     if (convId) {
       handleSubagentHostEvent(convId, se)
       if (se.type === 'subagent_run_start' && se.background) {
@@ -4673,11 +4735,50 @@ function handleBrokerOutMessage(
     })
     if (se.type === 'subagent_run_completed' && convId) {
       scheduleSubagentBoardUpdate(convId, true)
-      handleBackgroundRunCompleted(convId, se)
+      try {
+        handleBackgroundRunCompleted(convId, se)
+      } catch (e) {
+        // The card insertion must never break the run funnel — and it must be loud
+        // if it ever throws again (this is the B1 class: a result vanishing without
+        // explanation).
+        console.error(
+          `[subagent delivery] FAILED to persist the background result card — runId=${se.runId} conversation=${convId}`,
+          e instanceof Error ? e.stack ?? e.message : String(e),
+        )
+      }
     }
     if (se.type === 'subagent_run_awaiting_input' && convId) {
       scheduleSubagentBoardUpdate(convId, true)
       handleSubagentAwaitingInput(convId, se)
+    }
+    return
+  }
+  if (msg.type === 'sylo_runs_rpc') {
+    // `sylo_runs_list` (F2): an agent asks what every chat's agents/subagents in its
+    // workspace are doing before dispatching or editing files — one cheap query, no
+    // collisions. Same request/reply pattern as `sylo_think_tank_rpc`.
+    const requestId = typeof msg.requestId === 'string' ? msg.requestId : ''
+    const workspaceKey = String(msg.workspaceKey ?? '').trim()
+    const replyBroker = ctx.isPrimary ? broker : ctx.overflowSlot?.supervisor
+    if (!requestId || !workspaceKey || !replyBroker) {
+      replyBroker?.sendChildMessage({
+        type: 'sylo_runs_rpc_result',
+        requestId,
+        ok: false,
+        error: !requestId ? 'missing requestId' : !workspaceKey ? 'missing workspaceKey' : 'host unavailable',
+      })
+      return
+    }
+    try {
+      const result = buildWorkspaceRunsSnapshot(workspaceKey)
+      replyBroker.sendChildMessage({ type: 'sylo_runs_rpc_result', requestId, ok: true, result })
+    } catch (e) {
+      replyBroker.sendChildMessage({
+        type: 'sylo_runs_rpc_result',
+        requestId,
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+      })
     }
     return
   }
@@ -6914,6 +7015,12 @@ function registerIpc(): void {
     const id = typeof taskId === 'string' ? taskId.trim() : ''
     if (!id) return null
     return subagentTaskStore.getAgentTask(id) ?? null
+  })
+  // Chain stepper in a cross-chat detail (workspace Subagents board): all steps of a run group.
+  ipcMain.handle('tasks:listByGroup', (_e, groupRunId: unknown) => {
+    const id = typeof groupRunId === 'string' ? groupRunId.trim() : ''
+    if (!id) return []
+    return subagentTaskStore.listAgentTasksByGroupRunId(id)
   })
   ipcMain.handle('tasks:cancel', (_e, taskId: unknown) => {
     const id = typeof taskId === 'string' ? taskId.trim() : ''

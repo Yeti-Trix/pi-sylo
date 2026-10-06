@@ -128,6 +128,7 @@ export function handleSubagentHostEvent(conversationId: string, event: SyloSubag
         toolName: event.toolName,
         toolPreview: event.toolPreview,
         model: event.model,
+        files: Array.isArray(event.files) ? event.files : undefined,
       })
       break
     case 'subagent_run_awaiting_input':
@@ -151,6 +152,7 @@ export function handleSubagentHostEvent(conversationId: string, event: SyloSubag
           usage: event.usage,
         },
         tokensUsed: event.usage ? event.usage.input + event.usage.output : undefined,
+        files: Array.isArray(event.files) ? event.files : undefined,
       })
       syncWorkspacePlanFile(conversationId, event)
       notifyPlanTodosChanged()

@@ -140,10 +140,16 @@ Sylo includes **sylo-subagents** (built-in extension, on by default). The primar
 
 **Watch runs**
 
-1. When the agent calls **subagent**, an inline block appears under that tool row in chat.
+1. When the agent calls **subagent**, an inline block appears under that tool row in chat — it stays pinned to that chat after the run finishes.
 2. Expand it for live output, last tool activity, result text, and usage.
 3. **Stop run** cancels one child; the chat header strip offers **Stop all** when multiple are live.
 4. **Copy subagent JSON** copies a spec for re-run — it does not start a new run by itself; call `subagent` again in chat (or ask the agent to) to spawn again.
+
+**Workspace Subagents board (canvas)**
+
+Every chat in a workspace shares one **“Subagents — Runs”** canvas board: it lists all subagent runs from ALL chats (persona, task headline, owning chat, status, model, touched files, tokens — with the live output tail while running) plus a presence section showing each chat's agent — live dot + what it is working on when a turn runs, or when it was last active. Click a run for its full report (reasoning, output, usage, stop/retry); **open chat** jumps to the owning chat. Runs in your current chat still keep their inline block — the board is the cross-chat picture: a result finished in another chat, a stuck “running” counter, or another chat's agent editing a file you are about to touch are all visible at one glance.
+
+Agents have the same view via the **`sylo_runs_list`** tool — they are instructed (and it costs one cheap call) to check it before dispatching a subagent or editing files, so two chats don't collide on the same area of the repo.
 
 **Ask the agent to delegate**
 

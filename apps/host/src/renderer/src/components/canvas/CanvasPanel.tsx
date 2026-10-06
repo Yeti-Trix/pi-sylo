@@ -135,9 +135,12 @@ type Props = {
   terminals?: TerminalRegistry
   /** Active conversation id — parent for side-chat panes (null → placeholder). */
   sideChatParentId?: string | null
-  /** Replace the currently shown snapshot payload — used by Refresh after
-   *  re-reading a file-backed view from disk. */
+    /** Replace the currently shown snapshot payload — used by Refresh after
+ *  re-reading a file-backed view from disk. */
   onUpdatePayload?: (p: CanvasPayload) => void
+  /** Workspace Subagents board rows: open the run's owning chat in the main
+   *  window. Docked only — a popout has no conversation list of its own. */
+  onOpenChat?: (conversationId: string) => void
 }
 
 function fileKindForName(name: string): 'markdown' | 'svg' | null {
@@ -165,7 +168,8 @@ export function CanvasPanel({
   onAddTab,
   terminals,
   sideChatParentId,
-  onUpdatePayload,
+    onUpdatePayload,
+  onOpenChat,
 }: Props): React.ReactElement {
   const [dragOver, setDragOver] = useState(false)
   // `+` type-picker menu in the docked tab strip. The `+` follows the tabs,
@@ -758,7 +762,7 @@ export function CanvasPanel({
       : !isAppPane ? (
         <div className="min-h-0 flex-1 overflow-auto p-4">
           {view?.mode === 'live' ?
-            <CanvasLiveContent sub={view.sub} />
+            <CanvasLiveContent sub={view.sub} onOpenChat={onOpenChat} />
           : (
             <CanvasContent
               payload={snapshot}

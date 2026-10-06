@@ -128,6 +128,10 @@ Runs appear **inline in chat** under each `subagent` tool row (expand the block)
 - **Copy subagent JSON** copies a spec to the clipboard — it does **not** spawn a new run. A new run appears only when **you** call `subagent` again (paste JSON or ask the orchestrator to re-run).
 - Stale **running** rows after a Sylo restart become **orphaned**; use **Clear orphaned** under **Settings → Subagents → Diagnostics**.
 
+## Know what other chats are doing — `sylo_runs_list`
+
+Before dispatching a subagent or making edits, a quick `sylo_runs_list()` shows **every chat in this workspace**: which chats have a live turn and what that agent is working on (latest assignment), plus every subagent run from every chat — persona, status, owning chat, model, and **the workspace files each run touched**. Two chats editing the same area within an hour of each other has actually cost this workspace real work; one cheap query before you act prevents it. If another chat's agent or run is working the same files, coordinate instead of colliding: wait for its completion, scope your changes elsewhere, or stop the other run first (with the operator).
+
 | Mode | Tool shape |
 |------|------------|
 | Single | `{ agent, task, context? }` |

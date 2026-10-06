@@ -49,6 +49,8 @@ export type SyloSubagentHostEvent =
       toolName?: string
       toolPreview?: string
       model?: string
+      /** Workspace files this run has touched so far (deduped, capped at source). */
+      files?: string[]
     }
   | {
       type: 'subagent_run_end'
@@ -58,6 +60,8 @@ export type SyloSubagentHostEvent =
       thinking?: string
       model?: string
       error?: string
+      /** Workspace files this run touched, in first-touch order (deduped, capped at source). */
+      files?: string[]
       usage?: {
         input: number
         output: number
@@ -80,6 +84,14 @@ export type SyloSubagentHostEvent =
       resultText?: string
       error?: string
       model?: string
+      /**
+       * Stable chain/group id when the terminal event is for a unit rather than a
+       * single row — lets the host attribute delivery by group when the row lookup
+       * misses (chain completions resolved without per-step rows).
+       */
+      groupRunId?: string
+      /** Workspace files the unit touched (union across steps, capped at source). */
+      files?: string[]
       usage?: {
         input: number
         output: number
@@ -130,4 +142,72 @@ export type AgentTaskSpec = {
   question?: string
   what_i_tried?: string
   context_digest?: string
+  /** Workspace files this run has touched (updated on run_update/run_end). */
+  files?: string[]
+}
+
+/**
+ * One chat (owning main agent) row for the workspace runs board / sylo_runs_list *
+ * presence section: what that chat's main agent is working on right now or last.
+ */
+export type ChatPresenceRow = {
+  conversationId: string
+  title: string
+  /** A turn is currently streaming/steering in this conversation. */
+  activeTurn: boolean
+  /** First line of the newest user prompt in this conversation (the assignment). */
+  lastPrompt: string | null
+  /** Composed provider/model label for the chat's main agent, when pinned. */
+  model: string | null
+  /** DB updated_at (last activity) for the conversation. */
+  workspaceId?: string
+  updatedAt: number
+}
+
+/**
+ * ONE row on the workspace Subagents board: the union of the old conversation-scoped
+ * SubagentRunBoardRow plus workspace-window fields (owning chat, task title, files,
+ * result summary, model resolved from spec at start). Built in main from agent_tasks.
+ */
+export type SubagentRunBoardRow = {
+  taskId: string
+  runId: string
+  agent: string
+  mode: SubagentRunMode
+  status:
+    | 'running'
+    | 'succeeded'
+    | 'failed'
+    | 'cancelled'
+    | 'orphaned'
+    | 'awaiting_input'
+  startedAt: number | null
+  endedAt: number | null
+  /** Provider/id resolved at dispatch (spec) or at finish (result), when known. */
+  model: string | null
+  stepIndex: number | null
+  toolName: string | null
+  toolPreview: string | null
+  partialTail: string | null
+  tokens: number | null
+  question: string | null
+  /** Owning chat. */
+  conversationId: string
+  conversationTitle: string | null
+  /** First line of the dispatched task — the run's headline. */
+  title: string | null
+  /** Workspace files the run touched (running: so far; finished: final list). */
+  files: string[]
+  /** First 2k chars of the finished run's report/error (DB result_summary). */
+  resultSummary: string | null
+}
+
+/** Live workspace snapshot carried by the `subagent-runs` canvas board and the `sylo_runs_list` tool (host RPC). */
+export type SubagentBoardData = {
+  workspaceKey: string
+  generatedAt: number
+  /** Presence for each (non-archived) chat in the workspace. */
+  chats: ChatPresenceRow[]
+  /** Subagent runs across ALL chats of the workspace, live-first sorted. */
+  rows: SubagentRunBoardRow[]
 }

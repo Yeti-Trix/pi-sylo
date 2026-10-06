@@ -806,6 +806,49 @@ export function findLatestEmptyConversationId(workspaceId: string): string | und
   return row?.id
 }
 
+/**
+ * (workspace runs board / sylo_runs_list) every non-archived top-level chat whose
+ * workspace's pi_cwd matches the board's workspace key — i.e. ALL chats of the
+ * workspace the way the board keys it.
+ */
+export function listConversationsForWorkspaceCwd(piCwd: string): ConversationRow[] {
+  const key = piCwd.trim()
+  if (!key) return []
+  return getDb()
+    .prepare(
+      `SELECT c.id, c.title, c.created_at, c.updated_at, c.workspace_id, c.pi_session_relpath,
+              c.model_provider, c.model_id, c.image_model_id, c.image_model_provider,
+              c.thinking_level, c.subagent_models_json
+       FROM conversations c
+       JOIN workspaces w ON w.id = c.workspace_id
+       WHERE w.pi_cwd = ?
+         AND c.parent_conversation_id IS NULL
+         AND c.archived_at IS NULL
+       ORDER BY c.updated_at DESC`,
+    )
+    .all(key) as ConversationRow[]
+}
+
+/**
+ * (workspace presence) first line of the newest user prompt in a conversation —
+ * what that chat's main agent is working on. NULL when the chat has no user content.
+ */
+export function getLatestUserMessageFirstLine(conversationId: string): string | null {
+  const id = conversationId.trim()
+  if (!id) return null
+  const row = getDb()
+    .prepare(
+      `SELECT content FROM messages
+       WHERE conversation_id = ? AND role = 'user' AND status != 'failed'
+       ORDER BY created_at DESC, rowid DESC
+       LIMIT 1`,
+    )
+    .get(id) as { content: string } | undefined
+  const line = row?.content.trim().split('\n', 1)[0] ?? ''
+  if (!line) return null
+  return line.length > 160 ? `${line.slice(0, 160)}…` : line
+}
+
 export function getConversation(id: string): ConversationRow | undefined {
   return getDb()
     .prepare(

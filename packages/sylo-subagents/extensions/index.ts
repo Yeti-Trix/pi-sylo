@@ -20,6 +20,7 @@ import { subagentModelCliArgs } from './subagent-model.ts'
 import { killSubagentTree } from './subagent-kill.ts'
 import { cancelSubagentRun, consumeRunCancelled, findActiveRunByAgent, listActiveRunSummaries, registerSubagentRun, unregisterSubagentRun } from './subagent-run-registry.ts'
 import { resolveSubagentStallMs, resolveSubagentTimeoutMs } from './subagent-timeout.ts'
+import { registerRunsListTool } from './sylo-runs-list.ts'
 import { newSubagentRunId, notifySyloSubagent, type SyloSubagentRunMode } from './sylo-host.ts'
 
 export { cancelAllSubagentRuns, cancelSubagentRun } from './subagent-run-registry.ts'
@@ -223,6 +224,8 @@ interface SingleResult {
   errorMessage?: string
   step?: number
   runId?: string
+  /** Workspace files this run touched (write/edit-like tools), first-touch order. */
+  touchedFiles?: string[]
 }
 
 interface SubagentDetails {
@@ -275,6 +278,8 @@ function emitSubagentRunCompleted(args: {
   agent: string
   task: string
   result: SingleResult
+  groupRunId?: string
+  files?: string[]
 }): void {
   const result = args.result
   const failed = isFailedResult(result)
@@ -288,6 +293,8 @@ function emitSubagentRunCompleted(args: {
     resultText: failed ? undefined : getResultOutput(result),
     ...(failed ? { error: getResultOutput(result) } : {}),
     ...(result.model ? { model: result.model } : {}),
+    ...(args.groupRunId ? { groupRunId: args.groupRunId } : {}),
+    ...(args.files && args.files.length > 0 ? { files: args.files } : {}),
     usage: {
       input: result.usage.input,
       output: result.usage.output,
@@ -395,6 +402,32 @@ async function mapWithConcurrencyLimit<TIn, TOut>(
 
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void
 
+/**
+ * Standard failed result for a run that never spawned (unknown persona, blocked
+ * tool policy). No lifecycle events are emitted for these (the host records no
+ * row — a “FAILED 0s” entry would be noise in the runs board), and they surface
+ * through the tool result text instead.
+ */
+function resultForRefusedStart(
+  agentName: string,
+  task: string,
+  step: number | undefined,
+  runId: string,
+  reason: string,
+): SingleResult {
+  return {
+    agent: agentName,
+    agentSource: 'unknown',
+    task,
+    exitCode: 1,
+    messages: [],
+    stderr: reason,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+    step,
+    runId,
+  }
+}
+
 async function runSingleAgent(
   defaultCwd: string,
   agents: AgentConfig[],
@@ -413,8 +446,33 @@ async function runSingleAgent(
   /** Detached: tool returns at once; a detached tail drives end/completed events async. */
   background?: boolean,
 ): Promise<SingleResult> {
-  const agent = agents.find((a) => a.name === agentName)
-  const subagentModel = agent ? subagentModelCliArgs(agent.name) : { args: [] as string[] }
+    const agent = agents.find((a) => a.name === agentName)
+  if (!agent) {
+    // Pre-spawn refusal: resolve BEFORE any lifecycle event so the host records no
+    // phantom "FAILED 0s" run (B3) — the tool result alone tells the orchestrator.
+    const unpinnedProject = discoverAgents(defaultCwd, resolveDefaultAgentScope(), {
+      bundledAgentsDir: resolveBundledAgentsDir(),
+    }).agents.some((a) => a.name === agentName && a.source === 'project')
+    if (unpinnedProject) {
+      return resultForRefusedStart(
+        agentName,
+        task,
+        step,
+        runId,
+        `Unknown agent "${agentName}" — it is a project persona (.pi/agents) the operator has not activated. ` +
+          'Open the Subagents modal (chat model bar) and pick a model for it to enable, or dispatch one of the activated personas.',
+      )
+    }
+    const available = agents.map((a) => a.name).join(', ') || 'none'
+    return resultForRefusedStart(
+      agentName,
+      task,
+      step,
+      runId,
+      `Unknown agent "${agentName}". Available: ${available}.`,
+    )
+  }
+  const subagentModel = subagentModelCliArgs(agent.name)
   const modelLabel =
     subagentModel.modelId ?
       subagentModel.provider ?
@@ -422,7 +480,7 @@ async function runSingleAgent(
       : subagentModel.modelId
     : agent?.model
 
-  notifySyloSubagent({
+    notifySyloSubagent({
     type: 'subagent_run_start',
     runId,
     mode,
@@ -436,51 +494,19 @@ async function runSingleAgent(
     ...(background ? { background: true } : {}),
   })
 
-  if (!agent) {
-    const available = agents.map((a) => `"${a.name}"`).join(', ') || 'none'
-    const result: SingleResult = {
-      agent: agentName,
-      agentSource: 'unknown',
-      task,
-      exitCode: 1,
-      messages: [],
-      stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
-      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-      step,
-      runId,
-    }
-    notifySyloSubagent({
-      type: 'subagent_run_end',
-      runId,
-      status: 'failed',
-      error: result.stderr,
-    })
-    return result
-  }
-
   // The child never loads Sylo's capability guard, so the operator's Capability
   // manager policy has to be turned into a `--tools` allowlist here or it simply
   // would not apply inside a subagent.
   const toolPolicy = resolveSubagentToolPolicy({ ...(agent.tools ? { agentTools: agent.tools } : {}) })
   if (toolPolicy.kind === 'blocked') {
-    const result: SingleResult = {
-      agent: agentName,
-      agentSource: agent.source,
+    // Same pre-spawn rule: refuse with a message, record no run (B3).
+    return resultForRefusedStart(
+      agentName,
       task,
-      exitCode: 1,
-      messages: [],
-      stderr: `Cannot run "${agentName}": ${toolPolicy.reason}`,
-      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
       step,
       runId,
-    }
-    notifySyloSubagent({
-      type: 'subagent_run_end',
-      runId,
-      status: 'failed',
-      error: result.stderr,
-    })
-    return result
+      `Cannot run "${agentName}": ${toolPolicy.reason}`,
+    )
   }
 
   const args: string[] = ['--mode', 'json', '-p', '--no-session']
@@ -532,7 +558,7 @@ async function runSingleAgent(
     runId,
   }
 
-  // Tails of the message currently streaming, before it lands in `currentResult.messages`.
+    // Tails of the message currently streaming, before it lands in `currentResult.messages`.
   let liveText = ''
   let liveThinking = ''
   // Kept after the reasoning channel closes so the box can collapse instead of vanish.
@@ -542,10 +568,36 @@ async function runSingleAgent(
   let updateTimer: ReturnType<typeof setTimeout> | undefined
   let updateQueued = false
 
+  /**
+   * Workspace files this run touches (write/edit-like tools) — first-touch order,
+   * surfaced on the runs board / sylo_runs_list so a chat in another window can see
+   * (and avoid) what this run is working on (F2: multi-session file collisions).
+   */
+  const touchedFiles: string[] = []
+  const touchedSeen = new Set<string>()
+  const noteFileTouch = (toolName: unknown, args: unknown): void => {
+    if (typeof toolName !== 'string' || !toolName.trim()) return
+    const name = toolName.trim().toLowerCase()
+    if (!/^(write|edit|multiedit|notebook)/.test(name)) return
+    if (!args || typeof args !== 'object') return
+    const record = args as Record<string, unknown>
+    for (const key of ['path', 'file_path', 'filepath', 'filename']) {
+      const value = record[key]
+      if (typeof value !== 'string' || !value.trim()) continue
+      const file = value.trim()
+      if (!touchedSeen.has(file)) {
+        touchedSeen.add(file)
+        touchedFiles.push(file)
+        if (touchedFiles.length > 50) touchedSeen.clear() // stay bounded; newest wins
+      }
+      break
+    }
+  }
+
   const previewText = () => liveText.trim() || getFinalOutput(currentResult.messages)
   const previewThinking = () => liveThinking.trim() || completedThinking
 
-  const emitUpdate = () => {
+    const emitUpdate = () => {
     notifySyloSubagent({
       type: 'subagent_run_update',
       runId,
@@ -556,6 +608,7 @@ async function runSingleAgent(
       toolName: liveToolName,
       toolPreview: liveToolPreview ?? '',
       model: currentResult.model,
+      files: touchedFiles.length > 0 ? touchedFiles.slice() : undefined,
     })
     if (onUpdate) {
       onUpdate({
@@ -632,8 +685,9 @@ async function runSingleAgent(
           throw new Error(SUBAGENT_ABORTED_MESSAGE)
         }
 
-        const failed = isFailedResult(currentResult)
+                const failed = isFailedResult(currentResult)
         const resultText = failed ? undefined : getResultOutput(currentResult)
+        currentResult.touchedFiles = touchedFiles.slice()
         notifySyloSubagent({
           type: 'subagent_run_end',
           runId,
@@ -642,6 +696,7 @@ async function runSingleAgent(
           thinking: previewThinking() || undefined,
           model: currentResult.model,
           error: failed ? getResultOutput(currentResult) : undefined,
+          files: touchedFiles.length > 0 ? touchedFiles.slice() : undefined,
           usage: {
             input: currentResult.usage.input,
             output: currentResult.usage.output,
@@ -656,9 +711,12 @@ async function runSingleAgent(
             agent: agentName,
             task,
             result: currentResult,
+            groupRunId,
+            files: touchedFiles.slice(),
           })
           activeBackgroundRuns.delete(runId)
         }
+        return currentResult
         return currentResult
       } finally {
         cleanupPromptFiles()
@@ -775,9 +833,10 @@ async function runSingleAgent(
           return
         }
 
-        if (event.type === 'tool_execution_start') {
+                if (event.type === 'tool_execution_start') {
           liveToolName = typeof event.toolName === 'string' ? event.toolName : undefined
           liveToolPreview = summarizeToolArgs(event.args)
+          noteFileTouch(liveToolName, event.args)
           bumpActivity()
           scheduleUpdate()
           // Pause/resume protocol (issue #27 P3): the child just parked on
@@ -1080,6 +1139,7 @@ const SubagentParams = Type.Object({
 })
 
 export default function syloSubagentsExtension(pi: ExtensionAPI): void {
+  registerRunsListTool(pi)
   pi.registerTool({
     name: 'subagent',
     label: 'Subagent',
@@ -1166,9 +1226,10 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
          * it and reports one terminal run_completed for the unit (per-step run_end rows
          * still stream either way).
          */
-        const driveChain = async (): Promise<{
+                const driveChain = async (): Promise<{
           results: SingleResult[]
           stopped: { step: number; agent: string; output: string } | null
+          groupRunId: string
         }> => {
           const results: SingleResult[] = []
           let previousOutput = ''
@@ -1218,17 +1279,18 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
             )
             results.push(result)
 
-            if (isFailedResult(result)) {
+                        if (isFailedResult(result)) {
               return {
                 results,
                 stopped: { step: i + 1, agent: step.agent, output: getResultOutput(result) },
+                groupRunId,
               }
             }
             previousOutput = withTruncationNote(result, getFinalOutput(result.messages))
             parentRunId = runId
           }
 
-          return { results, stopped: null }
+                    return { results, stopped: null, groupRunId }
         }
 
         if (!params.wait) {
@@ -1248,14 +1310,24 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
           activeBackgroundRuns.add(chainSlot)
           const chainDescriptor = chainSteps.map((step) => step.agent).join(' → ')
           void (async () => {
-            try {
-              const { results, stopped } = await driveChain()
+                        try {
+              const { results, stopped, groupRunId } = await driveChain()
               const last = results[results.length - 1]
               const failed = stopped !== null || !last || isFailedResult(last)
               const deliverable =
                 stopped !== null
                   ? stopped.output
                   : last ? getResultOutput(last) : 'Chain produced no output.'
+              // Files the unit touched, union across steps (board presence, F2).
+              const filesUnion: string[] = []
+              const seenFiles = new Set<string>()
+              for (const step of results) {
+                for (const file of step.touchedFiles ?? []) {
+                  if (seenFiles.has(file)) continue
+                  seenFiles.add(file)
+                  filesUnion.push(file)
+                }
+              }
               notifySyloSubagent({
                 type: 'subagent_run_completed',
                 // Delivery attribution resolves via an existing agent_tasks row — use
@@ -1267,6 +1339,8 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
                 status: failed ? 'failed' : 'succeeded',
                 ...(failed ? { error: deliverable } : { resultText: deliverable }),
                 ...(last?.model ? { model: last.model } : {}),
+                ...(groupRunId ? { groupRunId } : {}),
+                ...(filesUnion.length > 0 ? { files: filesUnion.slice(0, 50) } : {}),
               })
             } catch (error) {
               notifySyloSubagent({

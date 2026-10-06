@@ -1,48 +1,32 @@
 import { broadcastLiveUpdate, createLiveSubscription, disposeLive } from './canvas-live.js'
-import type { AgentTaskRow } from '../shared/subagent-tasks-types.js'
+import type { AgentTaskRow, SubagentBoardData, SubagentRunBoardRow } from '../shared/subagent-tasks-types.js'
+import { firstTaskLine as sharedFirstTaskLine } from './subagent-text.js'
+
+export { firstTaskLine } from './subagent-text.js'
 
 /**
- * Subagents canvas board (issue #27 P2) — a live per-workspace "Subagents — Runs"
- * board fed by agent_tasks rows as lifecycle events land.
+ * Subagents canvas board (issue #27 P2, workspace-scoped F1/F2) — a live per-workspace
+ * "Subagents — Runs" board, fed by agent_tasks rows as lifecycle events land.
+ *
+ * v2 (2026-10-06): the board is bound to the WORKSPACE, not to one conversation — it
+ * lists every subagent run from every chat of the workspace plus a presence section
+ * for each chat's main agent. Any conversation's run event re-pushes the whole
+ * workspace snapshot.
  *
  * Per-workspace registry (same restore-on-return model as task boards): each
- * workspace has at most one runs board; a new conversation's first background run
- * rebinds it (dispose old liveId → fresh subscription). Updates broadcast in place
- * when the conversation matches; a different conversation's update rebinding is the
- * caller's decision (`showSubagentBoard` again).
+ * workspace has at most one runs board; it rebinds only when a prior board was
+ * disposed. `updateSubagentBoard` drops a board once the workspace has no runs left
+ * at all, so the canvas clears instead of freezing at a stale list.
  *
  * No persistence across restart: the board is a view over agent_tasks, and the
  * restart wipes in-flight runs anyway (orphan cards handle the trail).
  *
- * Data shape intentionally plain (rows built by main from agent_tasks + spec_json):
- * the renderer renders sections from it, nothing more.
+ * Data shape comes from `../shared/subagent-tasks-types.js` — the shared contract also
+ * rendered by the renderer's `SubagentRunsBoard` and returned to agents via the
+ * `sylo_runs_list` tool host RPC.
  */
 
-export type SubagentRunBoardRow = {
-  taskId: string
-  runId: string
-  agent: string
-  mode: 'single' | 'parallel' | 'chain'
-  status: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'orphaned' | 'awaiting_input'
-  startedAt: number | null
-  endedAt: number | null
-  model: string | null
-  stepIndex: number | null
-  toolName: string | null
-  toolPreview: string | null
-  partialTail: string | null
-  tokens: number | null
-  question: string | null
-}
-
-export type SubagentBoardData = {
-  conversationId: string
-  workspaceKey: string
-  generatedAt: number
-  rows: SubagentRunBoardRow[]
-}
-
-type BoardBinding = { liveId: string; conversationId: string }
+type BoardBinding = { liveId: string }
 
 const boardByWorkspace = new Map<string, BoardBinding>()
 const workspaceByLiveId = new Map<string, string>()
@@ -52,11 +36,7 @@ export function subagentBoardForWorkspace(workspaceKey: string): BoardBinding | 
 }
 
 /** Create/rebind the workspace's board and return the new liveId. */
-export function showSubagentBoard(
-  workspaceKey: string,
-  conversationId: string,
-  rows: SubagentRunBoardRow[],
-): string {
+export function showSubagentBoard(workspaceKey: string, data: SubagentBoardData): string {
   const prev = boardByWorkspace.get(workspaceKey)
   if (prev) {
     disposeLive(prev.liveId)
@@ -66,44 +46,30 @@ export function showSubagentBoard(
   const sub = createLiveSubscription({
     kind: 'subagent-runs',
     title: 'Subagents — Runs',
-    data: {
-      conversationId,
-      workspaceKey,
-      generatedAt: Date.now(),
-      rows,
-    } satisfies SubagentBoardData,
+    data,
   })
-  boardByWorkspace.set(workspaceKey, { liveId: sub.liveId, conversationId })
+  boardByWorkspace.set(workspaceKey, { liveId: sub.liveId })
   workspaceByLiveId.set(sub.liveId, workspaceKey)
   return sub.liveId
 }
 
 /**
- * Push fresh rows to the workspace's board. `null` when no board is bound, or the
- * bound conversation differs (caller rebinds via showSubagentBoard if wanted).
+ * Push a fresh workspace snapshot to the board. `false` when no board is bound
+ * (the caller decides via `showSubagentBoard` whether to create one).
  */
-export function updateSubagentBoard(
-  workspaceKey: string,
-  conversationId: string,
-  rows: SubagentRunBoardRow[],
-): void {
+export function updateSubagentBoard(workspaceKey: string, data: SubagentBoardData): boolean {
   const binding = boardByWorkspace.get(workspaceKey)
-  if (!binding || binding.conversationId !== conversationId) return
-  if (rows.length === 0) {
-    // Everything finished and nothing to show — drop the board so the canvas
-    // clears instead of freezing at a stale list.
+  if (!binding) return false
+  if (data.rows.length === 0) {
+    // Everything finished and nothing left for the workspace — drop the board so
+    // the canvas clears instead of freezing at a stale list.
     disposeLive(binding.liveId)
     boardByWorkspace.delete(workspaceKey)
     workspaceByLiveId.delete(binding.liveId)
-    return
-  }
-  const data: SubagentBoardData = {
-    conversationId,
-    workspaceKey,
-    generatedAt: Date.now(),
-    rows,
+    return false
   }
   broadcastLiveUpdate(binding.liveId, data)
+  return true
 }
 
 export function disposeSubagentBoards(): void {
@@ -114,8 +80,16 @@ export function disposeSubagentBoards(): void {
   }
 }
 
-/** Build board rows from agent_tasks rows (spec_json carries the live tail fields). */
-export function rowsFromAgentTaskRows(rows: AgentTaskRow[]): SubagentRunBoardRow[] {
+/**
+ * Build board rows from agent_tasks rows. `conversationTitles` maps conversation id →
+ * chat title (owning chat shown per row); pass `workspaceIds` when known so rows carry
+ * the workspace id without an extra conversation lookup. Rows missing a conversation
+ * title render an id tail instead of the name.
+ */
+export function rowsFromAgentTaskRows(
+  rows: AgentTaskRow[],
+  conversationTitles?: ReadonlyMap<string, string>,
+): SubagentRunBoardRow[] {
   const out: SubagentRunBoardRow[] = []
   for (const row of rows) {
     let spec: {
@@ -124,11 +98,21 @@ export function rowsFromAgentTaskRows(rows: AgentTaskRow[]): SubagentRunBoardRow
       lastToolPreview?: string
       question?: string
       goal?: string
+      model?: string
+      files?: string[]
+      task?: string
     } = {}
     try {
       spec = JSON.parse(row.spec_json) as typeof spec
     } catch {
       spec = {}
+    }
+    let resultModel: string | undefined
+    try {
+      const parsed = row.result_json ? (JSON.parse(row.result_json) as { model?: unknown }) : undefined
+      resultModel = typeof parsed?.model === 'string' && parsed.model.trim() ? parsed.model.trim() : undefined
+    } catch {
+      resultModel = undefined
     }
     out.push({
       taskId: row.id,
@@ -144,13 +128,23 @@ export function rowsFromAgentTaskRows(rows: AgentTaskRow[]): SubagentRunBoardRow
         : 'cancelled',
       startedAt: row.started_at,
       endedAt: row.ended_at,
-      model: row.result_json ? (safeModel(row.result_json) ?? null) : null,
+      // Surface the model the run was dispatched with (spec, set at start) even while
+      // it is still streaming; result_json's model only exists once it finished. A ran
+      // `worker` on a pinned flash model while the chat said "Haiku" — with the model
+      // visible from start, "cheap model" misrouting is visible immediately (B4).
+      model: resultModel ?? spec.model ?? null,
       stepIndex: row.step_index,
       toolName: row.status === 'running' ? spec.lastToolName ?? null : null,
       toolPreview: row.status === 'running' ? spec.lastToolPreview ?? null : null,
       partialTail: row.status === 'running' ? spec.lastPartialText?.trim() ?? null : null,
       tokens: row.tokens_used,
       question: spec.question ?? null,
+      conversationId: row.conversation_id,
+      conversationTitle: conversationTitles?.get(row.conversation_id)?.trim() || null,
+      // Headline: first line of the dispatched task (falls back to the auto title).
+      title: sharedFirstTaskLine(spec.task && spec.task.trim() ? spec.task : row.title),
+      files: Array.isArray(spec.files) ? spec.files.slice(0, 24) : [],
+      resultSummary: row.result_summary ?? null,
     })
   }
   // In-flight runs first (oldest started first), then finished ones, newest ended first.
@@ -162,13 +156,4 @@ export function rowsFromAgentTaskRows(rows: AgentTaskRow[]): SubagentRunBoardRow
     if (rank(a) === 0) return (a.startedAt ?? 0) - (b.startedAt ?? 0)
     return (b.endedAt ?? 0) - (a.endedAt ?? 0)
   })
-}
-
-function safeModel(resultJson: string): string | undefined {
-  try {
-    const parsed = JSON.parse(resultJson) as { model?: unknown }
-    return typeof parsed.model === 'string' ? parsed.model : undefined
-  } catch {
-    return undefined
-  }
 }

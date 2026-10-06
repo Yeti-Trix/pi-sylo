@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { AgentTaskRow } from './task-types'
 
@@ -16,18 +16,25 @@ export function useSubagentTasks(conversationId: string | null): {
 } {
   const [tasks, setTasks] = useState<AgentTaskRow[]>([])
   const [loading, setLoading] = useState(false)
+  /** Monotonic token: only the newest list fetch may commit — a slow in-flight
+   *  fetch resolving after a newer one used to overwrite fresh state with the old
+   *  snapshot, which is how the runs strip kept saying "1 subagent running"
+   *  for a finished run while the DB had zero live rows (B2). */
+  const fetchGenRef = useRef(0)
 
   const reload = useCallback(async () => {
     if (!conversationId) {
+      fetchGenRef.current += 1
       setTasks([])
       return
     }
+    const gen = ++fetchGenRef.current
     setLoading(true)
     try {
       const rows = await window.sylo.tasks.list(conversationId)
-      setTasks(rows)
+      if (gen === fetchGenRef.current) setTasks(rows)
     } finally {
-      setLoading(false)
+      if (gen === fetchGenRef.current) setLoading(false)
     }
   }, [conversationId])
 

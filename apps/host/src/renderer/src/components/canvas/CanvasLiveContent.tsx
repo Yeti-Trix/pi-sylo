@@ -3,6 +3,15 @@ import { cn } from '../../lib/cn'
 import { mutedText } from '../../panels/ui-classes'
 import { ChatMarkdown } from '../../ChatMarkdown'
 import type { CanvasLiveSubscription } from './canvasTypes'
+import {
+  TaskDetailDrawer,
+} from '../../panels/tasks/TaskDetailDrawer'
+import type { AgentTaskRow } from '../../panels/tasks/task-types'
+import type {
+  ChatPresenceRow as WorkspaceChatPresenceRow,
+  SubagentBoardData,
+  SubagentRunBoardRow,
+} from '../../../../shared/subagent-tasks-types'
 
 /**
  * Host-owned live canvas renderer. Sibling to `CanvasContent` (which renders
@@ -58,9 +67,11 @@ type TaskBoardData = { list: TaskBoardList; tasks: TaskBoardTask[] }
 
 type Props = {
   sub: CanvasLiveSubscription | null
+  /** Docked canvas only — switch the main window to this chat (row “Open chat” action). */
+  onOpenChat?: (conversationId: string) => void
 }
 
-export function CanvasLiveContent({ sub }: Props): React.ReactElement {
+export function CanvasLiveContent({ sub, onOpenChat }: Props): React.ReactElement {
   if (!sub) {
     return (
       <p className={cn(mutedText, 'm-0 text-[0.85rem] leading-[1.45]')}>
@@ -74,7 +85,7 @@ export function CanvasLiveContent({ sub }: Props): React.ReactElement {
   }
 
   if (sub.kind === 'subagent-runs') {
-    return <SubagentRunsBoard sub={sub} />
+    return <SubagentRunsBoard sub={sub} onOpenChat={onOpenChat} />
   }
 
   return (
@@ -445,33 +456,11 @@ function TaskRow({
 }
 // ── subagent-runs board ─────────────────────────────────────────────────────
 
-type SubagentRunStatus = 'running' | 'succeeded' | 'failed' | 'cancelled' | 'orphaned' | 'awaiting_input'
-
-type SubagentRunBoardRow = {
-  taskId: string
-  runId: string
-  agent: string
-  mode: 'single' | 'parallel' | 'chain'
-  status: SubagentRunStatus
-  startedAt: number | null
-  endedAt: number | null
-  model: string | null
-  stepIndex: number | null
-  toolName: string | null
-  toolPreview: string | null
-  partialTail: string | null
-  tokens: number | null
-  question: string | null
-}
-
-type SubagentBoardData = {
-  conversationId: string
-  workspaceKey: string
-  generatedAt: number
-  rows: SubagentRunBoardRow[]
-}
-
-const RUN_STATUS_DOT: Record<SubagentRunStatus, string> = {
+// Workspace-scoped (F1/F2): rows + presence chats come from the shared contract
+// (apps/host/src/shared) built in main from agent_tasks — the old conversation-scoped
+// local duplicates are gone: one chat's runs list used to look like the whole
+// workspace, which is how a result delivered to the wrong chat went unnoticed.
+const RUN_STATUS_DOT: Record<SubagentRunBoardRow['status'], string> = {
   running: '●',
   awaiting_input: '⏸',
   succeeded: '✓',
@@ -479,7 +468,7 @@ const RUN_STATUS_DOT: Record<SubagentRunStatus, string> = {
   cancelled: '■',
   orphaned: '?',
 }
-const RUN_STATUS_LABEL: Record<SubagentRunStatus, string> = {
+const RUN_STATUS_LABEL: Record<SubagentRunBoardRow['status'], string> = {
   running: 'running',
   awaiting_input: 'awaiting your answer',
   succeeded: 'finished',
@@ -487,7 +476,7 @@ const RUN_STATUS_LABEL: Record<SubagentRunStatus, string> = {
   cancelled: 'stopped',
   orphaned: 'lost (broker restart)',
 }
-const RUN_STATUS_CLASS: Record<SubagentRunStatus, string> = {
+const RUN_STATUS_CLASS: Record<SubagentRunBoardRow['status'], string> = {
   running: 'text-accent',
   awaiting_input: 'text-warning',
   succeeded: 'text-success',
@@ -506,40 +495,135 @@ function elapsedLabel(row: SubagentRunBoardRow): string {
   return `${min}m${sec > 0 ? ` ${sec}s` : ''}`
 }
 
+/** When a finished/stale thing changed, in operator words. */
+function relWhen(ts: number): string {
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000))
+  if (s < 60) return `${s}s ago`
+  const min = Math.floor(s / 60)
+  if (min < 60) return `${min}m ago`
+  const hours = Math.floor(min / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
+}
+
+/** Presence row — one chat's main agent, live first (F2: “what are they working on?”). */
+function PresenceChatRow({
+  chat,
+  onOpenChat,
+}: {
+  chat: WorkspaceChatPresenceRow
+  onOpenChat?: (conversationId: string) => void
+}): React.ReactElement {
+  const prompt = chat.lastPrompt?.trim() || null
+  return (
+    <div className="flex items-start gap-2 rounded-md border border-border bg-bg-tertiary/30 px-2.5 py-1.5">
+      <span
+        className={cn(
+          'mt-[0.32rem] inline-block size-2 shrink-0 rounded-full',
+          chat.activeTurn ? 'animate-pulse bg-[rgb(245_158_11)]' : 'bg-[rgb(255_255_255/0.25)]',
+        )}
+        title={chat.activeTurn ? 'A turn is running in this chat' : 'Idle'}
+        aria-hidden="true"
+      />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-baseline gap-2">
+          <span className="text-[0.82rem] font-semibold text-text-primary">{chat.title}</span>
+          {chat.model ?
+            <span className={cn(mutedText, 'truncate font-mono text-[0.7rem]')} title={chat.model}>
+              {chat.model}
+            </span>
+          : null}
+        </div>
+        {chat.activeTurn ?
+          <p className={cn(mutedText, 'mb-0 mt-0.5 truncate text-[0.78rem]')} title={prompt ?? ''}>
+            working on: {prompt ?? '…'}
+          </p>
+        : prompt ?
+          <p className={cn(mutedText, 'mb-0 mt-0.5 truncate text-[0.74rem] text-text-secondary')} title={prompt ?? ''}>
+            last: {prompt}
+          </p>
+        : null}
+      </div>
+      {onOpenChat ?
+        <button
+          type="button"
+          className="mt-0.5 shrink-0 border-0 bg-transparent p-0 text-[0.72rem] text-accent hover:underline"
+          onClick={() => onOpenChat(chat.conversationId)}
+        >
+          open chat
+        </button>
+      : null}
+    </div>
+  )
+}
+
 /** Live tail for a running row — re-rendered on the board's own ~2s ticker while
- *  the run is in flight (data patches already carry the tail). */
-function SubagentRunsBoard({ sub }: { sub: CanvasLiveSubscription }): React.ReactElement {
+ *  the run is in flight (data patches already carry the tail). Clicking a finished
+ *  run opens its full report via the shared TaskDetailDrawer (tasks/get). */
+function SubagentRunsBoard({
+  sub,
+  onOpenChat,
+}: {
+  sub: CanvasLiveSubscription
+  onOpenChat?: (conversationId: string) => void
+}): React.ReactElement {
   const [, tick] = useState(0)
   useEffect(() => {
     // Ticker keeps elapsed labels live between data patches.
     const t = setInterval(() => tick((n) => n + 1), 2000)
     return () => clearInterval(t)
   }, [])
+  const [detail, setDetail] = useState<{ row: SubagentRunBoardRow; task: AgentTaskRow | null } | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
 
   const data = sub.data as SubagentBoardData | undefined
+  const chats = data?.chats ?? []
+  const activeChats = chats.filter((c) => c.activeTurn)
+  const idleChats = chats.filter((c) => !c.activeTurn).slice(0, 12)
   const rows = data?.rows ?? []
   const running = rows.filter((r) => r.status === 'running')
   const awaiting = rows.filter((r) => r.status === 'awaiting_input')
   const done = rows.filter((r) => r.status !== 'running' && r.status !== 'awaiting_input')
   const shownDone = done.slice(-12)
 
-  if (rows.length === 0) {
+  const openDetail = (row: SubagentRunBoardRow): void => {
+    setDetail({ row, task: null })
+    void window.sylo.tasks.get(row.taskId).then((task) => {
+      setDetail((prev) => (prev && prev.row.taskId === row.taskId ? { row, task } : prev))
+    })
+  }
+
+  if (rows.length === 0 && chats.length === 0) {
     return (
       <div className="flex flex-col gap-2 p-3">
         <p className={cn(mutedText, 'm-0 text-[0.85rem] leading-[1.5]')}>
-          No subagent runs for this conversation yet.
+          No subagent runs for this workspace yet.
         </p>
         <p className={cn(mutedText, 'm-0 text-[0.8rem] leading-[1.5]')}>
           The agent dispatches personas with the <code className="rounded bg-bg-tertiary px-1 font-mono text-[0.78rem]">subagent</code> tool
           (background is the default — completions arrive as messages), or with an
-          {' @mention '}of a persona name. This board lists every run with live output.
+          {' @mention '}of a persona name. This board lists every run in every chat of this
+          workspace with live output, plus what each chat is working on.
         </p>
       </div>
     )
   }
 
   return (
-    <div className="flex flex-col gap-3 p-3">
+    <div className="relative flex flex-col gap-3 p-3">
+      {chats.length > 0 ?
+        <div className="flex flex-col gap-1.5">
+          <p className="m-0 text-[0.72rem] font-semibold tracking-wide text-text-secondary uppercase">
+            Active agents · {chats.filter((c) => c.activeTurn).length}/{chats.length}
+          </p>
+          {activeChats.map((chat) => (
+            <PresenceChatRow key={chat.conversationId} chat={chat} onOpenChat={onOpenChat} />
+          ))}
+          {idleChats.map((chat) => (
+            <PresenceChatRow key={chat.conversationId} chat={chat} onOpenChat={onOpenChat} />
+          ))}
+        </div>
+      : null}
       {[
         { key: 'running' as const, title: 'Running', list: running },
         { key: 'awaiting' as const, title: 'Awaiting input', list: awaiting },
@@ -551,7 +635,7 @@ function SubagentRunsBoard({ sub }: { sub: CanvasLiveSubscription }): React.Reac
               {section.title} · {section.list.length}
             </p>
             {section.list.map((row) => (
-              <SubagentRunRow key={row.taskId} row={row} />
+              <SubagentRunRow key={row.taskId} row={row} onOpenChat={onOpenChat} onOpenDetail={() => openDetail(row)} />
             ))}
           </div>
         ),
@@ -561,17 +645,58 @@ function SubagentRunsBoard({ sub }: { sub: CanvasLiveSubscription }): React.Reac
           {done.length - shownDone.length} older finished run{done.length - shownDone.length === 1 ? '' : 's'} hidden — full history in the Tasks view.
         </p>
       : null}
+      {notice ?
+        <p className="mb-0 text-[0.76rem] text-warning">{notice}</p>
+      : null}
+      {detail ?
+        <div className="absolute inset-0 z-10 flex flex-col overflow-y-auto rounded-lg border border-border bg-bg-secondary p-3">
+          <div className="flex items-center justify-between gap-2">
+            <p className={cn(mutedText, 'm-0 text-[0.76rem]')}>
+              {detail.row.conversationTitle ? `via ${detail.row.conversationTitle} · ` : ''}run{'\u200b'}{detail.row.runId.slice(0, 8)}
+            </p>
+            <button
+              type="button"
+            className="border-0 bg-transparent p-0 text-[0.78rem] text-accent hover:underline"
+              onClick={() => {
+                setDetail(null)
+                setNotice(null)
+              }}
+            >
+              ✕ close
+            </button>
+          </div>
+          <div className="mt-2 min-h-0 flex-1">
+            <TaskDetailDrawer
+              embedded
+              task={detail.task}
+              chainTasks={null}
+              onSelectTask={() => {}}
+              onRetry={(message) => setNotice(message)}
+              onCancel={(message) => setNotice(message)}
+            />
+          </div>
+        </div>
+      : null}
     </div>
   )
 }
 
-function SubagentRunRow({ row }: { row: SubagentRunBoardRow }): React.ReactElement {
+function SubagentRunRow({
+  row,
+  onOpenChat,
+  onOpenDetail,
+}: {
+  row: SubagentRunBoardRow
+  onOpenChat?: (conversationId: string) => void
+  onOpenDetail?: () => void
+}): React.ReactElement {
   const live = row.status === 'running'
   const usage =
     row.tokens != null && row.tokens > 0 ?
       `${row.tokens > 1000 ? `${(row.tokens / 1000).toFixed(1)}k` : row.tokens} tok`
     : null
   const tail = row.partialTail ?? null
+  const taskTitle = row.title ?? row.agent
   return (
     <div className="flex flex-col gap-1 rounded-md border border-border bg-bg-tertiary/40 px-2.5 py-2">
       <div className="flex flex-wrap items-center gap-2">
@@ -581,7 +706,7 @@ function SubagentRunRow({ row }: { row: SubagentRunBoardRow }): React.ReactEleme
         <code className="font-mono text-[0.84rem] font-semibold text-text-primary">{row.agent}</code>
         <span className={cn(mutedText, 'text-[0.72rem]')}>
           {row.mode}
-          {row.stepIndex != null ? ` · step ${row.stepIndex}` : ''} · {elapsedLabel(row)}
+          {row.stepIndex != null ? ` · step ${row.stepIndex}` : ''} · {live ? elapsedLabel(row) : relWhen(row.endedAt ?? Date.now())}
         </span>
         {row.model ?
           <span className={cn(mutedText, 'truncate text-[0.72rem]')} title={row.model}>
@@ -589,7 +714,28 @@ function SubagentRunRow({ row }: { row: SubagentRunBoardRow }): React.ReactEleme
           </span>
         : null}
         {usage ? <span className={cn(mutedText, 'text-[0.72rem]')}>{usage}</span> : null}
+        {row.conversationTitle ?
+          <span
+            className="ml-auto max-w-[160px] shrink-0 truncate rounded border border-border bg-bg-secondary px-1.5 py-0.5 text-[0.68rem] text-text-secondary"
+            title={row.conversationTitle}
+          >
+            {row.conversationTitle.length > 40 ? `${row.conversationTitle.trim().slice(0, 40)}…` : row.conversationTitle}
+          </span>
+        : null}
       </div>
+      <button
+        type="button"
+        className="border-0 bg-transparent p-0 text-left text-[0.8rem] font-medium text-text-primary hover:text-accent"
+        onClick={onOpenDetail}
+        title="Open the run's full report"
+      >
+        {taskTitle.length > 140 ? `${taskTitle.slice(0, 140)}…` : taskTitle}
+      </button>
+      {row.files.length > 0 ?
+        <p className="mb-0 text-[0.72rem] leading-[1.4] text-text-secondary" title={row.files.join(', ')}>
+          {row.files.slice(0, 3).join(' · ')}{row.files.length > 3 ? ` · +${row.files.length - 3}` : ''}
+        </p>
+      : null}
       {row.question && row.status === 'awaiting_input' ?
         <p className="m-0 text-[0.8rem] leading-[1.45] text-warning">❓ {row.question}</p>
       : null}

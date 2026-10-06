@@ -5479,6 +5479,10 @@ export function App(): React.ReactElement {
                   onCloseTabs={closeCanvasTabsWithSessions}
                   onTerminalShare={shareTerminalToChat}
                   onAddTab={openAppsPaneTabWithSessions}
+                  onOpenChat={(conversationId) => {
+                    setActiveId(conversationId)
+                    setTab('chat')
+                  }}
                   terminals={terminals}
                   sideChatParentId={activeId ?? null}
                   onUpdatePayload={(p) => updateActiveCanvasSnapshot(() => p)}

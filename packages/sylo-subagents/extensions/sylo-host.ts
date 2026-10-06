@@ -47,7 +47,14 @@ export type SyloSubagentHostEvent =
       resultText?: string
       /** Error/abort text on failure or cancellation. */
       error?: string
-      model?: string
+            model?: string
+      /**
+       * Stable chain/group id for units — the host falls back to it for delivery
+       * attribution when no agent_tasks row matches the runId.
+       */
+      groupRunId?: string
+      /** Workspace files the unit touched (union across steps, capped at source). */
+      files?: string[]
       usage?: {
         input: number
         output: number
@@ -66,15 +73,19 @@ export type SyloSubagentHostEvent =
       toolName?: string
       toolPreview?: string
       model?: string
+      /** Workspace files this run has touched so far (deduped, capped at source). */
+      files?: string[]
     }
   | {
       type: 'subagent_run_end'
       runId: string
-      status: 'succeeded' | 'failed' | 'cancelled'
+            status: 'succeeded' | 'failed' | 'cancelled'
       resultText?: string
       thinking?: string
       model?: string
       error?: string
+      /** Workspace files this run touched, first-touch order (deduped, capped at source). */
+      files?: string[]
       usage?: {
         input: number
         output: number

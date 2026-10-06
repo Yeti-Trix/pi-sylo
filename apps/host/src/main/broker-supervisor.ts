@@ -128,6 +128,14 @@ export type BrokerOutMessage =
       query?: string
       limit?: number
     }
+  | {
+      /** sylo_runs_list (F2): agent asks for the workspace presence/runs snapshot. */
+      type: 'sylo_runs_rpc'
+      turnId?: string
+      requestId: string
+      op: string
+      workspaceKey?: string
+    }
     | {
       type: 'sylo_schedule_rpc'
       turnId?: string

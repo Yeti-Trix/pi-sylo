@@ -319,6 +319,7 @@ export function updateAgentTaskProgress(
     toolName?: string
     toolPreview?: string
     model?: string
+    files?: string[]
   },
   now = Date.now(),
 ): void {
@@ -341,6 +342,18 @@ export function updateAgentTaskProgress(
   if (patch.toolName !== undefined) spec.lastToolName = patch.toolName
   if (patch.toolPreview !== undefined) spec.lastToolPreview = patch.toolPreview
   if (patch.model?.trim()) spec.model = patch.model.trim()
+  if (Array.isArray(patch.files) && patch.files.length > 0) {
+    // Union with what was already recorded (progress updates arrive repeatedly);
+    // first-touch order wins so the board lists the files it worked on in order.
+    const seen = new Set(spec.files ?? [])
+    const merged = [...(spec.files ?? [])]
+    for (const file of patch.files) {
+      if (typeof file !== 'string' || !file.trim() || seen.has(file)) continue
+      seen.add(file)
+      merged.push(file)
+    }
+    spec.files = merged.slice(0, 50)
+  }
 
   getDb()
     .prepare(
@@ -357,6 +370,7 @@ export function finalizeAgentTask(
     resultSummary?: string
     resultJson?: Record<string, unknown>
     tokensUsed?: number
+    files?: string[]
   },
   now = Date.now(),
 ): void {
@@ -379,6 +393,16 @@ export function finalizeAgentTask(
     if (typeof thinking === 'string' && thinking.trim()) spec.lastPartialThinking = thinking.trim()
     const model = input.resultJson?.model
     if (typeof model === 'string' && model.trim()) spec.model = model.trim()
+    if (Array.isArray(input.files) && input.files.length > 0) {
+      const seen = new Set(spec.files ?? [])
+      const merged = [...(spec.files ?? [])]
+      for (const file of input.files) {
+        if (typeof file !== 'string' || !file.trim() || seen.has(file)) continue
+        seen.add(file)
+        merged.push(file)
+      }
+      spec.files = merged.slice(0, 50)
+    }
     specJson = JSON.stringify(spec)
   }
   getDb()
@@ -415,6 +439,61 @@ export function listAgentTasksForConversation(conversationId: string): AgentTask
        ORDER BY created_at DESC`,
     )
     .all(conversationId) as AgentTaskRow[]
+}
+
+/**
+ * Runs across MANY conversations (the workspace-scoped Subagents board, F1: every
+ * chat's runs on one workspace tab). Chunked because SQLite has a per-statement
+ * parameter cap long before a busy workspace's chat count matters.
+ */
+export function listAgentTasksForConversationIds(conversationIds: readonly string[]): AgentTaskRow[] {
+  const ids = [...conversationIds].filter((id) => typeof id === 'string' && id.trim() !== '')
+  if (ids.length === 0) return []
+  const out: AgentTaskRow[] = []
+  for (let i = 0; i < ids.length; i += 200) {
+    const chunk = ids.slice(i, i + 200)
+    const placeholders = chunk.map(() => '?').join(',')
+    const rows = getDb()
+      .prepare(
+        `SELECT ${TASK_COLUMNS} FROM agent_tasks
+         WHERE conversation_id IN (${placeholders})
+         ORDER BY created_at DESC`,
+      )
+      .all(...chunk) as AgentTaskRow[]
+    out.push(...rows)
+  }
+  return out
+}
+
+/** Runs that belong to a background chain/group (chain stepper in a cross-chat detail view). */
+export function listAgentTasksByGroupRunId(groupRunId: string): AgentTaskRow[] {
+  const id = groupRunId.trim()
+  if (!id) return []
+  return getDb()
+    .prepare(
+      `SELECT ${TASK_COLUMNS} FROM agent_tasks
+       WHERE group_run_id = ?
+       ORDER BY COALESCE(step_index, 0), created_at`,
+    )
+    .all(id) as AgentTaskRow[]
+}
+
+/**
+ * Newest row of a run group — resolves conversation attribution for a completed
+ * chain unit whose terminal event carries only `groupRunId` (the per-step rows
+ * may not all exist).
+ */
+export function getLatestAgentTaskForGroupRunId(groupRunId: string): AgentTaskRow | undefined {
+  const id = groupRunId.trim()
+  if (!id) return undefined
+  return getDb()
+    .prepare(
+      `SELECT ${TASK_COLUMNS} FROM agent_tasks
+       WHERE group_run_id = ?
+       ORDER BY created_at DESC, started_at DESC
+       LIMIT 1`,
+    )
+    .get(id) as AgentTaskRow | undefined
 }
 
 export function countOrphanedAgentTasks(): number {
