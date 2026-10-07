@@ -319,6 +319,14 @@ contextBridge.exposeInMainWorld('sylo', {
   messages: {
     list: (conversationId: string) => ipcRenderer.invoke('messages:list', conversationId),
   },
+  /** Manual open of the per-workspace Agent panel (the `+` picker entry).
+   *  Returns the live subscription to bind a canvas tab to. */
+  agentBoard: {
+    open: (conversationId: string | null) => ipcRenderer.invoke('agentBoard:open', conversationId) as Promise<
+      | { ok: true; liveId: string; title: string; data: unknown }
+      | { ok: false; error: string }
+    >,
+  },
   chat: {
     send: (
       conversationId: string,
@@ -1523,6 +1531,14 @@ contextBridge.exposeInMainWorld('sylo', {
         cancel: (taskId: string) => ipcRenderer.invoke('tasks:cancel', taskId) as Promise<
           | { ok: true; killed: boolean }
           | { ok: false; error: 'bad_id' | 'not_found' | 'not_running' }
+        >,
+        pause: (taskId: string) => ipcRenderer.invoke('tasks:pause', taskId) as Promise<
+          | { ok: true }
+          | { ok: false; error: 'bad_id' | 'not_found' | 'not_running' }
+        >,
+        resume: (taskId: string) => ipcRenderer.invoke('tasks:resume', taskId) as Promise<
+          | { ok: true }
+          | { ok: false; error: string }
         >,
     retry: (taskId: string) => ipcRenderer.invoke('tasks:retry', taskId),
     orphanedCount: () => ipcRenderer.invoke('tasks:orphanedCount') as Promise<number>,

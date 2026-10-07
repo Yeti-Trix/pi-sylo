@@ -1,4 +1,4 @@
-export type AgentTaskStatus = 'running' | 'awaiting_input' | 'succeeded' | 'failed' | 'cancelled' | 'orphaned'
+export type AgentTaskStatus = 'running' | 'awaiting_input' | 'paused' | 'succeeded' | 'failed' | 'cancelled' | 'orphaned'
 
 export type SubagentRunMode = 'single' | 'parallel' | 'chain'
 

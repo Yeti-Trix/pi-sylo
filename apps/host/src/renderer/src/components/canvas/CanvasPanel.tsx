@@ -85,6 +85,18 @@ const ADD_TAB_ITEMS: AddTabItem[] = [
     icon: addTabIcon(<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />),
   },
   {
+    key: 'agent',
+    label: 'Agent',
+    icon: addTabIcon(
+      <>
+        <rect x="5" y="8" width="14" height="10" rx="2.5" />
+        <path d="M12 8V5m0 0a1.3 1.3 0 1 0 0-2.6A1.3 1.3 0 0 0 12 5z" />
+        <circle cx="9" cy="13" r="0.6" fill="currentColor" />
+        <circle cx="15" cy="13" r="0.6" fill="currentColor" />
+      </>,
+    ),
+  },
+  {
     key: 'file',
     label: 'File…',
     icon: addTabIcon(
@@ -498,7 +510,7 @@ export function CanvasPanel({
                 ref={addMenuBtnRef}
                 aria-label="Add apps tab"
                 aria-expanded={addMenuOpen}
-                title="Open a Terminal, Browser, Canvas, File, or Side chat pane"
+                title="Open a Terminal, Browser, Canvas, File, Side chat, or Agent pane"
                 className={cn(
                   'flex size-[22px] cursor-pointer items-center justify-center rounded-md border-none bg-transparent text-[0.9rem] leading-none text-text-secondary transition-colors hover:bg-[#1e1e1e] hover:text-text-primary',
                 )}

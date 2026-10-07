@@ -18,12 +18,12 @@ import { resolvePiSpawn } from './pi-cli.ts'
 import { resolveSubagentToolPolicy, toolCliArgs } from './pi-tool-policy.ts'
 import { subagentModelCliArgs } from './subagent-model.ts'
 import { killSubagentTree } from './subagent-kill.ts'
-import { cancelSubagentRun, consumeRunCancelled, findActiveRunByAgent, listActiveRunSummaries, registerSubagentRun, unregisterSubagentRun } from './subagent-run-registry.ts'
+import { cancelSubagentRun, consumePauseRequest, consumeRunCancelled, consumeRunPaused, findActiveRunByAgent, listActiveRunSummaries, registerSubagentRun, unregisterSubagentRun } from './subagent-run-registry.ts'
 import { resolveSubagentStallMs, resolveSubagentTimeoutMs } from './subagent-timeout.ts'
 import { registerRunsListTool } from './sylo-runs-list.ts'
 import { newSubagentRunId, notifySyloSubagent, type SyloSubagentRunMode } from './sylo-host.ts'
 
-export { cancelAllSubagentRuns, cancelSubagentRun } from './subagent-run-registry.ts'
+export { cancelAllSubagentRuns, cancelSubagentRun, pauseSubagentRun, requestSubagentPause, type PauseOutcome } from './subagent-run-registry.ts'
 
 /**
  * Task text for a chain step that follows another agent.
@@ -304,7 +304,67 @@ function emitSubagentRunCompleted(args: {
   })
 }
 
+// ── notify:"all" — hold a background dispatch group's completions until every run is
+// terminal, then deliver them back-to-back (the host batches them into ONE wake + cards).
+// Unregistered groups (notify:"each", single runs) deliver immediately.
+type SubagentCompletedEvent = Extract<
+  Parameters<typeof notifySyloSubagent>[0],
+  { type: 'subagent_run_completed' }
+>
+
+type SubagentCompletedArgs = Parameters<typeof emitSubagentRunCompleted>[0]
+type GroupNotifyState = { total: number; done: number; events: SubagentCompletedEvent[] }
+const groupNotifyAll = new Map()
+
+/** Shape the wire event from the emit args (shared by the hold path). */
+function makeCompletedEvent(args: SubagentCompletedArgs): SubagentCompletedEvent {
+  const result = args.result
+  const failed = isFailedResult(result)
+  return {
+    type: 'subagent_run_completed',
+    runId: args.runId,
+    mode: args.mode,
+    agent: args.agent,
+    task: args.task,
+    status: failed ? 'failed' : 'succeeded',
+    resultText: failed ? undefined : getResultOutput(result),
+    ...(failed ? { error: getResultOutput(result) } : {}),
+    ...(result.model ? { model: result.model } : {}),
+    ...(args.groupRunId ? { groupRunId: args.groupRunId } : {}),
+    ...(args.files && args.files.length > 0 ? { files: args.files } : {}),
+    usage: {
+      input: result.usage.input,
+      output: result.usage.output,
+      cost: result.usage.cost,
+      turns: result.usage.turns,
+    },
+  }
+}
+
+/** Deliver one shaped completed event; holds it when its group runs under notify:"all". */
+function deliverSubagentEvent(event: SubagentCompletedEvent): void {
+  const g = event.groupRunId ? groupNotifyAll.get(event.groupRunId) : undefined
+  if (!g) {
+    notifySyloSubagent(event)
+    return
+  }
+  g.done++
+  g.events.push(event)
+  if (g.done >= g.total && g.total > 0) {
+    groupNotifyAll.delete(event.groupRunId!)
+    for (const e of g.events) notifySyloSubagent(e)
+  }
+}
+
+/** Route ONE background completion. With notify:"all", buffer until the group's count
+ *  reaches its (reconciled) total; at that point flush every buffered event in order. */
+function deliverBackgroundCompleted(args: SubagentCompletedArgs): void {
+  deliverSubagentEvent(makeCompletedEvent(args))
+}
+
 function isFailedResult(result: SingleResult): boolean {
+  // A paused run is parked, not failed — its exit code is the pause kill's.
+  if (result.stopReason === 'paused') return false
   return (
     result.exitCode !== 0 ||
     result.stopReason === 'error' ||
@@ -672,9 +732,32 @@ async function runSingleAgent(
      * Post-exit parse + end notifications + (background) run_completed — shared by the
      * blocking path and by the detached tail that continues after the tool resolved.
      */
-    const finalize = async (exitCode: number): Promise<SingleResult> => {
+        const finalize = async (exitCode: number): Promise<SingleResult> => {
       try {
         currentResult.exitCode = exitCode
+        if (consumeRunPaused(runId)) {
+          // Operator pause (runs board ⏸): the child is killed mid-turn, but the run
+          // parks as `paused` — NOT cancelled, and no run_completed/chat result card:
+          // pause is not a result. The partial preview is the resume point.
+          currentResult.stopReason = 'paused'
+          notifySyloSubagent({
+            type: 'subagent_run_end',
+            runId,
+            status: 'paused',
+            resultText: previewText() || undefined,
+            thinking: previewThinking() || undefined,
+            model: currentResult.model,
+            files: touchedFiles.length > 0 ? touchedFiles.slice() : undefined,
+            usage: {
+              input: currentResult.usage.input,
+              output: currentResult.usage.output,
+              cost: currentResult.usage.cost,
+              turns: currentResult.usage.turns,
+            },
+          })
+          if (background) activeBackgroundRuns.delete(runId)
+          return currentResult
+        }
         if (wasAborted || consumeRunCancelled(runId)) {
           notifySyloSubagent({
             type: 'subagent_run_end',
@@ -704,8 +787,8 @@ async function runSingleAgent(
             turns: currentResult.usage.turns,
           },
         })
-        if (background) {
-          emitSubagentRunCompleted({
+                if (background) {
+          deliverBackgroundCompleted({
             runId,
             mode,
             agent: agentName,
@@ -733,7 +816,7 @@ async function runSingleAgent(
       })
       // Pipe the task via stdin so it survives shell:true on Windows
       try { proc.stdin.write(task); proc.stdin.end() } catch { /* process may have exited early */ }
-      registerSubagentRun(runId, proc, { agent: agentName, task, mode })
+      registerSubagentRun(runId, proc, { agent: agentName, task, mode, groupRunId })
       if (background) activeBackgroundRuns.add(runId)
       const dropRegistry = () => unregisterSubagentRun(runId)
       let buffer = ''
@@ -940,12 +1023,12 @@ async function runSingleAgent(
       void spawned
         .then((code) => finalize(code))
         .then(() => undefined)
-        .catch((error: unknown) => {
+                .catch((error: unknown) => {
           // finalize threw after it had already notified run_end (cancelled/abort path,
           // or an unexpected throw). The completed event is the host's only delivery
           // signal for detached runs, so it must still land.
           activeBackgroundRuns.delete(runId)
-          notifySyloSubagent({
+          deliverSubagentEvent({
             type: 'subagent_run_completed',
             runId,
             mode,
@@ -953,6 +1036,7 @@ async function runSingleAgent(
             task,
             status: 'cancelled',
             error: error instanceof Error ? error.message : String(error),
+            ...(groupRunId ? { groupRunId } : {}),
           })
         })
       return currentResult
@@ -986,6 +1070,27 @@ export type ForcedSubagentOutcome = {
  * the work. Lifecycle events are identical, so the runs strip, the Tasks
  * dashboard, and per-run cancel all keep working.
  */
+/**
+ * Operator pause of a background chain — the unit's remaining steps, keyed by group
+ * run id. Host rows only carry per-step specs; the unit's future lives only here,
+ * consumed by `resumeSubagentRun` (lost on broker exit — the board says so).
+ */
+type ChainResumeState = {
+  cwd: string
+  groupRunId: string
+  chainSteps: Array<{ agent: string; task: string; cwd?: string; goal?: string }>
+  chainTask: string
+  descriptor: string
+  nextIndex: number
+  previousOutput: string
+  anchorRunId: string
+  parentOfNext?: string
+  contextPacket?: string
+  agentScope: AgentScope
+  projectAgentsDir: string | null
+}
+const chainResumeState = new Map<string, ChainResumeState>()
+
 export async function runForcedSubagentChain(opts: {
   cwd: string
   agentNames: string[]
@@ -1084,6 +1189,190 @@ export async function runForcedSubagentChain(opts: {
   return outcomes
 }
 
+/**
+ * Runs-board ▶ for a PAUSED background chain: re-drive the unit's remaining steps.
+ * The anchor row (paused pending/step row) is reused — runSingleAgent emits run_start
+ * for it and the host upserts the row back to `running` in place. Pause handling
+ * mirrors the tool's driveChain so a resumed chain can be paused again.
+ */
+async function resumeChainForGroup(state: ChainResumeState): Promise<void> {
+  const discovery = discoverAgents(state.cwd, state.agentScope, {
+    bundledAgentsDir: resolveBundledAgentsDir(),
+  })
+  const agents = filterActiveAgents(discovery.agents)
+  const makeDetails = (results: SingleResult[]): SubagentDetails => ({
+    mode: 'chain',
+    agentScope: state.agentScope,
+    projectAgentsDir: state.projectAgentsDir,
+    results,
+  })
+  const results: SingleResult[] = []
+  let previousOutput = state.previousOutput
+  let parentRunId: string | undefined = state.parentOfNext
+
+  for (let i = state.nextIndex; i < state.chainSteps.length; i++) {
+    const step = state.chainSteps[i]!
+    if (consumePauseRequest(state.groupRunId)) {
+      // Paused again while still alive: the anchor stays where it is (already
+      // `paused` or running→paused via its own child) — park the unit and stop.
+      chainResumeState.set(state.groupRunId, { ...state, nextIndex: i, previousOutput })
+      return
+    }
+    const taskWithContext = formatTaskWithContext(
+      state.contextPacket,
+      step.task.replace(/\{previous\}/g, previousOutput),
+    )
+    const runId = i === state.nextIndex ? state.anchorRunId : newSubagentRunId()
+    const result = await runSingleAgent(
+      state.cwd,
+      agents,
+      step.agent,
+      taskWithContext,
+      step.cwd,
+      i + 1,
+      undefined,
+      undefined,
+      makeDetails,
+      'chain',
+      runId,
+      state.groupRunId,
+      parentRunId,
+      step.goal,
+      // Sequential steps block each other — the UNIT detaches, not each step.
+      false,
+    )
+    results.push(result)
+    if (result.stopReason === 'paused') {
+      consumePauseRequest(state.groupRunId)
+      chainResumeState.set(state.groupRunId, {
+        ...state,
+        nextIndex: i,
+        previousOutput,
+        anchorRunId: runId,
+        parentOfNext: parentRunId,
+      })
+      return
+    }
+    if (isFailedResult(result)) {
+      chainResumeState.delete(state.groupRunId)
+      emitSubagentRunCompleted({
+        runId,
+        mode: 'chain',
+        agent: state.descriptor,
+        task: state.chainTask,
+        result,
+        groupRunId: state.groupRunId,
+      })
+      return
+    }
+    previousOutput = withTruncationNote(result, getFinalOutput(result.messages))
+    parentRunId = runId
+  }
+
+  chainResumeState.delete(state.groupRunId)
+  const last =
+    results[results.length - 1] ??
+    resultForRefusedStart(state.descriptor, state.chainTask, undefined, newSubagentRunId(), 'Resumed chain produced no output')
+    emitSubagentRunCompleted({
+    runId: last.runId ?? newSubagentRunId(),
+    mode: 'chain',
+    agent: state.descriptor,
+    task: state.chainTask,
+    result: last,
+    groupRunId: state.groupRunId,
+  })
+}
+
+/**
+ * Runs-board ⏸→▶ resume: re-dispatch a paused run, reusing its agent_tasks row.
+ * - single: continuation prompt primes from the stored partial output; the row is
+ *   reset to `running` when the child's run_start arrives (upsert).
+ * - chain: driven from the in-memory ChainResumeState — unavailable after a broker
+ *   exit, which is reported instead of guessed at.
+ */
+export function resumeSubagentRun(opts: {
+  cwd: string
+  runId: string
+  mode: 'single' | 'chain'
+  agentName?: string
+  task?: string
+  lastPartialText?: string
+  groupRunId?: string | null
+}): { ok: true } | { ok: false; error: string } {
+  if (opts.mode === 'chain') {
+    const state = opts.groupRunId ? chainResumeState.get(opts.groupRunId) : undefined
+    if (!state) {
+      return {
+        ok: false,
+        error: 'Chain context lost (broker restarted) — re-dispatch the remaining steps from chat.',
+      }
+    }
+    chainResumeState.delete(state.groupRunId)
+    void resumeChainForGroup(state).catch((error) => {
+      chainResumeState.set(state.groupRunId, state)
+      emitSubagentRunCompleted({
+        runId: state.anchorRunId,
+        mode: 'chain',
+        agent: state.descriptor,
+        task: state.chainTask,
+        groupRunId: state.groupRunId,
+        result: {
+          agent: state.descriptor,
+          agentSource: 'unknown',
+          task: state.chainTask,
+          exitCode: 1,
+          messages: [],
+          stderr: error instanceof Error ? error.message : String(error),
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+        },
+      })
+    })
+    return { ok: true }
+  }
+
+  const agentName = opts.agentName?.trim() || ''
+  const task = opts.task?.trim() || ''
+  if (!agentName || !task) return { ok: false, error: 'bad_spec' }
+  const discovery = discoverAgents(opts.cwd, resolveDefaultAgentScope(), {
+    bundledAgentsDir: resolveBundledAgentsDir(),
+  })
+  const agents = filterActiveAgents(discovery.agents)
+  if (!agents.some((a) => a.name === agentName)) {
+    return { ok: false, error: `Unknown agent "${agentName}" — it may have changed since the run started; re-dispatch from chat.` }
+  }
+  const makeDetails = (results: SingleResult[]): SubagentDetails => ({
+    mode: 'single',
+    agentScope: resolveDefaultAgentScope(),
+    projectAgentsDir: discovery.projectAgentsDir,
+    results,
+  })
+  const partial = opts.lastPartialText?.trim()
+  const CONTINUATION_MARK = '---PAUSED-RUN-CONTINUATION---'
+  const resumeTask = partial
+    ? `${task}\n\n${CONTINUATION_MARK}\nThe operator PAUSED this run mid-work; the attempt was stopped. Your last visible output (verbatim tail):\n${partial.slice(-6000)}\n---END---\nPick up where that left off: re-verify any file edits the run already made, then finish the task.`
+    : `${task}\n\n${CONTINUATION_MARK}\nThe operator paused this run before any visible progress. Run the task from the start.`
+  void runSingleAgent(
+    opts.cwd,
+    agents,
+    agentName,
+    resumeTask,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    makeDetails,
+    'single',
+    opts.runId,
+    opts.runId,
+    undefined,
+    undefined,
+    true,
+  ).catch((error) => {
+    console.error('[subagent resume] run failed:', error)
+  })
+  return { ok: true }
+}
+
 const GOAL_DESCRIPTION =
   'Exact plan goal heading this step works, copied from the plan file without the `## [ ]` marker. Sylo ticks that goal when a reviewer passes it.'
 
@@ -1134,7 +1423,16 @@ const SubagentParams = Type.Object({
    * background — the tool returns at once with run ids, and every finished run posts its
    * full result as a message you can act on. Chain/parallel: the whole unit detaches.
    */
-  wait: Type.Optional(Type.Boolean({ default: false })),
+    wait: Type.Optional(Type.Boolean({ default: false })),
+  /** Background parallel/chain dispatches: "each" (default) posts one wake + chat card per
+   *  finished run; "all" holds every result and delivers one combined wake once every run
+   *  of the dispatch group is terminal. Ignored with wait:true. */
+  notify: Type.Optional(
+    Type.Union([Type.Literal('each'), Type.Literal('all')], {
+      description:
+        'With wait:false and multiple tasks: "all" = ONE notification after every run of this dispatch is done; "each" (default) = a message per finished run, as it finishes.',
+    }),
+  ),
   cwd: Type.Optional(Type.String({ description: 'Working directory for the agent process (single mode)' })),
 })
 
@@ -1147,6 +1445,7 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
       'Delegate tasks to specialized subagents with isolated context.',
       'Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).',
       'Runs are BACKGROUND by default: the tool returns at once with run ids, and each finished run posts its full result as a message you can act on. Dispatch what the goal needs, then END YOUR TURN — completions wake you. Do not wait, poll, or re-dispatch while a run is in flight.',
+            'notify:"all" batches delivery: one combined notification after every run of the dispatch finished (vs the default per-run wake).',
       'Pass wait:true only when this turn cannot proceed without the result in hand (e.g. the next step consumes it).',
       'Project personas (.pi/agents, repo-controlled) are listed in the Subagents modal but only run after the operator picked a model for them there — if a persona from that dir is missing here, it is not activated.',
     ].join(' '),
@@ -1226,10 +1525,11 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
          * it and reports one terminal run_completed for the unit (per-step run_end rows
          * still stream either way).
          */
-                const driveChain = async (): Promise<{
+                                const driveChain = async (): Promise<{
           results: SingleResult[]
           stopped: { step: number; agent: string; output: string } | null
           groupRunId: string
+          paused?: { nextIndex: number; previousOutput: string; anchorRunId: string; parentOfNext?: string }
         }> => {
           const results: SingleResult[] = []
           let previousOutput = ''
@@ -1237,6 +1537,35 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
           let parentRunId: string | undefined
 
           for (let i = 0; i < chainSteps.length; i++) {
+            if (i > 0 && consumePauseRequest(groupRunId)) {
+              // Operator pause landed between steps: the next prompt is NOT fed back in.
+              // Emit a paused anchor row for the pending step — the board's ▶ button
+              // resumes the unit from it (run_start upsert flips the row back to running).
+              const anchorRunId = newSubagentRunId()
+              const nextStep = chainSteps[i]!
+              const pendingTask = formatTaskWithContext(
+                contextPacket,
+                nextStep.task.replace(/\{previous\}/g, previousOutput),
+              )
+              notifySyloSubagent({
+                type: 'subagent_run_start',
+                runId: anchorRunId,
+                mode: 'chain',
+                agent: nextStep.agent,
+                task: pendingTask,
+                groupRunId,
+                parentRunId,
+                stepIndex: i + 1,
+                background: true,
+              })
+              notifySyloSubagent({
+                type: 'subagent_run_end',
+                runId: anchorRunId,
+                status: 'paused',
+                resultText: `Chain paused before step ${i + 1} of ${chainSteps.length} — ${chainSteps.length - i} step${chainSteps.length - i === 1 ? '' : 's'} pending.`,
+              })
+              return { results, stopped: null, groupRunId, paused: { nextIndex: i, previousOutput, anchorRunId, parentOfNext: parentRunId } }
+            }
             const step = chainSteps[i]!
             const taskWithContext = formatTaskWithContext(
               contextPacket,
@@ -1277,7 +1606,15 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
               // Sequential steps block each other — the UNIT detaches, not each step.
               false,
             )
-            results.push(result)
+                        results.push(result)
+
+            if (result.stopReason === 'paused') {
+              // A ⏸ with the step child mid-flight: its own finalize already flipped its
+              // row to `paused`. This step is INCOMPLETE — resume redoes it, reusing the
+              // same anchor row. Consume the unit flag so nothing double-consumes it.
+              consumePauseRequest(groupRunId)
+              return { results, stopped: null, groupRunId, paused: { nextIndex: i, previousOutput, anchorRunId: runId, parentOfNext: parentRunId } }
+            }
 
                         if (isFailedResult(result)) {
               return {
@@ -1311,7 +1648,27 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
           const chainDescriptor = chainSteps.map((step) => step.agent).join(' → ')
           void (async () => {
                         try {
-              const { results, stopped, groupRunId } = await driveChain()
+              const { results, stopped, groupRunId, paused } = await driveChain()
+              if (paused) {
+                // Unit parked — NOT terminal, nothing delivered to chat. Keep the
+                // remaining steps for the board's ▶ (resume); the paused anchor row
+                // is the resume button's row.
+                chainResumeState.set(groupRunId, {
+                  cwd: ctx.cwd,
+                  groupRunId,
+                  chainSteps,
+                  chainTask,
+                  descriptor: chainDescriptor,
+                  nextIndex: paused.nextIndex,
+                  previousOutput: paused.previousOutput,
+                  anchorRunId: paused.anchorRunId,
+                  parentOfNext: paused.parentOfNext,
+                  contextPacket,
+                  agentScope,
+                  projectAgentsDir: discovery.projectAgentsDir,
+                })
+                return
+              }
               const last = results[results.length - 1]
               const failed = stopped !== null || !last || isFailedResult(last)
               const deliverable =
@@ -1438,7 +1795,7 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
           }
         }
 
-        const groupRunId = newSubagentRunId()
+                const groupRunId = newSubagentRunId()
 
         if (!params.wait) {
           if (activeBackgroundRuns.size + params.tasks.length > MAX_BACKGROUND_RUNS) {
@@ -1453,6 +1810,12 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
               details: makeDetails('parallel')([]),
               isError: true,
             }
+          }
+          // notify:"all": register expectations BEFORE any child can spawn so an early
+          // completion is held rather than delivered; reconciled to the actually-started
+          // count after the dispatch pass (pre-spawn refusals never emit a completion).
+          if (params.notify === 'all') {
+            groupNotifyAll.set(groupRunId, { total: params.tasks.length, done: 0, events: [] })
           }
           const startedList: Array<{ agent: string; runId: string; taskLine: string }> = []
           const failedNowList: Array<{ agent: string; reason: string }> = []
@@ -1489,7 +1852,16 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
           const startedLines = startedList.map(
             (s) => `- <${s.agent}> (run ${s.runId.slice(0, 8)}): ${s.taskLine.length > 120 ? `${s.taskLine.slice(0, 120)}…` : s.taskLine}`,
           )
-          const failedLines = failedNowList.map((f) => `- <${f.agent}>: ${f.reason}`)
+                    const failedLines = failedNowList.map((f) => `- <${f.agent}>: ${f.reason}`)
+          // Reconcile the notify:"all" group: only actually-started runs emit completions.
+          const notifyState = groupNotifyAll.get(groupRunId)
+          if (notifyState) {
+            notifyState.total = startedList.length
+            if (notifyState.done >= notifyState.total && notifyState.total > 0) {
+              groupNotifyAll.delete(groupRunId)
+              for (const e of notifyState.events) notifySyloSubagent(e)
+            }
+          }
           return {
             content: [
               {
@@ -1497,9 +1869,11 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
                 text: [
                   `Started ${startedList.length} background subagent${startedList.length === 1 ? '' : 's'}:`,
                   ...startedLines,
-                  ...(failedNowList.length > 0 ? ['', 'Failed to start:', ...failedLines] : []),
+                                    ...(failedNowList.length > 0 ? ['', 'Failed to start:', ...failedLines] : []),
                   '',
-                  'Each finished run posts its full result as a message you can act on. End your turn now — do not wait, poll, or re-dispatch. To block instead, re-dispatch with wait:true.',
+                  params.notify === 'all' ?
+                    `ONE combined notification arrives when all ${startedList.length} finished (notify: "all"). End your turn now — do not wait, poll, or re-dispatch.`
+                  : 'Each finished run posts its full result as a message you can act on. End your turn now — do not wait, poll, or re-dispatch. To block instead, re-dispatch with wait:true.',
                 ].join('\n'),
               },
             ],

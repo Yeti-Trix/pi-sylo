@@ -5,13 +5,18 @@ import { firstTaskLine as sharedFirstTaskLine } from './subagent-text.js'
 export { firstTaskLine } from './subagent-text.js'
 
 /**
- * Subagents canvas board (issue #27 P2, workspace-scoped F1/F2) — a live per-workspace
- * "Subagents — Runs" board, fed by agent_tasks rows as lifecycle events land.
+ * Subagents canvas board (issue #27 P2, workspace-scoped F1/F2) — the per-workspace
+ * "Agent" panel, fed by agent_tasks rows as lifecycle events land.
  *
  * v2 (2026-10-06): the board is bound to the WORKSPACE, not to one conversation — it
  * lists every subagent run from every chat of the workspace plus a presence section
  * for each chat's main agent. Any conversation's run event re-pushes the whole
  * workspace snapshot.
+ *
+ * v3 (2026-10-06): renamed "Subagents — Runs" → "Agent" (operator request); the
+ * renderer opens it manually from the `+` picker, so `showSubagentBoard(.., { manual })`
+ * boards are EXEMPT from the all-finished auto-dispose below — a manually opened
+ * empty panel must not blank itself.
  *
  * Per-workspace registry (same restore-on-return model as task boards): each
  * workspace has at most one runs board; it rebinds only when a prior board was
@@ -26,7 +31,7 @@ export { firstTaskLine } from './subagent-text.js'
  * `sylo_runs_list` tool host RPC.
  */
 
-type BoardBinding = { liveId: string }
+type BoardBinding = { liveId: string; manual?: boolean }
 
 const boardByWorkspace = new Map<string, BoardBinding>()
 const workspaceByLiveId = new Map<string, string>()
@@ -35,8 +40,13 @@ export function subagentBoardForWorkspace(workspaceKey: string): BoardBinding | 
   return boardByWorkspace.get(workspaceKey) ?? null
 }
 
-/** Create/rebind the workspace's board and return the new liveId. */
-export function showSubagentBoard(workspaceKey: string, data: SubagentBoardData): string {
+/** Create/rebind the workspace's board and return the new liveId. `manual` marks a
+ *  operator-opened panel (the `+` picker) — exempt from the auto-dispose. */
+export function showSubagentBoard(
+  workspaceKey: string,
+  data: SubagentBoardData,
+  opts?: { manual?: boolean },
+): string {
   const prev = boardByWorkspace.get(workspaceKey)
   if (prev) {
     disposeLive(prev.liveId)
@@ -45,10 +55,10 @@ export function showSubagentBoard(workspaceKey: string, data: SubagentBoardData)
   }
   const sub = createLiveSubscription({
     kind: 'subagent-runs',
-    title: 'Subagents — Runs',
+    title: 'Agent',
     data,
   })
-  boardByWorkspace.set(workspaceKey, { liveId: sub.liveId })
+  boardByWorkspace.set(workspaceKey, { liveId: sub.liveId, manual: opts?.manual })
   workspaceByLiveId.set(sub.liveId, workspaceKey)
   return sub.liveId
 }
@@ -60,9 +70,10 @@ export function showSubagentBoard(workspaceKey: string, data: SubagentBoardData)
 export function updateSubagentBoard(workspaceKey: string, data: SubagentBoardData): boolean {
   const binding = boardByWorkspace.get(workspaceKey)
   if (!binding) return false
-  if (data.rows.length === 0) {
+  if (data.rows.length === 0 && !binding.manual) {
     // Everything finished and nothing left for the workspace — drop the board so
-    // the canvas clears instead of freezing at a stale list.
+    // the canvas clears instead of freezing at a stale list. A manually opened
+    // panel (the `+` picker) stays; its empty state explains the situation.
     disposeLive(binding.liveId)
     boardByWorkspace.delete(workspaceKey)
     workspaceByLiveId.delete(binding.liveId)
@@ -122,6 +133,7 @@ export function rowsFromAgentTaskRows(
       status:
         row.status === 'running' ? 'running'
         : row.status === 'awaiting_input' ? 'awaiting_input'
+        : row.status === 'paused' ? 'paused'
         : row.status === 'orphaned' ? 'orphaned'
         : row.status === 'succeeded' ? 'succeeded'
         : row.status === 'failed' ? 'failed'
@@ -136,7 +148,9 @@ export function rowsFromAgentTaskRows(
       stepIndex: row.step_index,
       toolName: row.status === 'running' ? spec.lastToolName ?? null : null,
       toolPreview: row.status === 'running' ? spec.lastToolPreview ?? null : null,
-      partialTail: row.status === 'running' ? spec.lastPartialText?.trim() ?? null : null,
+      // A paused row keeps its partial tail visible: it is the resume point the
+      // operator is deciding from.
+      partialTail: row.status === 'running' || row.status === 'paused' ? spec.lastPartialText?.trim() ?? null : null,
       tokens: row.tokens_used,
       question: spec.question ?? null,
       conversationId: row.conversation_id,
@@ -147,9 +161,9 @@ export function rowsFromAgentTaskRows(
       resultSummary: row.result_summary ?? null,
     })
   }
-  // In-flight runs first (oldest started first), then finished ones, newest ended first.
+  // Active first (running → awaiting → paused, oldest started first), then done.
   const rank = (r: SubagentRunBoardRow): number =>
-    r.status === 'running' ? 0 : r.status === 'awaiting_input' ? 1 : 2
+    r.status === 'running' ? 0 : r.status === 'awaiting_input' ? 1 : r.status === 'paused' ? 2 : 3
   return out.sort((a, b) => {
     const byRank = rank(a) - rank(b)
     if (byRank !== 0) return byRank

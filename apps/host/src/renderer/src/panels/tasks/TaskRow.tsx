@@ -43,6 +43,14 @@ export function TaskRow({
         </span>
         <span className="ml-auto shrink-0 text-[0.72rem] text-text-secondary">{duration}</span>
       </div>
+      {/* Compact mode is the chat-timeline pill: self-describing — one line of what
+          this run is working on (operator: "just a working-on pill … when done it
+          changes to completed"). */}
+      {compact ?
+        <p className="mb-0 mt-1 truncate text-[0.78rem] leading-[1.35] text-text-secondary" title={task.title}>
+          {task.title}
+        </p>
+      : null}
       {!compact ?
         <>
           <p className="mb-0 mt-1.5 line-clamp-2 text-[0.82rem] leading-[1.4] text-text-primary">

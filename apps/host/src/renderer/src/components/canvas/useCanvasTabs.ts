@@ -90,6 +90,13 @@ export type UseCanvasTabs = {
   view: CanvasView | null
   setActiveTab: (tabId: string) => void
   closeTab: (tabId: string) => void
+  /** Open a canvas-kind tab bound to the workspace's Agent live board
+   *  (`subagent-runs`, `w:` bucket — one shared panel for the whole
+   *  workspace). Asks main for the liveId (+ snapshot) via `agentBoard:open`
+   *  — dedupes by liveId if the board tab already exists — subscribes, and
+   *  opens the panel. Returns the tab id, or null when the workspace could
+   *  not be resolved (no focused conversation). */
+  openAgentBoardTab: (origin?: string) => Promise<string | null>
   /** Replace the active tab's snapshot payload (used by Refresh). No-op when
    *  the active tab is live or missing. */
   updateActiveSnapshot: (fn: (p: CanvasPayload) => CanvasPayload) => void
@@ -318,10 +325,11 @@ export function useCanvasTabs({
         mode: 'live',
         sub: { liveId: p.liveId, kind: p.kind, title: p.title, data: p.data },
       }
-      // Task boards are workspace resources: they always land in the `w:`
-      // bucket so every conversation in the workspace sees the same board.
-      // Live-demo shows (no workspaceKey) scope to the focused conversation.
-      const isBoard = p.kind === 'task-board'
+      // Task boards + the Agent workspace panel are workspace resources: they
+      // always land in the `w:` bucket so every conversation in the workspace
+      // sees the same panel (operator: "the whole workspace shares the same
+      // panel"). Live-demo shows (no workspaceKey) scope to the focused chat.
+      const isBoard = p.kind === 'task-board' || p.kind === 'subagent-runs'
       const scope = isBoard
         ? `w:${wsIdRef.current}`
         : scopeKeyOf(convIdRef.current, wsIdRef.current)
@@ -643,6 +651,34 @@ export function useCanvasTabs({
     [writeTabs, writeActive, activate, nextTabId, onOpenPanel],
   )
 
+  const openAgentBoardTab = useCallback(async (origin?: string): Promise<string | null> => {
+    const r = await window.sylo.agentBoard?.open(convIdRef.current ?? null)
+    if (!r || !r.ok) return null
+    const wsBucket = `w:${wsIdRef.current}`
+    const tabs = tabsRef.current[wsBucket] ?? []
+    const existing = tabs.find((t) => t.view.mode === 'live' && t.view.sub.liveId === r.liveId)
+    if (existing) {
+      activate(existing.id, scopeKeyOf(convIdRef.current, wsIdRef.current), wsIdRef.current)
+      onOpenPanel()
+      void window.sylo.canvas?.liveSubscribe(r.liveId)
+      return existing.id
+    }
+    const id = nextTabId()
+    const tab: CanvasTab = {
+      id,
+      origin: origin?.trim() || undefined,
+      view: {
+        mode: 'live',
+        sub: { liveId: r.liveId, kind: 'subagent-runs', title: r.title || 'Agent', data: r.data },
+      },
+    }
+    writeTabs({ ...tabsRef.current, [wsBucket]: [...tabs, tab] })
+    writeActive({ ...activeRef.current, [scopeKeyOf(convIdRef.current, wsIdRef.current)]: id })
+    void window.sylo.canvas?.liveSubscribe(r.liveId)
+    onOpenPanel()
+    return id
+  }, [writeTabs, writeActive, activate, nextTabId, onOpenPanel])
+
   const openDiffTab = useCallback(
     (payload: DiffTabPayload, title: string) => {
       // Diff scope: the reviewing conversation's bucket, mirroring widgets.
@@ -740,5 +776,5 @@ export function useCanvasTabs({
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null
   const view: CanvasView | null = activeTab ? activeTab.view : null
 
-  return { tabs, activeTabId, view, setActiveTab, closeTab, updateActiveSnapshot, openAppTab, openWidgetTab, openDiffTab }
+  return { tabs, activeTabId, view, setActiveTab, closeTab, updateActiveSnapshot, openAppTab, openAgentBoardTab, openWidgetTab, openDiffTab }
 }

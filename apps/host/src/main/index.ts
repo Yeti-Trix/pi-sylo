@@ -2214,6 +2214,14 @@ function emitChatRefresh(conversationId: string, kind: ChatRefreshKind): void {
   const payload = { conversationId, kind }
   mainWindow?.webContents.send('chat:refresh', payload)
   emitCompanionEvent({ channel: 'chat:refresh', payload })
+  // The Agent panel's presence section reflects per-chat main-agent turns. Without
+  // this hook it only refreshed on subagent-run events — a turn that started or
+  // finished left the panel showing a stale "working on:" row for a chat that is
+  // long idle (operator bug report). Debounced; boards that don't exist are not
+  // created by mere chat turns (no self-open from presence).
+  if (kind === 'turnStarted' || kind === 'turnFinished') {
+    scheduleSubagentBoardUpdate(conversationId)
+  }
 }
 
 /**
@@ -2512,13 +2520,6 @@ async function startDeliveryTurn(
   return { ok: true }
 }
 
-/**
- * Per-workspace "Subagents — Runs" live board (issue #27 P2, workspace-scoped F1/F2):
- * registers on the first background dispatch of the CURRENT workspace (any chat), then
- * rides `canvas:live-update` as run events land — from ALL chats of the workspace, plus
- * a presence section for each chat's main agent. Updates are debounced per workspace —
- * run_update events arrive per token-flush.
- */
 const subagentBoardUpdateTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 function workspaceKeyForConversation(conversationId: string): string | null {
@@ -2602,14 +2603,20 @@ function scheduleSubagentBoardUpdate(conversationId: string, immediate = false):
 function pushSubagentBoard(workspaceKey: string, forceShow: boolean): void {
   const data = buildWorkspaceRunsSnapshot(workspaceKey)
   const existing = subagentBoardForWorkspace(workspaceKey)
+  // Diagnostic (operator bug: Running pills never showed in the manual Agent panel):
+  // one line per push — rows/chats counts + binding state. Trace what leaves main.
+  console.log(
+    `[agent-board] push key=${workspaceKey} rows=${data.rows.length} chats=${data.chats.length} bound=${existing ? String(existing.liveId).slice(0, 8) : 'none'}`,
+  )
   if (!existing) {
-    // First run for the workspace (or an earlier empty-drain disposed it): create + show.
-    if (data.rows.length === 0) return // no run history — presence does not self-open the board
+    // First subagent run for the workspace (or an earlier empty-drain disposed it):
+    // create + show. Presence alone never self-opens the board.
+    if (data.rows.length === 0) return
     const liveId = showSubagentBoard(workspaceKey, data)
     mainWindow?.webContents.send('canvas:live-show', {
       liveId,
       kind: 'subagent-runs',
-      title: 'Subagents — Runs',
+      title: 'Agent',
       data,
       workspaceKey,
     })
@@ -2617,6 +2624,27 @@ function pushSubagentBoard(workspaceKey: string, forceShow: boolean): void {
   }
   updateSubagentBoard(workspaceKey, data)
 }
+
+/** Renderer → main: the `+` picker's "Agent" entry — open (or rebind to) the
+ *  workspace's Agent panel as a manual live board. Works with zero run history
+ *  (empty state explains; presence still lists). A manual board is exempt from
+ *  the all-finished auto-dispose. */
+ipcMain.handle(
+  'agentBoard:open',
+  (
+    _e,
+    conversationId: string | null,
+  ): { ok: true; liveId: string; title: string; data: SubagentBoardData } | { ok: false; error: string } => {
+    const id = typeof conversationId === 'string' ? conversationId.trim() : ''
+    const wk = id ? workspaceKeyForConversation(id) : null
+    if (!wk) return { ok: false, error: 'no_workspace' }
+    const data = buildWorkspaceRunsSnapshot(wk)
+    const existing = subagentBoardForWorkspace(wk)
+    if (existing) return { ok: true, liveId: existing.liveId, title: 'Agent', data }
+    const liveId = showSubagentBoard(wk, data, { manual: true })
+    return { ok: true, liveId, title: 'Agent', data }
+  },
+)
 
 /**
  * Derive and persist a title from the operator's first user message.
@@ -7050,6 +7078,97 @@ function registerIpc(): void {
       status: 'cancelled',
     })
     return { ok: true as const, killed }
+  })
+  // Runs-board ⏸ (F2 operator controls): kill the run's child and park it `paused` —
+  // NOT cancelled. The child's own finalize reports `paused` with its partial output;
+  // a broker timeout or dead broker falls back to a direct store mark (stale path).
+  ipcMain.handle('tasks:pause', (_e, taskId: unknown) => {
+    const id = typeof taskId === 'string' ? taskId.trim() : ''
+    if (!id) return { ok: false as const, error: 'bad_id' as const }
+    const row = subagentTaskStore.getAgentTask(id)
+    if (!row) return { ok: false as const, error: 'not_found' as const }
+    if (row.status !== 'running') {
+      return { ok: false as const, error: 'not_running' as const }
+    }
+    if (broker && isSupervisorReady(broker)) {
+      void broker.pauseSubagentRun(id, row.group_run_id).then((r) => {
+        if (r.ok) {
+          // The child's run_end(paused) event finalizes the row as it dies; guard the
+          // tail of that async exit so a stuck child can't leave the pill green.
+          const deadline = Date.now() + 8_000
+          const t = setInterval(() => {
+            const now = subagentTaskStore.getAgentTask(id)
+            if (now && now.status === 'paused') {
+              clearInterval(t)
+            } else if (Date.now() > deadline) {
+              clearInterval(t)
+              subagentTaskStore.markAgentTaskPaused(id, { statusReason: 'operator_pause' })
+              scheduleSubagentBoardUpdate(row.conversation_id, true)
+            }
+          }, 300)
+        } else {
+          subagentTaskStore.markAgentTaskPaused(id, { statusReason: 'operator_pause' })
+          scheduleSubagentBoardUpdate(row.conversation_id, true)
+        }
+      })
+      return { ok: true as const }
+    }
+    // No broker: the run can't be in flight — park it directly.
+    subagentTaskStore.markAgentTaskPaused(id, { statusReason: 'operator_pause_stale' })
+    mainWindow?.webContents.send('subagents:lifecycle', {
+      conversationId: row.conversation_id,
+      type: 'subagent_run_end',
+      runId: id,
+      status: 'paused',
+    })
+    scheduleSubagentBoardUpdate(row.conversation_id, true)
+    return { ok: true as const }
+  })
+  // Runs-board ▶: re-dispatch a paused run in place (single = continuation prompt;
+  // chain = re-drive remaining steps). The resumed child's run_start flips the row
+  // back to `running` on the same id, so the pill doesn't jump.
+  ipcMain.handle('tasks:resume', (_e, taskId: unknown) => {
+    const id = typeof taskId === 'string' ? taskId.trim() : ''
+    if (!id) return { ok: false as const, error: 'bad_id' as const }
+    const row = subagentTaskStore.getAgentTask(id)
+    if (!row) return { ok: false as const, error: 'not_found' as const }
+    if (row.status !== 'paused') {
+      return { ok: false as const, error: 'not_paused' as const }
+    }
+    if (!broker || !isSupervisorReady(broker)) {
+      return { ok: false as const, error: 'broker_not_running' as const }
+    }
+    let spec: {
+      task?: string
+      lastPartialText?: string
+    } = {}
+    try {
+      spec = JSON.parse(row.spec_json) as { task?: string; lastPartialText?: string }
+    } catch {
+      spec = {}
+    }
+    void broker
+      .resumeSubagentRun({
+        runId: id,
+        mode: row.mode === 'chain' ? 'chain' : 'single',
+        agentName: row.agent_name,
+        task: spec.task,
+        lastPartialText: spec.lastPartialText,
+        groupRunId: row.group_run_id,
+      })
+      .then((r) => {
+        if (!r.ok) {
+          // Cannot resume (chain context lost, unknown persona…): surface it as a
+          // terminal cancellation so the pill leaves the board with an explanation.
+          subagentTaskStore.finalizeAgentTask(id, {
+            status: 'cancelled',
+            statusReason: 'resume_failed',
+            resultSummary: `Could not resume: ${r.error ?? 'unknown reason'}`,
+          })
+          scheduleSubagentBoardUpdate(row.conversation_id, true)
+        }
+      })
+    return { ok: true as const }
   })
   ipcMain.handle('tasks:retry', (_e, taskId: unknown) => {
     const id = typeof taskId === 'string' ? taskId.trim() : ''

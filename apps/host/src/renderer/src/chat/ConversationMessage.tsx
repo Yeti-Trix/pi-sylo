@@ -9,6 +9,11 @@ import { SYLO_ASK_QUESTION_TOOL } from '../../../shared/ask-question'
 import { LogicForgeIoReviewAction } from '../components/logicforge/LogicForgeIoReviewAction'
 import { logicForgeMatchRunDir } from '../components/logicforge/logicForgeMatchRunDir'
 import { mapSubagentBatchesToMessage } from '../components/subagent/matchSubagentBatches'
+import {
+  BackgroundResultPill,
+  isBackgroundResultMessage,
+  parseBackgroundResult,
+} from '../components/subagent/BackgroundResultPill'
 import { UserMessageBody } from '../UserMessageBody'
 import {
   isImageAttachmentPath,
@@ -305,6 +310,42 @@ function AssistantImageGallery({
   )
 }
 
+/** Subagent dispatch rows summarize instead of printing raw args JSON — the task
+ *  prompts already appear in the dispatch's external pill, so the row line only
+ *  says what was called (operator: "no need to show the final subagent prompt twice"). */
+function subagentToolArgsBrief(args: unknown): string | null {
+  if (args === undefined || args === null || typeof args !== 'object') return null
+  const a = args as {
+    tasks?: unknown
+    chain?: unknown
+    agent?: unknown
+    wait?: unknown
+    notify?: unknown
+  }
+  const names = (xs: unknown): string[] =>
+    Array.isArray(xs) ?
+      xs
+        .map((x) =>
+          x && typeof x === 'object' && 'agent' in x ? String((x as { agent: unknown }).agent) : null,
+        )
+        .filter((s): s is string => s !== null && s.length > 0)
+    : []
+  const suffix = a.wait === true ? ' (blocking)' : a.notify === 'all' ? ' · notify: all' : ''
+  if (Array.isArray(a.tasks) && a.tasks.length > 0) {
+    const unique = [...new Set(names(a.tasks))]
+    return `parallel · ${a.tasks.length} background run${a.tasks.length === 1 ? '' : 's'} · ${unique.join(', ')}${suffix}`
+  }
+  if (Array.isArray(a.chain) && a.chain.length > 0) {
+    return `chain · ${a.chain.length} step${a.chain.length === 1 ? '' : 's'} · ${names(a.chain).join(' → ')}${suffix}`
+  }
+  if (a.agent) {
+    const kind = a.wait === true ? 'blocking' : 'background'
+    const tail = a.notify === 'all' ? ' · notify: all' : ''
+    return `single · ${String(a.agent)} · ${kind}${tail}`
+  }
+  return null
+}
+
 function InlineAssistantSegment({
   segment,
   autoOpen,
@@ -433,7 +474,8 @@ function InlineAssistantSegment({
     )
   }
 
-  const argsLine = summarizeToolArgsPreview(segment.args, 120)
+  const argsLine =
+    subagentToolArgsBrief(segment.args) ?? summarizeToolArgsPreview(segment.args, 120)
   const argsFull = summarizeToolArgsPreview(segment.args, 4000)
   const resultBrief = toolResultSummaryLine(segment.resultPreview)
   const statusLabel =
@@ -743,19 +785,24 @@ function InterleavedAssistantBody({
       run = newRun()
     }
     if (seg.kind === 'tool' && seg.toolName === 'subagent') {
+      // The dispatch pill lives EXTERNAL to the work group (operator: "the subagent
+      // pills would be the external ones"): one always-visible pill below the group
+      // that transitions working → completed in place. The group itself keeps just
+      // the tool-call row as the "subagents were called" trace.
+      const subagentTarget = grouped ? run.galleries : visibleTarget
       const batch = subagentBatchBySegment.get(seg.id)
       if (batch) {
-        visibleTarget.push(
+        subagentTarget.push(
           <SubagentRunBlock
             key={`subagent-block-${seg.id}`}
             batch={batch}
             segmentId={seg.id}
-            live={seg.endTs === null}
+            messageId={messageId}
             onNotice={onSubagentNotice}
           />,
         )
       } else if (seg.endTs === null) {
-        visibleTarget.push(
+        subagentTarget.push(
           <SubagentRunBlockPending key={`subagent-pending-${seg.id}`} segmentId={seg.id} />,
         )
       }
@@ -1074,6 +1121,18 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
     : m.role
 
   if (m.role === 'system') {
+    if (isBackgroundResultMessage(m.content)) {
+      // The dispatch's external pill (one per subagent tool call, below the work
+      // group) already covers this run and exposes the report behind its rows —
+      // skip the duplicate standalone completed pill. agent_tasks.id IS the run
+      // uuid, so the short id prefixes it. Without task rows (old/stale history)
+      // the standalone pill renders as before (fail-open).
+      const info = parseBackgroundResult(m.content)
+      if (info && (subagentTasks ?? []).some((t) => t.id.startsWith(info.runShortId))) {
+        return <></>
+      }
+      return <BackgroundResultPill content={m.content} />
+    }
     return <CompactionNotice content={m.content} />
   }
 

@@ -13,6 +13,9 @@ import { estimateTimelineRowHeight, rememberMeasuredTimelineRowHeight } from './
 
 export type ChatTimelineListHandle = {
   scrollToEnd: () => void
+  /** Scroll a message row into the virtualizer window
+   *  (mounts if it was outside). False when key isn't in `rows`. */
+  scrollToMessageKey: (messageKey: string) => boolean
   stopSettle: () => void
   setPinned: (next: boolean) => void
   isAtEnd: (threshold?: number) => boolean
@@ -194,10 +197,18 @@ export const ChatTimelineList = forwardRef<ChatTimelineListHandle, Props>(
       waitForViewport()
     }, [virtualizer, stopSettle, scrollRef, pinToEndRef])
 
-    useImperativeHandle(
+        useImperativeHandle(
       ref,
       () => ({
         scrollToEnd: scrollToEndSettled,
+        scrollToMessageKey: (messageKey: string): boolean => {
+          const index = rows.findIndex((r) => r.key === messageKey)
+          if (index < 0) return false
+          // Centering mounts the row; the caller then polls for the pill DOM node
+          // (which lives inside this row's assistant message) to open/highlight it.
+          virtualizer.scrollToIndex(index, { align: 'center' })
+          return true
+        },
         stopSettle,
         setPinned: (next: boolean) => {
           pinToEndRef.current = next
@@ -210,7 +221,7 @@ export const ChatTimelineList = forwardRef<ChatTimelineListHandle, Props>(
         },
         isAtEnd: (threshold = CHAT_AT_END_PX) => virtualizer.isAtEnd(threshold),
       }),
-      [virtualizer, scrollToEndSettled, stopSettle, pinToEndRef],
+      [virtualizer, rows, scrollToEndSettled, stopSettle, pinToEndRef],
     )
 
     const virtualItems = virtualizer.getVirtualItems()

@@ -23,6 +23,8 @@ export function statusLabel(status: AgentTaskStatus): string {
       return 'Running'
     case 'awaiting_input':
       return 'Awaiting input'
+    case 'paused':
+      return 'Paused'
     case 'succeeded':
       return 'Succeeded'
     case 'failed':
@@ -40,6 +42,8 @@ export function statusTone(status: AgentTaskStatus): string {
       return 'border-accent/40 bg-accent/10 text-accent'
     case 'awaiting_input':
       return 'border-warning/40 bg-warning/10 text-warning'
+    case 'paused':
+      return 'border-border bg-bg-tertiary text-text-secondary'
     case 'succeeded':
       return 'border-success/35 bg-success/10 text-success'
     case 'failed':

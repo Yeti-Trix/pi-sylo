@@ -53,6 +53,7 @@ const SEVERITY: Record<AgentTaskStatus, number> = {
   cancelled: 2,
   succeeded: 1,
   awaiting_input: 0,
+  paused: 0,
   running: 0,
 }
 

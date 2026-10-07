@@ -63,10 +63,12 @@ import {
 } from '../shared/sylo-capability-paths.js'
 import { isSkillPathInOperatorScope } from '../shared/sylo-skill-scope.js'
 import { readSyloPrefBool } from '../shared/sylo-sqlite-prefs.js'
-import { runForcedSubagentChain } from '../../../../packages/sylo-subagents/extensions/index.ts'
+import { resumeSubagentRun, runForcedSubagentChain } from '../../../../packages/sylo-subagents/extensions/index.ts'
 import {
   cancelAllSubagentRuns,
   cancelSubagentRun,
+  pauseSubagentRun,
+  requestSubagentPause,
 } from '../../../../packages/sylo-subagents/extensions/subagent-run-registry.ts'
 
 function expandHome(p: string): string {
@@ -184,6 +186,30 @@ type BrokerForkBeforeUserIndex = { type: 'fork_before_user_index'; requestId: st
 type BrokerCancelSubagent = { type: 'cancel_subagent'; runId: string }
 
 /**
+ * Runs-board ⏸: pause a subagent run by row id. If the child is live it's killed and
+ * the unit parks `paused`; if a chain is between steps, the driver stops before the
+ * next prompt feed. `groupRunId` (when the run is a chain step) flags the whole unit.
+ */
+type BrokerPauseSubagent = {
+  type: 'pause_subagent'
+  requestId: string
+  runId: string
+  groupRunId?: string
+}
+
+/** Runs-board ▶: re-dispatch a paused run, reusing its agent_tasks row. */
+type BrokerResumeSubagent = {
+  type: 'resume_subagent'
+  requestId: string
+  runId: string
+  mode: 'single' | 'chain'
+  agentName?: string
+  task?: string
+  lastPartialText?: string
+  groupRunId?: string | null
+}
+
+/**
  * Live compaction-trigger update (Settings → Model (Pi) → Compaction). Applied without a
  * broker restart, but only when it targets this broker's currently-bound model — every
  * other case self-corrects on the next init/switch_session, which always carries the
@@ -235,6 +261,8 @@ type BrokerMessageIn =
   | BrokerForkBeforeLastUser
   | BrokerForkBeforeUserIndex
   | BrokerCancelSubagent
+  | BrokerPauseSubagent
+  | BrokerResumeSubagent
   | BrokerRunSubagent
   | BrokerCancelForcedSubagent
   | BrokerCompactionUpdate
@@ -1907,6 +1935,34 @@ function handleMessage(msg: unknown): void {
   if (m.type === 'cancel_subagent') {
     const runId = typeof m.runId === 'string' ? m.runId.trim() : ''
     if (runId) cancelSubagentRun(runId)
+    return
+  }
+  if (m.type === 'pause_subagent') {
+    const runId = typeof m.runId === 'string' ? m.runId.trim() : ''
+    if (!runId) {
+      process.send?.({ type: 'subagent_control_result', requestId: m.requestId, ok: false, error: 'bad_id' })
+      return
+    }
+    const outcome = pauseSubagentRun(runId)
+    if (!outcome.killed && m.groupRunId && m.groupRunId.trim() && m.groupRunId !== runId) {
+      // No live child on that id (between-steps gap): the driver consumes this flag
+      // before spawning the next step, so the next prompt is simply not fed in.
+      requestSubagentPause(m.groupRunId.trim())
+    }
+    process.send?.({ type: 'subagent_control_result', requestId: m.requestId, ok: true, killed: outcome.killed })
+    return
+  }
+  if (m.type === 'resume_subagent') {
+    const result = resumeSubagentRun({
+      cwd: brokerSessionCwd || process.cwd(),
+      runId: typeof m.runId === 'string' ? m.runId.trim() : '',
+      mode: m.mode,
+      ...(typeof m.agentName === 'string' ? { agentName: m.agentName } : {}),
+      ...(typeof m.task === 'string' ? { task: m.task } : {}),
+      ...(typeof m.lastPartialText === 'string' ? { lastPartialText: m.lastPartialText } : {}),
+      ...(m.groupRunId ? { groupRunId: m.groupRunId } : {}),
+    })
+    process.send?.({ type: 'subagent_control_result', requestId: m.requestId, ...result })
     return
   }
   if (m.type === 'run_subagent') {

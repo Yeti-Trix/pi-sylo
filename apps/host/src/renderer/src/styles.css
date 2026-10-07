@@ -93,6 +93,23 @@ body {
   50% { opacity: 1; }
 }
 
+/* Composer-strip "Go to" landed on a dispatch pill: one accent ring that
+ * fades out, drawing the eye to the pill it jumped to. */
+@keyframes subagentGotoFlash {
+  0%, 45% {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 70%, transparent);
+    background-color: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 2px transparent;
+    background-color: transparent;
+  }
+}
+.subagent-goto-flash {
+  animation: subagentGotoFlash 1.6s ease-out 1;
+  border-radius: 8px;
+}
+
 /* Chat list: agent paused on an ask-question — fade the chat title in and out
  * with an accent-tinted glow so the operator notices an answer is needed. */
 @keyframes convQuestionGlow {

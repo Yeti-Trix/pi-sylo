@@ -79,7 +79,7 @@ export type SyloSubagentHostEvent =
   | {
       type: 'subagent_run_end'
       runId: string
-            status: 'succeeded' | 'failed' | 'cancelled'
+            status: 'succeeded' | 'failed' | 'cancelled' | 'paused'
       resultText?: string
       thinking?: string
       model?: string

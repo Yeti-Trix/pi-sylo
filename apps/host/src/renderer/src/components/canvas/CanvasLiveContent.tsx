@@ -3,10 +3,6 @@ import { cn } from '../../lib/cn'
 import { mutedText } from '../../panels/ui-classes'
 import { ChatMarkdown } from '../../ChatMarkdown'
 import type { CanvasLiveSubscription } from './canvasTypes'
-import {
-  TaskDetailDrawer,
-} from '../../panels/tasks/TaskDetailDrawer'
-import type { AgentTaskRow } from '../../panels/tasks/task-types'
 import type {
   ChatPresenceRow as WorkspaceChatPresenceRow,
   SubagentBoardData,
@@ -463,6 +459,7 @@ function TaskRow({
 const RUN_STATUS_DOT: Record<SubagentRunBoardRow['status'], string> = {
   running: '●',
   awaiting_input: '⏸',
+  paused: '⏸',
   succeeded: '✓',
   failed: '✕',
   cancelled: '■',
@@ -471,6 +468,7 @@ const RUN_STATUS_DOT: Record<SubagentRunBoardRow['status'], string> = {
 const RUN_STATUS_LABEL: Record<SubagentRunBoardRow['status'], string> = {
   running: 'running',
   awaiting_input: 'awaiting your answer',
+  paused: 'paused',
   succeeded: 'finished',
   failed: 'failed',
   cancelled: 'stopped',
@@ -479,6 +477,7 @@ const RUN_STATUS_LABEL: Record<SubagentRunBoardRow['status'], string> = {
 const RUN_STATUS_CLASS: Record<SubagentRunBoardRow['status'], string> = {
   running: 'text-accent',
   awaiting_input: 'text-warning',
+  paused: 'text-text-secondary',
   succeeded: 'text-success',
   failed: 'text-danger',
   cancelled: 'text-text-secondary',
@@ -506,7 +505,10 @@ function relWhen(ts: number): string {
   return `${Math.floor(hours / 24)}d ago`
 }
 
-/** Presence row — one chat's main agent, live first (F2: “what are they working on?”). */
+/** Presence row — one chat's main agent, shown ONLY while a turn is streaming here.
+ *  (Operator feedback: idle chats duplicate the left-hand chat list — don't render them.)
+ *  Carries a ⏹ stop: aborts that chat's running turn (chat:abort), like the composer's
+ *  End button but reachable for ANY working chat in the workspace. */
 function PresenceChatRow({
   chat,
   onOpenChat,
@@ -514,7 +516,16 @@ function PresenceChatRow({
   chat: WorkspaceChatPresenceRow
   onOpenChat?: (conversationId: string) => void
 }): React.ReactElement {
+  const [busy, setBusy] = useState(false)
   const prompt = chat.lastPrompt?.trim() || null
+  const stopTurn = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      await window.sylo.chat.abort(chat.conversationId)
+    } finally {
+      setBusy(false)
+    }
+  }
   return (
     <div className="flex items-start gap-2 rounded-md border border-border bg-bg-tertiary/30 px-2.5 py-1.5">
       <span
@@ -522,28 +533,42 @@ function PresenceChatRow({
           'mt-[0.32rem] inline-block size-2 shrink-0 rounded-full',
           chat.activeTurn ? 'animate-pulse bg-[rgb(245_158_11)]' : 'bg-[rgb(255_255_255/0.25)]',
         )}
-        title={chat.activeTurn ? 'A turn is running in this chat' : 'Idle'}
+        title="A turn is running in this chat"
         aria-hidden="true"
       />
       <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-baseline gap-2">
-          <span className="text-[0.82rem] font-semibold text-text-primary">{chat.title}</span>
+        <div className="flex min-w-0 items-baseline gap-2">
+          <span
+            className="min-w-0 flex-1 truncate text-[0.82rem] font-semibold text-text-primary"
+            title={chat.title}
+          >
+            {chat.title}
+          </span>
           {chat.model ?
-            <span className={cn(mutedText, 'truncate font-mono text-[0.7rem]')} title={chat.model}>
+            <span
+              className={cn(
+                'max-w-[30%] shrink-0 truncate font-mono text-[0.7rem]',
+                mutedText,
+              )}
+              title={chat.model}
+            >
               {chat.model}
             </span>
           : null}
         </div>
-        {chat.activeTurn ?
-          <p className={cn(mutedText, 'mb-0 mt-0.5 truncate text-[0.78rem]')} title={prompt ?? ''}>
-            working on: {prompt ?? '…'}
-          </p>
-        : prompt ?
-          <p className={cn(mutedText, 'mb-0 mt-0.5 truncate text-[0.74rem] text-text-secondary')} title={prompt ?? ''}>
-            last: {prompt}
-          </p>
-        : null}
+        <p className={cn(mutedText, 'mb-0 mt-0.5 truncate text-[0.78rem]')} title={prompt ?? ''}>
+          working on: {prompt ?? '…'}
+        </p>
       </div>
+      <button
+        type="button"
+        className="mt-0.5 shrink-0 rounded border-0 bg-transparent px-1 font-mono text-[0.74rem] leading-none text-danger hover:underline disabled:opacity-40"
+        disabled={busy}
+        onClick={() => void stopTurn()}
+        title="Stop — aborts this chat's running turn"
+      >
+        {busy ? '…' : '⏹'}
+      </button>
       {onOpenChat ?
         <button
           type="button"
@@ -557,9 +582,10 @@ function PresenceChatRow({
   )
 }
 
-/** Live tail for a running row — re-rendered on the board's own ~2s ticker while
- *  the run is in flight (data patches already carry the tail). Clicking a finished
- *  run opens its full report via the shared TaskDetailDrawer (tasks/get). */
+/** Workspace Subagents runs board — ACTIVE things only (operator: the panel is for
+ *  what is working right now): chats with a live turn + each live/parked subagent run
+ *  as a compact pill with ⏸ pause / ▶ resume / ⏹ stop controls. Finished runs live in
+ *  chat (result cards) and in the Tasks view — not here. */
 function SubagentRunsBoard({
   sub,
   onOpenChat,
@@ -573,27 +599,18 @@ function SubagentRunsBoard({
     const t = setInterval(() => tick((n) => n + 1), 2000)
     return () => clearInterval(t)
   }, [])
-  const [detail, setDetail] = useState<{ row: SubagentRunBoardRow; task: AgentTaskRow | null } | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
 
   const data = sub.data as SubagentBoardData | undefined
   const chats = data?.chats ?? []
+  // F2 operator feedback: idle chats duplicate the left-hand chat list — the
+  // presence section lists only chats whose main agent is streaming right now.
   const activeChats = chats.filter((c) => c.activeTurn)
-  const idleChats = chats.filter((c) => !c.activeTurn).slice(0, 12)
   const rows = data?.rows ?? []
   const running = rows.filter((r) => r.status === 'running')
   const awaiting = rows.filter((r) => r.status === 'awaiting_input')
-  const done = rows.filter((r) => r.status !== 'running' && r.status !== 'awaiting_input')
-  const shownDone = done.slice(-12)
+  const pausedRows = rows.filter((r) => r.status === 'paused')
 
-  const openDetail = (row: SubagentRunBoardRow): void => {
-    setDetail({ row, task: null })
-    void window.sylo.tasks.get(row.taskId).then((task) => {
-      setDetail((prev) => (prev && prev.row.taskId === row.taskId ? { row, task } : prev))
-    })
-  }
-
-  if (rows.length === 0 && chats.length === 0) {
+  if (rows.length === 0 && activeChats.length === 0) {
     return (
       <div className="flex flex-col gap-2 p-3">
         <p className={cn(mutedText, 'm-0 text-[0.85rem] leading-[1.5]')}>
@@ -602,8 +619,11 @@ function SubagentRunsBoard({
         <p className={cn(mutedText, 'm-0 text-[0.8rem] leading-[1.5]')}>
           The agent dispatches personas with the <code className="rounded bg-bg-tertiary px-1 font-mono text-[0.78rem]">subagent</code> tool
           (background is the default — completions arrive as messages), or with an
-          {' @mention '}of a persona name. This board lists every run in every chat of this
-          workspace with live output, plus what each chat is working on.
+          {' @mention '}of a persona name. This panel lists active subagent runs across the
+          workspace (⏸ pause / ▶ resume / ⏹ stop from each pill) plus chats whose agent is
+          streaming right now (⏹ aborts that chat's turn) — idle chats and finished runs stay
+          out of the way: the chat list on the left and result cards in chat cover those. Reopen
+          this panel any time from the + picker above; every chat in the workspace shares it.
         </p>
       </div>
     )
@@ -611,15 +631,12 @@ function SubagentRunsBoard({
 
   return (
     <div className="relative flex flex-col gap-3 p-3">
-      {chats.length > 0 ?
+      {activeChats.length > 0 ?
         <div className="flex flex-col gap-1.5">
           <p className="m-0 text-[0.72rem] font-semibold tracking-wide text-text-secondary uppercase">
-            Active agents · {chats.filter((c) => c.activeTurn).length}/{chats.length}
+            Active agents · {activeChats.length}
           </p>
           {activeChats.map((chat) => (
-            <PresenceChatRow key={chat.conversationId} chat={chat} onOpenChat={onOpenChat} />
-          ))}
-          {idleChats.map((chat) => (
             <PresenceChatRow key={chat.conversationId} chat={chat} onOpenChat={onOpenChat} />
           ))}
         </div>
@@ -627,7 +644,7 @@ function SubagentRunsBoard({
       {[
         { key: 'running' as const, title: 'Running', list: running },
         { key: 'awaiting' as const, title: 'Awaiting input', list: awaiting },
-        { key: 'done' as const, title: 'Finished', list: shownDone },
+        { key: 'paused' as const, title: 'Paused', list: pausedRows },
       ].map((section) =>
         section.list.length === 0 ? null : (
           <div key={section.key} className="flex flex-col gap-2">
@@ -635,119 +652,199 @@ function SubagentRunsBoard({
               {section.title} · {section.list.length}
             </p>
             {section.list.map((row) => (
-              <SubagentRunRow key={row.taskId} row={row} onOpenChat={onOpenChat} onOpenDetail={() => openDetail(row)} />
+              <SubagentRunRow key={row.taskId} row={row} onOpenChat={onOpenChat} />
             ))}
           </div>
         ),
       )}
-      {done.length > shownDone.length ?
-        <p className={cn(mutedText, 'm-0 text-[0.72rem]')}>
-          {done.length - shownDone.length} older finished run{done.length - shownDone.length === 1 ? '' : 's'} hidden — full history in the Tasks view.
-        </p>
-      : null}
-      {notice ?
-        <p className="mb-0 text-[0.76rem] text-warning">{notice}</p>
-      : null}
-      {detail ?
-        <div className="absolute inset-0 z-10 flex flex-col overflow-y-auto rounded-lg border border-border bg-bg-secondary p-3">
-          <div className="flex items-center justify-between gap-2">
-            <p className={cn(mutedText, 'm-0 text-[0.76rem]')}>
-              {detail.row.conversationTitle ? `via ${detail.row.conversationTitle} · ` : ''}run{'\u200b'}{detail.row.runId.slice(0, 8)}
-            </p>
-            <button
-              type="button"
-            className="border-0 bg-transparent p-0 text-[0.78rem] text-accent hover:underline"
-              onClick={() => {
-                setDetail(null)
-                setNotice(null)
-              }}
-            >
-              ✕ close
-            </button>
-          </div>
-          <div className="mt-2 min-h-0 flex-1">
-            <TaskDetailDrawer
-              embedded
-              task={detail.task}
-              chainTasks={null}
-              onSelectTask={() => {}}
-              onRetry={(message) => setNotice(message)}
-              onCancel={(message) => setNotice(message)}
-            />
-          </div>
-        </div>
-      : null}
     </div>
   )
 }
 
+/** Compact, expandable run pill with operator controls. Collapsed: status dot +
+ *  persona + one-line task + clock + ⏸/▶/⏹. Expanded: stats (status/mode/step/model/
+ *  tokens/owning chat), files, question, pause/resume point, and “open in chat →”
+ *  (the run's live/finished card lives in chat — the board never renders a drawer). */
 function SubagentRunRow({
   row,
   onOpenChat,
-  onOpenDetail,
 }: {
   row: SubagentRunBoardRow
   onOpenChat?: (conversationId: string) => void
-  onOpenDetail?: () => void
 }): React.ReactElement {
+  // Awaiting input auto-expands — it's the one state the operator must act on.
+  const [expanded, setExpanded] = useState(row.status === 'awaiting_input')
+  const [busy, setBusy] = useState<'pause' | 'stop' | 'start' | null>(null)
+  const [note, setNote] = useState<string | null>(null)
   const live = row.status === 'running'
+  const paused = row.status === 'paused'
+  const awaiting = row.status === 'awaiting_input'
   const usage =
     row.tokens != null && row.tokens > 0 ?
       `${row.tokens > 1000 ? `${(row.tokens / 1000).toFixed(1)}k` : row.tokens} tok`
     : null
   const tail = row.partialTail ?? null
   const taskTitle = row.title ?? row.agent
+  const shortTitle = taskTitle.length > 56 ? `${taskTitle.slice(0, 56)}…` : taskTitle
+
+  const control = async (kind: 'pause' | 'stop' | 'start'): Promise<void> => {
+    setBusy(kind)
+    setNote(null)
+    try {
+      if (kind === 'stop') {
+        const r = await window.sylo.tasks.cancel(row.taskId)
+        if (!r.ok) setNote(`Stop failed (${r.error}).`)
+      } else if (kind === 'pause') {
+        const r = await window.sylo.tasks.pause(row.taskId)
+        if (!r.ok) setNote(`Pause failed (${r.error}).`)
+      } else {
+        const r = await window.sylo.tasks.resume(row.taskId)
+        if (!r.ok) setNote(`Resume failed: ${r.error}`)
+      }
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const btn = 'shrink-0 rounded border-0 bg-transparent px-1 font-mono text-[0.74rem] leading-none hover:underline disabled:opacity-40'
+
   return (
-    <div className="flex flex-col gap-1 rounded-md border border-border bg-bg-tertiary/40 px-2.5 py-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className={cn('text-[0.8rem] font-semibold', RUN_STATUS_CLASS[row.status])}>
-          {RUN_STATUS_DOT[row.status]} {RUN_STATUS_LABEL[row.status]}
-        </span>
-        <code className="font-mono text-[0.84rem] font-semibold text-text-primary">{row.agent}</code>
-        <span className={cn(mutedText, 'text-[0.72rem]')}>
-          {row.mode}
-          {row.stepIndex != null ? ` · step ${row.stepIndex}` : ''} · {live ? elapsedLabel(row) : relWhen(row.endedAt ?? Date.now())}
-        </span>
-        {row.model ?
-          <span className={cn(mutedText, 'truncate text-[0.72rem]')} title={row.model}>
-            {row.model}
-          </span>
-        : null}
-        {usage ? <span className={cn(mutedText, 'text-[0.72rem]')}>{usage}</span> : null}
-        {row.conversationTitle ?
-          <span
-            className="ml-auto max-w-[160px] shrink-0 truncate rounded border border-border bg-bg-secondary px-1.5 py-0.5 text-[0.68rem] text-text-secondary"
-            title={row.conversationTitle}
-          >
-            {row.conversationTitle.length > 40 ? `${row.conversationTitle.trim().slice(0, 40)}…` : row.conversationTitle}
-          </span>
-        : null}
-      </div>
-      <button
-        type="button"
-        className="border-0 bg-transparent p-0 text-left text-[0.8rem] font-medium text-text-primary hover:text-accent"
-        onClick={onOpenDetail}
-        title="Open the run's full report"
+    <div className="flex flex-col overflow-hidden rounded-md border border-border bg-bg-tertiary/40">
+      <div
+        className="flex w-full cursor-pointer select-none items-center gap-2 px-2.5 py-1.5 hover:bg-bg-tertiary/60"
+        onClick={() => setExpanded((v) => !v)}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') setExpanded((v) => !v)
+        }}
+        title={live ? 'Running — click to expand details' : 'Click to expand details'}
       >
-        {taskTitle.length > 140 ? `${taskTitle.slice(0, 140)}…` : taskTitle}
-      </button>
-      {row.files.length > 0 ?
-        <p className="mb-0 text-[0.72rem] leading-[1.4] text-text-secondary" title={row.files.join(', ')}>
-          {row.files.slice(0, 3).join(' · ')}{row.files.length > 3 ? ` · +${row.files.length - 3}` : ''}
-        </p>
-      : null}
-      {row.question && row.status === 'awaiting_input' ?
-        <p className="m-0 text-[0.8rem] leading-[1.45] text-warning">❓ {row.question}</p>
-      : null}
-      {tail && row.toolName ?
-        <p className={cn(mutedText, 'm-0 truncate font-mono text-[0.74rem]')} title={row.toolPreview ?? ''}>
-          ⚙ {row.toolName} — {row.toolPreview ?? ''}
-        </p>
-      : null}
-      {tail ?
-        <pre className="m-0 max-h-24 overflow-hidden font-mono text-[0.74rem] leading-[1.4] whitespace-pre-wrap text-text-secondary">
-          {tail.length > 700 ? `${tail.slice(-700)}` : tail}
-        </pre>
+        <span className={cn('shrink-0 text-[0.74rem]', RUN_STATUS_CLASS[row.status], live && 'animate-pulse')} aria-hidden="true">
+          {RUN_STATUS_DOT[row.status]}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[0.78rem] text-text-primary">
+          <code className="font-mono font-semibold">{row.agent}</code>
+          <span className="text-[0.7rem] text-text-secondary"> · </span>
+          {shortTitle}
+        </span>
+        {awaiting ?
+          <span className="shrink-0 text-[0.74rem] text-warning" title="Awaiting your answer">❓</span>
+        : null}
+        <span className={cn(mutedText, 'shrink-0 font-mono text-[0.7rem]')}>
+          {live ? elapsedLabel(row) : relWhen(row.endedAt ?? row.startedAt ?? Date.now())}
+        </span>
+        {live ?
+          <button
+            type="button"
+            className={cn(btn, 'text-warning')}
+            disabled={busy != null}
+            onClick={(e) => {
+              e.stopPropagation()
+              void control('pause')
+            }}
+            title="Pause this run — stops feeding it; resume later with ▶"
+          >
+            {busy === 'pause' ? '…' : '⏸'}
+          </button>
+        : null}
+        {paused ?
+          <button
+            type="button"
+            className={cn(btn, 'text-accent')}
+            disabled={busy != null}
+            onClick={(e) => {
+              e.stopPropagation()
+              void control('start')
+            }}
+            title="Resume this run in place (re-dispatches from its pause point)"
+          >
+            {busy === 'start' ? '…' : '▶'}
+          </button>
+        : null}
+        {live || paused || awaiting ?
+          <button
+            type="button"
+            className={cn(btn, 'text-danger')}
+            disabled={busy != null}
+            onClick={(e) => {
+              e.stopPropagation()
+              void control('stop')
+            }}
+            title={paused ? 'Stop — discards the paused run (no resume after this)' : 'Stop — kills the run'}
+          >
+            {busy === 'stop' ? '…' : '⏹'}
+          </button>
+        : null}
+        <span className={cn(mutedText, 'shrink-0 text-[0.68rem]')} aria-hidden="true">
+          {expanded ? '▾' : '▸'}
+        </span>
+      </div>
+      {expanded ?
+        <div className="flex flex-col gap-1.5 border-t border-border px-2.5 py-2">
+          <div className="flex flex-wrap items-baseline gap-2">
+            <span className={cn('text-[0.76rem] font-semibold', RUN_STATUS_CLASS[row.status])}>
+              {RUN_STATUS_LABEL[row.status]}
+            </span>
+            <span className={cn(mutedText, 'text-[0.72rem]')}>
+              {row.mode}
+              {row.stepIndex != null ? ` · step ${row.stepIndex}` : ''}
+            </span>
+            {row.model ?
+              <span className={cn(mutedText, 'truncate font-mono text-[0.72rem]')} title={row.model}>
+                {row.model}
+              </span>
+            : null}
+            {usage ? <span className={cn(mutedText, 'text-[0.72rem]')}>{usage}</span> : null}
+            {row.conversationTitle ?
+              <span
+                className="ml-auto max-w-[160px] shrink-0 truncate rounded border border-border bg-bg-secondary px-1.5 py-0.5 text-[0.68rem] text-text-secondary"
+                title={row.conversationTitle}
+              >
+                {row.conversationTitle.length > 40 ? `${row.conversationTitle.trim().slice(0, 40)}…` : row.conversationTitle}
+              </span>
+            : null}
+          </div>
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <span className="min-w-0 flex-1 text-[0.8rem] font-medium text-text-primary" title={taskTitle}>
+              {taskTitle}
+            </span>
+            {onOpenChat && row.conversationId ?
+              <button
+                type="button"
+                className="shrink-0 border-0 bg-transparent p-0 text-[0.72rem] text-accent hover:underline"
+                onClick={() => onOpenChat(row.conversationId)}
+                title="The run's live/finished card lives in its chat"
+              >
+                {awaiting ? 'answer in chat →' : 'open in chat →'}
+              </button>
+            : null}
+          </div>
+          {paused && row.resultSummary ?
+            <p className="m-0 text-[0.74rem] leading-[1.45] text-text-secondary">⏸ {row.resultSummary}</p>
+          : null}
+          {row.files.length > 0 ?
+            <p className="mb-0 truncate text-[0.72rem] leading-[1.4] text-text-secondary" title={row.files.join(', ')}>
+              {row.files.slice(0, 3).join(' · ')}{row.files.length > 3 ? ` · +${row.files.length - 3}` : ''}
+            </p>
+          : null}
+          {row.question && awaiting ?
+            <p className="m-0 text-[0.8rem] leading-[1.45] text-warning">❓ {row.question}</p>
+          : null}
+          {tail && row.toolName ?
+            <p className={cn(mutedText, 'm-0 truncate font-mono text-[0.74rem]')} title={row.toolPreview ?? ''}>
+              ⚙ {row.toolName} — {row.toolPreview ?? ''}
+            </p>
+          : null}
+          {tail ?
+            <pre className="m-0 max-h-40 overflow-y-auto font-mono text-[0.74rem] leading-[1.4] whitespace-pre-wrap text-text-secondary">
+              {tail.length > 700 ? `${tail.slice(-700)}` : tail}
+            </pre>
+          : null}
+          {note ? <p className="m-0 text-[0.74rem] text-warning">{note}</p> : null}
+        </div>
       : null}
     </div>
   )

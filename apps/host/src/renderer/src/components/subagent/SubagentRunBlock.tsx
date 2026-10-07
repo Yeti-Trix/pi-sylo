@@ -20,6 +20,7 @@ import {
 
 import type { SubagentTaskBatch } from './matchSubagentBatches'
 import { batchWorstStatus, pickFocusTask } from './subagentFocus'
+import { registerSubagentBatchTarget, subagentPillDomId } from './subagentBatchTargets'
 
 function batchTitle(batch: SubagentTaskBatch, focusId: string | null): string {
   const focusIx = batch.tasks.findIndex((t) => t.id === focusId)
@@ -68,45 +69,34 @@ export function SubagentRunBlockPending({ segmentId }: { segmentId: string }): R
 export function SubagentRunBlock({
   batch,
   segmentId,
-  live,
+  messageId,
   onNotice,
 }: {
   batch: SubagentTaskBatch
   segmentId: string
-  /** The `subagent` tool has not returned yet — more steps may still be coming. */
-  live?: boolean
+  /** Owns this pill in the timeline — registered so composer-strip "Go to"
+   *  can scroll the (virtualized) list to this message and open the pill. */
+  messageId?: string
   onNotice?: (message: string) => void
 }): React.ReactElement {
   const anyRunning = batch.tasks.some((t) => t.status === 'running')
-  // A chain spends the gap between steps with nothing running, because the next step
-  // is not registered until it starts. Treating that as finished collapsed the block
-  // mid-run, so an unreturned tool counts as active.
-  const active = anyRunning || live === true
-  const [open, setOpen] = useState(active)
-  const [selectedId, setSelectedId] = useState<string | null>(() => pickFocusTask(batch.tasks, null))
-  // Set once the operator picks a step themselves: their choice outranks following.
-  const pinned = useRef(false)
+  // Operator (pills rework): the card stays COLLAPSED until clicked — a running
+  // batch reads as one compact pill line, and nothing expands or follows a run
+  // unprompted. Each run row below is itself a click-to-expand pill.
+  const [open, setOpen] = useState(false)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
 
   useEffect(() => {
-    if (active) setOpen(true)
-  }, [active])
+    if (messageId) registerSubagentBatchTarget(batch.batchKey, messageId)
+  }, [batch.batchKey, messageId])
 
-  const taskStates = batch.tasks.map((t) => `${t.id}:${t.status}`).join(',')
-  useEffect(() => {
-    if (pinned.current && batch.tasks.some((t) => t.id === selectedId)) return
-    setSelectedId((prev) => pickFocusTask(batch.tasks, prev))
-    // Keyed on the ids and statuses: re-following on every render would fight the
-    // operator's click, and a new tasks array arrives on every telemetry tick.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [taskStates])
 
   const selectTask = useCallback(
     (id: string) => {
-      // Clicking the step Sylo would have followed anyway resumes following.
-      pinned.current = pickFocusTask(batch.tasks, null) !== id
-      setSelectedId(id)
+      // Click the run's pill to expand it; click again to collapse it.
+      setSelectedId((prev) => (prev === id ? null : id))
     },
-    [batch.tasks],
+    [],
   )
 
   const selectedTask = batch.tasks.find((t) => t.id === selectedId) ?? null
@@ -123,22 +113,25 @@ export function SubagentRunBlock({
   )
 
   return (
-    <details
-      id={`subagent-run-${batch.batchKey}`}
+        <details
+      id={subagentPillDomId(batch.batchKey)}
       data-subagent-running={anyRunning ? 'true' : 'false'}
       className={cn(cls, 'mx-0 mt-1.5')}
       open={open}
       onToggle={(e) => setOpen(detailsOpenFromToggleEvent(e))}
     >
       <summary className={chatSegmentSummary}>
-        <span
+                <span
           className={cn(
             'text-[0.72rem] text-text-secondary',
             anyRunning && chatSegmentPulse,
+            !anyRunning && status === 'ok' && 'text-[rgb(52_211_153)]',
+            !anyRunning && status !== 'ok' && status !== 'done' && status !== 'cancelled' &&
+              'text-[rgb(241_106_80)]',
           )}
           aria-hidden="true"
         >
-          ◇
+          {anyRunning ? '◇' : status === 'ok' ? '✓' : status === 'cancelled' || status === 'done' ? '■' : '✕'}
         </span>
         <span className={chatMsgRoleRow}>
           Subagent · {title}
@@ -153,7 +146,7 @@ export function SubagentRunBlock({
             : 'border-border bg-bg-tertiary text-text-secondary',
           )}
         >
-          {anyRunning ? 'running' : statusLabel(batchWorstStatus(batch.tasks))}
+          {anyRunning ? 'running' : status === 'ok' ? 'completed' : statusLabel(batchWorstStatus(batch.tasks))}
         </span>
         <span className={chatSegmentChevron} aria-hidden="true" />
       </summary>
@@ -184,16 +177,18 @@ export function SubagentRunBlock({
           </div>
         : null}
 
-        <TaskDetailDrawer
-          embedded
-          task={selectedTask}
-          // The stepper above is this block's; the drawer renders its own for the
-          // Tasks panel, and inline that stacked two identical steppers.
-          chainTasks={null}
-          onSelectTask={selectTask}
-          onRetry={onNotice ?? (() => {})}
-          onCancel={onNotice}
-        />
+                {selectedTask ?
+          <TaskDetailDrawer
+            embedded
+            task={selectedTask}
+            // The stepper above is this block's; the drawer renders its own for the
+            // Tasks panel, and inline that stacked two identical steppers.
+            chainTasks={null}
+            onSelectTask={selectTask}
+            onRetry={onNotice ?? (() => {})}
+            onCancel={onNotice}
+          />
+        : null}
       </div>
     </details>
   )

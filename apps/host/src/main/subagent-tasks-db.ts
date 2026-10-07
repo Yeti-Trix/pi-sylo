@@ -229,7 +229,7 @@ export function insertAgentTaskStart(input: {
     ...(input.model?.trim() ? { model: input.model.trim() } : {}),
     ...(input.goal?.trim() ? { goal: input.goal.trim() } : {}),
   }
-  const row: AgentTaskRow = {
+    const row: AgentTaskRow = {
     id: input.id,
     host_session_id: input.hostSessionId,
     conversation_id: input.conversationId,
@@ -250,6 +250,19 @@ export function insertAgentTaskStart(input: {
     tokens_used: null,
     created_at: now,
     updated_at: now,
+  }
+  const existing = getAgentTask(input.id)
+  if (existing) {
+    // Runs-board resume (⏸→▶): the resumed child reuses the paused row's id. Reset
+    // it in place to `running` — same started_at (elapsed continuity), same created_at,
+    // fresh spec fields; the paused attempt stays in the row's history nowhere else.
+    return resetAgentTaskToRunning(input.id, {
+      task: input.task,
+      stepIndex: input.stepIndex,
+      model: input.model,
+      goal: input.goal,
+      parentTaskId: input.parentTaskId,
+    }) ?? row
   }
   getDb()
     .prepare(
@@ -282,6 +295,100 @@ export function insertAgentTaskStart(input: {
       row.updated_at,
     )
   return row
+}
+
+/**
+ * Runs-board resume: flip a paused row back to `running` in place and refresh its
+ * spec from the resumed child's run_start. Keeping started_at/created_at preserves
+ * the run's identity and sort position on the board.
+ */
+export function resetAgentTaskToRunning(
+  id: string,
+  specPatch?: { task?: string; stepIndex?: number; model?: string; goal?: string; parentTaskId?: string },
+  now = Date.now(),
+): AgentTaskRow | null {
+  const existing = getAgentTask(id)
+  if (!existing) return null
+  let spec: AgentTaskSpec
+  try {
+    spec = JSON.parse(existing.spec_json) as AgentTaskSpec
+  } catch {
+    spec = { task: existing.title, mode: existing.mode, agent: existing.agent_name, groupRunId: existing.group_run_id ?? id }
+  }
+  if (specPatch?.task?.trim()) spec.task = specPatch.task.trim()
+  if (specPatch?.goal?.trim()) spec.goal = specPatch.goal.trim()
+  if (specPatch?.model?.trim()) spec.model = specPatch.model.trim()
+  if (specPatch?.stepIndex !== undefined) spec.stepIndex = specPatch.stepIndex
+  // A parked child may hold an unanswered question — stale on resume.
+  delete spec.question
+  delete spec.what_i_tried
+  delete spec.context_digest
+  getDb()
+    .prepare(
+      `UPDATE agent_tasks SET spec_json = ?, status = 'running', status_reason = NULL,
+        ended_at = NULL, updated_at = ?,
+        parent_task_id = COALESCE(?, parent_task_id),
+        step_index = COALESCE(?, step_index)
+      WHERE id = ?`,
+    )
+    .run(
+      JSON.stringify(spec),
+      now,
+      specPatch?.parentTaskId ?? null,
+      specPatch?.stepIndex ?? null,
+      id,
+    )
+  return getAgentTask(id) ?? null
+}
+
+/**
+ * Operator pause landed (child finalize reported `paused`, or a stale fallback):
+ * NOT terminal — ended_at stays NULL (the run can resume), the pause point rides
+ * result_summary/result_json so the board pill shows where it stopped.
+ */
+export function markAgentTaskPaused(
+  id: string,
+  info: { statusReason?: string; resultText?: string; usage?: { input: number; output: number; cost: number; turns: number }; model?: string; files?: string[] },
+  now = Date.now(),
+): void {
+  const existing = getAgentTask(id)
+  if (!existing) return
+  let spec: AgentTaskSpec
+  try {
+    spec = JSON.parse(existing.spec_json) as AgentTaskSpec
+  } catch {
+    spec = { task: existing.title, mode: existing.mode, agent: existing.agent_name, groupRunId: existing.group_run_id ?? id }
+  }
+  spec.lastThinkingLive = false
+  if (info.model?.trim()) spec.model = info.model.trim()
+  if (Array.isArray(info.files) && info.files.length > 0) {
+    const seen = new Set(spec.files ?? [])
+    const merged = [...(spec.files ?? [])]
+    for (const file of info.files) {
+      if (typeof file !== 'string' || !file.trim() || seen.has(file)) continue
+      seen.add(file)
+      merged.push(file)
+    }
+    spec.files = merged.slice(0, 50)
+  }
+  const resultJson = {
+    resultText: info.resultText,
+    model: info.model,
+    usage: info.usage,
+  }
+  getDb()
+    .prepare(
+      `UPDATE agent_tasks SET spec_json = ?, status = 'paused', status_reason = ?, result_summary = ?,
+        result_json = ?, updated_at = ? WHERE id = ?`,
+    )
+    .run(
+      JSON.stringify(spec),
+      info.statusReason ?? 'operator_pause',
+      info.resultText ? info.resultText.slice(0, 2000) : `Paused by operator${info.usage ? ` · ${info.usage.input + info.usage.output} tok` : ''}`,
+      JSON.stringify(resultJson),
+      now,
+      id,
+    )
 }
 
 /**

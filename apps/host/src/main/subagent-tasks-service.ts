@@ -140,22 +140,34 @@ export function handleSubagentHostEvent(conversationId: string, event: SyloSubag
         context_digest: event.context_digest,
       })
       break
-    case 'subagent_run_end':
-      store.finalizeAgentTask(event.runId, {
-        status: event.status,
-        resultSummary: event.resultText?.slice(0, 2000) ?? event.error?.slice(0, 2000),
-        resultJson: {
+        case 'subagent_run_end':
+      if (event.status === 'paused') {
+        // Non-terminal: the operator paused the run. Keep started_at, keep it
+        // resumable — this is the board's ▶ row, not a finished result.
+        store.markAgentTaskPaused(event.runId, {
+          statusReason: 'operator_pause',
           resultText: event.resultText,
-          thinking: event.thinking,
-          model: event.model,
-          error: event.error,
           usage: event.usage,
-        },
-        tokensUsed: event.usage ? event.usage.input + event.usage.output : undefined,
-        files: Array.isArray(event.files) ? event.files : undefined,
-      })
-      syncWorkspacePlanFile(conversationId, event)
-      notifyPlanTodosChanged()
+          model: event.model,
+          files: Array.isArray(event.files) ? event.files : undefined,
+        })
+      } else {
+        store.finalizeAgentTask(event.runId, {
+          status: event.status,
+          resultSummary: event.resultText?.slice(0, 2000) ?? event.error?.slice(0, 2000),
+          resultJson: {
+            resultText: event.resultText,
+            thinking: event.thinking,
+            model: event.model,
+            error: event.error,
+            usage: event.usage,
+          },
+          tokensUsed: event.usage ? event.usage.input + event.usage.output : undefined,
+          files: Array.isArray(event.files) ? event.files : undefined,
+        })
+        syncWorkspacePlanFile(conversationId, event)
+        notifyPlanTodosChanged()
+      }
       break
   }
 }

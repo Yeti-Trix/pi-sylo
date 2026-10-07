@@ -77,6 +77,7 @@ import { CheckpointsPanel } from './panels/checkpoints/CheckpointsPanel'
 import { RulesPanel } from './panels/rules/RulesPanel'
 import { useSubagentTasks } from './panels/tasks/useSubagentTasks'
 import { SubagentRunsStrip } from './components/subagent/SubagentRunsStrip'
+import { lookupSubagentBatchMessage, subagentPillDomId } from './components/subagent/subagentBatchTargets'
 import {
   applyThinkTankLifecycleEvent,
   type ThinkTankLiveSession,
@@ -2214,6 +2215,7 @@ export function App(): React.ReactElement {
     closeTab: closeCanvasTab,
     updateActiveSnapshot: updateActiveCanvasSnapshot,
     openAppTab: openAppsPaneTab,
+    openAgentBoardTab,
     openWidgetTab,
     openDiffTab,
   } = useCanvasTabs({
@@ -2288,10 +2290,16 @@ export function App(): React.ReactElement {
       // Pool tabs (terminal/browser) carry the originating chat's name as a
       // muted chip so a shared workspace pool stays traceable.
       const origin = activeId ? (conversations.find((c) => c.id === activeId)?.title ?? '') : ''
+      if (kind === 'agent') {
+        // The + picker's Agent entry — opens (or re-activates) the workspace's
+        // Agent panel tab; handled async, no placeholder tab needed.
+        void openAgentBoardTab(origin)
+        return
+      }
       const id = openAppsPaneTab(kind, origin)
       if (kind === 'terminal') terminals.ensure(id, workspaceCwdRef.current)
     },
-    [openAppsPaneTab, terminals, activeId, conversations],
+    [openAppsPaneTab, openAgentBoardTab, terminals, activeId, conversations],
   )
   const closeCanvasTabsWithSessions = useCallback(
     (ids: string[]) => {
@@ -2985,18 +2993,71 @@ export function App(): React.ReactElement {
     setSubagentNotice(message)
   }, [])
 
-  const scrollToRunningSubagent = useCallback(() => {
-    document.querySelector('[data-subagent-running="true"]')?.scrollIntoView({
-      behavior: 'smooth',
-      block: 'nearest',
-    })
-  }, [])
+  /** Operator "Go to" (composer strip): scroll the virtualized timeline to the
+   *  dispatch's message — the pill may be UNMOUNTED (rows outside the viewport
+   *  don't exist in the DOM) — wait for the row to mount, then expand + flash it. */
+  const gotoSubagentBatch = useCallback(
+    (batchKey: string) => {
+      const messageId = lookupSubagentBatchMessage(batchKey)
+      if (!messageId || !chatListRef.current) return
+      // A pinned-to-end list would win the next settle — drop the pin first.
+      if (stickToBottomRef.current) applyStickToBottom(false)
+      if (!chatListRef.current.scrollToMessageKey(messageId)) return
+      let frames = 0
+      const step = () => {
+        frames += 1
+        const el = document.getElementById(subagentPillDomId(batchKey))
+        if (el) {
+          const details = el as HTMLDetailsElement
+          if (!details.open) el.querySelector('summary')?.click()
+          // Fine-tune the reveal after the row has actually mounted (virtualizer
+          // estimates shift as measured heights replace guesses).
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          el.classList.remove('subagent-goto-flash')
+          void (el as HTMLElement).offsetWidth
+          el.classList.add('subagent-goto-flash')
+          window.setTimeout(() => el.classList.remove('subagent-goto-flash'), 1800)
+          return
+        }
+        if (frames < 60) requestAnimationFrame(step)
+      }
+      requestAnimationFrame(step)
+    },
+    [applyStickToBottom],
+  )
 
+  const [stopNote, setStopNote] = useState<string | null>(null)
+  const stopNoteTimerRef = useRef<number | null>(null)
+
+  /** Composer-strip "Stop all": actually kill (or mark dead) every running run,
+   *  then ALWAYS tell the operator what the stop found — silence here reads as
+   *  "the stop did something" when it may have caught nothing (e.g. holds
+   *  expired first; per-run cancelled rows return not_running). Live kills also
+   *  emit durable ■-stopped cards from the funnel; this is the always-on echo. */
   const stopAllSubagents = useCallback(async () => {
+    let stopped = 0
+    let alreadyDone = 0
+    let missed = 0
     for (const t of subagentRunning) {
-      await window.sylo.tasks.cancel(t.id)
+      const r = await window.sylo.tasks.cancel(t.id)
+      if (r.ok) stopped += 1
+      else if (r.error === 'not_running') alreadyDone += 1
+      else missed += 1
     }
     await reloadSubagentTasks()
+    const bits: string[] = []
+    if (stopped === 1) bits.push('stopped 1 subagent')
+    else if (stopped > 1) bits.push(`stopped ${stopped} subagents`)
+    if (alreadyDone === 1) bits.push('1 had already finished')
+    else if (alreadyDone > 1) bits.push(`${alreadyDone} had already finished`)
+    if (missed > 0) bits.push(`${missed} unaccounted — they likely finished between click and stop`)
+    const text = bits.length > 0 ? `⏹ ${bits.join(' · ')}` : '⏹ Nothing was running — nothing to stop'
+    setStopNote(text)
+    if (stopNoteTimerRef.current != null) window.clearTimeout(stopNoteTimerRef.current)
+    stopNoteTimerRef.current = window.setTimeout(() => {
+      stopNoteTimerRef.current = null
+      setStopNote(null)
+    }, 6000)
   }, [subagentRunning, reloadSubagentTasks])
 
   useEffect(() => {
@@ -5423,10 +5484,15 @@ export function App(): React.ReactElement {
                     : null}
                     {subagentRunningCount > 0 ?
                       <SubagentRunsStrip
-                        runningCount={subagentRunningCount}
-                        onScrollToRunning={scrollToRunningSubagent}
+                        running={subagentRunning}
+                        onGoTo={gotoSubagentBatch}
                         onStopAll={stopAllSubagents}
                       />
+                    : null}
+                    {stopNote ?
+                      <p className={cn(mutedText, 'text-[0.78rem]')}>
+                        {stopNote}
+                      </p>
                     : null}
                     <div className={chatTurnActions}>
                       {chatTimeline.length > 0 && activeId ?
@@ -5564,10 +5630,15 @@ export function App(): React.ReactElement {
                   : null}
                   {subagentRunningCount > 0 ?
                     <SubagentRunsStrip
-                      runningCount={subagentRunningCount}
-                      onScrollToRunning={scrollToRunningSubagent}
+                      running={subagentRunning}
+                      onGoTo={gotoSubagentBatch}
                       onStopAll={stopAllSubagents}
                     />
+                  : null}
+                  {stopNote ?
+                    <p className={cn(mutedText, 'text-[0.78rem]')}>
+                      {stopNote}
+                    </p>
                   : null}
                   <div className={chatTurnActions}>
                     {chatTimeline.length > 0 && activeId ?

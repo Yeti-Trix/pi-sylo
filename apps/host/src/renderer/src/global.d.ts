@@ -537,6 +537,15 @@ declare global {
           }[]
         >
       }
+      /** Manual open of the per-workspace Agent panel (the `+` picker). */
+      agentBoard: {
+        open: (
+          conversationId: string | null,
+        ) => Promise<
+          | { ok: true; liveId: string; title: string; data: unknown }
+          | { ok: false; error: string }
+        >
+      }
       chat: {
         send: (
           conversationId: string,
@@ -1844,7 +1853,7 @@ declare global {
             depth: number
             title: string
             spec_json: string
-            status: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'orphaned'
+            status: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'orphaned' | 'paused'
             status_reason: string | null
             mode: 'single' | 'parallel' | 'chain'
             agent_name: string
@@ -1868,7 +1877,7 @@ declare global {
               depth: number
               title: string
               spec_json: string
-              status: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'orphaned'
+              status: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'orphaned' | 'paused'
               status_reason: string | null
               mode: 'single' | 'parallel' | 'chain'
               agent_name: string
@@ -1887,6 +1896,11 @@ declare global {
           | { ok: true; killed: boolean }
           | { ok: false; error: 'bad_id' | 'not_found' | 'not_running' }
         >
+        pause: (taskId: string) => Promise<
+          | { ok: true }
+          | { ok: false; error: 'bad_id' | 'not_found' | 'not_running' }
+        >
+        resume: (taskId: string) => Promise<{ ok: true } | { ok: false; error: string }>
         retry: (taskId: string) => Promise<
           | {
               ok: true

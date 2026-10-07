@@ -188,6 +188,13 @@ export type BrokerOutMessage =
     }
   | { type: 'run_subagent_result'; requestId: string; ok: false; error: string }
   | {
+      type: 'subagent_control_result'
+      requestId: string
+      ok: boolean
+      killed?: boolean
+      error?: string
+    }
+  | {
       /** Final assistant message was truncated by a token limit (`stopReason: 'length'`). */
       type: 'turn_cutoff'
       turnId: string
@@ -352,6 +359,12 @@ type PendingCompactNow = {
   timer: ReturnType<typeof setTimeout>
 }
 
+/** Runs-board ⏸/▶ RPC — pause or resume a subagent run by id. */
+type PendingSubagentControl = {
+  resolve: (value: { ok: boolean; killed?: boolean; error?: string }) => void
+  timer: ReturnType<typeof setTimeout>
+}
+
 export class BrokerSupervisor {
   private child: ChildProcess | undefined
   private cfg: BrokerConfig
@@ -364,6 +377,7 @@ export class BrokerSupervisor {
   private pendingThinkingLevels = new Map<string, PendingThinkingLevels>()
   private pendingForcedSubagent = new Map<string, PendingForcedSubagent>()
   private pendingCompactNow = new Map<string, PendingCompactNow>()
+  private pendingSubagentControl = new Map<string, PendingSubagentControl>()
 
   constructor(cfg: Omit<BrokerConfig, 'brokerScriptPath'> & { brokerScriptPath?: string }) {
     const scriptPath = cfg.brokerScriptPath ?? resolveBrokerScript()
@@ -531,6 +545,10 @@ export class BrokerSupervisor {
       }
       if (m && typeof m === 'object' && m.type === 'run_subagent_result') {
         this.resolveForcedSubagent(m)
+        return
+      }
+      if (m && typeof m === 'object' && m.type === 'subagent_control_result') {
+        this.resolveSubagentControl(m)
         return
       }
       this.cfg.onMessage(m)
@@ -791,6 +809,72 @@ export class BrokerSupervisor {
     this.child?.send({ type: 'cancel_subagent', runId: id })
   }
 
+  /**
+   * Runs-board ⏸: kill the run's child, park it `paused` (not cancelled) and flag its
+   * chain unit to stop between steps. Fire-and-forget when the child isn't replying
+   * (broker exit/timeout) — callers fall back to finalizing the row themselves.
+   */
+  pauseSubagentRun(
+    runId: string,
+    groupRunId?: string | null,
+    timeoutMs = 4000,
+  ): Promise<{ ok: boolean; killed?: boolean; error?: string }> {
+    const id = runId.trim()
+    if (!this.child || this.child.killed) return Promise.resolve({ ok: false, error: 'broker_not_running' })
+    const requestId = randomUUID()
+    return new Promise((resolveFn) => {
+      const timer = setTimeout(() => {
+        if (this.pendingSubagentControl.delete(requestId)) {
+          resolveFn({ ok: false, error: 'pause timed out' })
+        }
+      }, timeoutMs)
+      this.pendingSubagentControl.set(requestId, { resolve: resolveFn, timer })
+      try {
+        this.child!.send({
+          type: 'pause_subagent',
+          requestId,
+          runId: id,
+          ...(groupRunId ? { groupRunId } : {}),
+        })
+      } catch (e) {
+        clearTimeout(timer)
+        this.pendingSubagentControl.delete(requestId)
+        resolveFn({ ok: false, error: e instanceof Error ? e.message : String(e) })
+      }
+    })
+  }
+
+  /** Runs-board ▶: re-dispatch a paused (single or chain) run, reusing its row. */
+  resumeSubagentRun(
+    args: {
+      runId: string
+      mode: 'single' | 'chain'
+      agentName?: string
+      task?: string
+      lastPartialText?: string
+      groupRunId?: string | null
+    },
+    timeoutMs = 4000,
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (!this.child || this.child.killed) return Promise.resolve({ ok: false, error: 'broker_not_running' })
+    const requestId = randomUUID()
+    return new Promise((resolveFn) => {
+      const timer = setTimeout(() => {
+        if (this.pendingSubagentControl.delete(requestId)) {
+          resolveFn({ ok: false, error: 'resume timed out' })
+        }
+      }, timeoutMs)
+      this.pendingSubagentControl.set(requestId, { resolve: resolveFn, timer })
+      try {
+        this.child!.send({ type: 'resume_subagent', requestId, ...args })
+      } catch (e) {
+        clearTimeout(timer)
+        this.pendingSubagentControl.delete(requestId)
+        resolveFn({ ok: false, error: e instanceof Error ? e.message : String(e) })
+      }
+    })
+  }
+
   /** Returns false when there is no live child to receive the message. */
   sendChildMessage(payload: Record<string, unknown>): boolean {
     if (!this.child || this.child.killed) return false
@@ -970,6 +1054,16 @@ export class BrokerSupervisor {
     else pending.reject(new Error(msg.error))
   }
 
+  private resolveSubagentControl(
+    msg: { type: 'subagent_control_result'; requestId: string; ok: boolean; killed?: boolean; error?: string },
+  ): void {
+    const pending = this.pendingSubagentControl.get(msg.requestId)
+    if (!pending) return
+    this.pendingSubagentControl.delete(msg.requestId)
+    clearTimeout(pending.timer)
+    pending.resolve({ ok: msg.ok, killed: msg.killed, error: msg.error })
+  }
+
   private failAllPending(reason: string): void {
     for (const [, p] of this.pendingCapabilities) {
       clearTimeout(p.timer)
@@ -996,6 +1090,11 @@ export class BrokerSupervisor {
       p.resolve({ ok: false, error: reason })
     }
     this.pendingCompactNow.clear()
+    for (const [, p] of this.pendingSubagentControl) {
+      clearTimeout(p.timer)
+      p.resolve({ ok: false, error: reason })
+    }
+    this.pendingSubagentControl.clear()
   }
 
   private disposeChild(): void {

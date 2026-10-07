@@ -1,6 +1,7 @@
 export type SubagentTaskStatus =
   | 'running'
   | 'awaiting_input'
+  | 'paused'
   | 'succeeded'
   | 'failed'
   | 'cancelled'
@@ -53,9 +54,10 @@ export type SyloSubagentHostEvent =
       files?: string[]
     }
   | {
+      /** Non-terminal: the operator paused this run; Start re-dispatches it in place. */
       type: 'subagent_run_end'
       runId: string
-      status: 'succeeded' | 'failed' | 'cancelled'
+      status: 'succeeded' | 'failed' | 'cancelled' | 'paused'
       resultText?: string
       thinking?: string
       model?: string
@@ -181,6 +183,7 @@ export type SubagentRunBoardRow = {
     | 'cancelled'
     | 'orphaned'
     | 'awaiting_input'
+    | 'paused'
   startedAt: number | null
   endedAt: number | null
   /** Provider/id resolved at dispatch (spec) or at finish (result), when known. */
