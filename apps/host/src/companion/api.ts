@@ -316,33 +316,6 @@ export async function fetchPersonalManifest(): Promise<PersonalManifest | null> 
   }
 }
 
-function ymdToday(): string {
-  const t = new Date()
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`
-}
-
-/** Today's personal entries for the chat landing screen (manifest-driven). */
-export async function fetchPersonalLandingEntries(
-  manifest: PersonalManifest,
-): Promise<CompanionPersonalEntry[]> {
-  if (!manifest.landing) return []
-  const { op, payload } = manifest.landing
-  const resolved = Object.fromEntries(
-    Object.entries(payload ?? {}).map(([k, v]) => [k, v === '$today' ? ymdToday() : v]),
-  )
-  const data = await apiFetch<{ result?: { entries?: CompanionPersonalEntry[] } | CompanionPersonalEntry[] }>(
-    '/api/personal/rpc',
-    {
-      method: 'POST',
-      body: JSON.stringify({ op, payload: resolved }),
-    },
-  )
-  const result = data.result
-  if (Array.isArray(result)) return result
-  return result?.entries ?? []
-}
-
 export type StreamHandlers = {
   onRefresh: (payload: { conversationId: string; kind: string }) => void
   onStream: (payload: { conversationId: string; messageId: string; delta: string }) => void

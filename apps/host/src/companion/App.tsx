@@ -27,10 +27,8 @@ import {
   setActiveWorkspace,
   uploadAttachment,
   restartSylo,
-  fetchPersonalLandingEntries,
   fetchPersonalManifest,
   type ChatAttachment,
-  type CompanionPersonalEntry,
   type PersonalManifest,
   type Conversation,
   type Message,
@@ -187,8 +185,7 @@ export function App(): React.ReactElement {
   const [busy, setBusy] = useState(false)
   const [loadingList, setLoadingList] = useState(false)
   const [companionTab, setCompanionTab] = useState<CompanionTab>('chat')
-  const [landingEntries, setLandingEntries] = useState<CompanionPersonalEntry[] | null>(null)
-  // Personal bundle manifest (null → no personal tabs / no landing card).
+  // Personal bundle manifest (null → no plugin tabs in the bottom bar).
   const [personalManifest, setPersonalManifest] = useState<PersonalManifest | null>(null)
   const pluginTabs = (personalManifest?.tabs ?? []).map((t) => ({
     id: t.id,
@@ -196,7 +193,6 @@ export function App(): React.ReactElement {
     icon: t.icon,
     appBase: t.appBase,
   }))
-  const [showChatsList, setShowChatsList] = useState(false)
   const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([])
   const flushQueueLockRef = useRef(false)
   const prevAgentActiveRef = useRef(false)
@@ -324,19 +320,10 @@ export function App(): React.ReactElement {
     }
   }, [])
 
-  const refreshPersonalLanding = useCallback(async () => {
-    const manifest = await fetchPersonalManifest()
-    setPersonalManifest(manifest)
-    if (!manifest) {
-      // No personal bundle installed — plain chat list, no personal tabs.
-      setLandingEntries(null)
-      return
-    }
-    try {
-      setLandingEntries(await fetchPersonalLandingEntries(manifest))
-    } catch {
-      setLandingEntries([])
-    }
+  const refreshPersonalManifest = useCallback(async () => {
+    // Personal bundle manifest drives the plugin bottom-nav tabs
+    // (Nutrition/Workout/…); null → no plugin tabs.
+    setPersonalManifest(await fetchPersonalManifest())
   }, [])
 
     const resyncFromServer = useCallback(async () => {
@@ -345,8 +332,8 @@ export function App(): React.ReactElement {
     const convId = activeIdRef.current
     if (wid) await loadConversations(wid, { silent: true })
     if (convId) await loadMessages(convId)
-    await refreshPersonalLanding()
-  }, [refreshBroker, loadConversations, loadMessages, refreshPersonalLanding])
+    await refreshPersonalManifest()
+  }, [refreshBroker, loadConversations, loadMessages, refreshPersonalManifest])
 
   const scrollChatToBottom = useCallback(() => {
     const el = scrollRef.current
@@ -372,9 +359,9 @@ export function App(): React.ReactElement {
     void (async () => {
       await loadWorkspaces()
       await refreshBroker()
-      await refreshPersonalLanding()
+      await refreshPersonalManifest()
     })()
-  }, [authenticated, loadWorkspaces, refreshBroker, refreshPersonalLanding])
+  }, [authenticated, loadWorkspaces, refreshBroker, refreshPersonalManifest])
 
   useEffect(() => {
     if (!authenticated || !workspaceId) return
@@ -414,7 +401,7 @@ export function App(): React.ReactElement {
             void loadMessages(activeId)
           }
                               if (payload.kind === 'turnFinished' && payload.conversationId !== activeId) {
-            void refreshPersonalLanding()
+            void refreshPersonalManifest()
             // Turn boundary: nothing is answerable anymore — clear pending questions so
             // the "?" badge cannot stick on a dead turn (same as desktop).
             clearAskQuestionPromptsForConversation(payload.conversationId)
@@ -476,7 +463,7 @@ export function App(): React.ReactElement {
         }
       },
     })
-  }, [authenticated, activeId, workspaceId, loadConversations, loadMessages, resyncFromServer, refreshPersonalLanding])
+  }, [authenticated, activeId, workspaceId, loadConversations, loadMessages, resyncFromServer, refreshPersonalManifest])
 
   useEffect(() => {
     if (!authenticated) return
@@ -984,49 +971,6 @@ export function App(): React.ReactElement {
     )
   }
 
-    const showPersonalLanding =
-    !activeId && companionTab === 'chat' && !showChatsList && (landingEntries?.length ?? 0) > 0
-
-  if (showPersonalLanding) {
-    return (
-      <div className="flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden">
-        <InstallHintBanner />
-        <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border bg-bg-secondary px-4 py-2.5">
-          <div className="min-w-0">
-            <h1 className="m-0 truncate text-base font-semibold">{personalManifest!.landing?.title ?? ''}</h1>
-            <p className="m-0 truncate text-xs text-text-secondary">
-              {landingEntries!.length === 1 ? landingEntries![0]?.title || personalManifest!.landing?.singleLabel || '' : `${landingEntries!.length} ${personalManifest!.landing?.countNoun ?? ''}`}
-            </p>
-          </div>
-          <button
-            type="button"
-            className="shrink-0 rounded-lg border border-border px-3 py-2 text-sm text-text-secondary"
-            onClick={() => setShowChatsList(true)}
-          >
-            Chats
-          </button>
-        </header>
-        <div className="flex min-h-0 flex-1 flex-col">
-          <iframe
-            key="chat-landing-personal"
-            src={`${personalManifest!.tabs[0]?.appBase ?? personalManifest!.appBase}?tab=${personalManifest!.tabs[0]?.id ?? ''}`}
-            title={personalManifest!.landing?.title ?? ''}
-            className="min-h-0 w-full flex-1 border-0 bg-bg-primary"
-          />
-        </div>
-        {showTabBar ?
-          <BottomTabBar
-            active={companionTab}
-            onChange={(tab) => {
-              setCompanionTab(tab)
-            }}
-            pluginTabs={pluginTabs}
-          />
-        : null}
-      </div>
-    )
-  }
-
   if (!activeId) {
     return (
       <div className="flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden">
@@ -1041,15 +985,6 @@ export function App(): React.ReactElement {
                 {brokerReady ? 'Desktop broker ready' : (brokerHint ?? 'Waiting for desktop broker')}
               </p>
             </div>
-            {(landingEntries?.length ?? 0) > 0 ? (
-              <button
-                type="button"
-                className="shrink-0 rounded-lg border border-border px-3 py-2 text-sm text-accent"
-                onClick={() => setShowChatsList(false)}
-              >
-                ← {personalManifest!.landing?.title ?? ''}
-              </button>
-            ) : null}
             <button type="button" className="shrink-0 text-sm text-text-secondary" onClick={() => void handleLogout()}>
               Log out
             </button>
