@@ -198,6 +198,14 @@ ensureCopyTree(
   'packages/sylo-chat-export/skills/chat-export',
   path.join(agent, 'skills', 'chat-export'),
 )
+ensureCopyTree(
+  'packages/sylo-image-gen/skills/image-gen',
+  path.join(agent, 'skills', 'image-gen'),
+)
+ensureCopyTree(
+  'packages/sylo-video-gen/skills/video-gen',
+  path.join(agent, 'skills', 'video-gen'),
+)
 
 for (const staleSkill of [
   'music-production',

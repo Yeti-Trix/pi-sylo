@@ -50,6 +50,18 @@ export function listActiveRunSummaries(): Array<{
   return out
 }
 
+/** Run ids still alive for a notify:"all" group — the escape hatch reconciles against
+ *  this: if no sibling of a held group is streaming anymore, no one can ever complete
+ *  the expected total and the held completions must be flushed instead of stuck. */
+export function activeRunsInGroup(groupRunId: string): string[] {
+  const out: string[] = []
+  for (const [runId, meta] of runMeta) {
+    if (!active.has(runId)) continue
+    if (meta.groupRunId === groupRunId) out.push(runId)
+  }
+  return out
+}
+
 export function consumeRunCancelled(runId: string): boolean {
   if (!cancelledRuns.has(runId)) return false
   cancelledRuns.delete(runId)

@@ -28,14 +28,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 
 let active: CompanionServerHandle | undefined
 const personalAppRoots = new Map<string, () => string>()
-let legacyPersonalAppRoot: (() => string) | null = null
 
 /** Register a plugin's companion static-app root. Scoped per plugin: mounted at
  *  /personal-app/<id>/ on the companion server. The first-registered root also
  *  serves the legacy unscoped /personal-app/ mount (pre-multi-plugin phone builds). */
 export function setPersonalAppRoot(fn: () => string, pluginId: string): void {
   personalAppRoots.set(pluginId, fn)
-  legacyPersonalAppRoot ??= fn
 }
 
 /** Built UI from `npm run build:companion` → `apps/host/out/companion/`. Main is a single bundle at `out/main/index.js`, so resolve from host package root — not `../../companion` (that misses `out/`). */
@@ -140,7 +138,11 @@ export async function restartCompanionServer(prefs?: CompanionPrefs): Promise<vo
       prefs: cfg,
       tls,
       userDataPath: app.getPath('userData'),
-      personalAppRoots: personalAppRoots.size > 0 ? Object.fromEntries(personalAppRoots) : undefined,
+      // Live read per request (server.ts resolves the getter on every
+      // /personal-app/* hit) so a plugin that registers its root AFTER the
+      // server started (async dynamic-import race at boot) still serves —
+      // no restart needed, and the blank plugin tabs cannot come back.
+      personalAppRoots: () => Object.fromEntries(personalAppRoots),
     })
         const urls = companionPublicUrls(
       cfg.port,

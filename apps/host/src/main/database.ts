@@ -52,8 +52,13 @@ export interface ConversationRow {
    * null or absent keys inherit the global Settings → Subagents pins.
    */
   subagent_models_json: string | null
-  /** Retention v2: ms timestamp when the chat was archived (auto or manual); NULL = active. */
+    /** Retention v2: ms timestamp when the chat was archived (auto or manual); NULL = active. */
   archived_at?: number | null
+  /** Sidebar pin: ms timestamp when the chat was pinned; NULL = not pinned. Pinned chats stay
+   *  above unpinned ones in their workspace section and are exempt from the auto-archive sweep. */
+  pinned_at?: number | null
+  /** Manual order among pinned chats (lower = higher). Only meaningful when pinned_at is set. */
+  pin_rank?: number | null
 }
 
 /** Sylo workspace: Pi cwd segment + chat grouping + optional per-workspace excluded capabilities. */
@@ -325,8 +330,18 @@ function migrateLegacySchema(d: Database.Database, userDataPath: string): void {
   // Auto-archive (retention v2): chats idle past the retention window are
   // archived (hidden from the sidebar, kept in the DB) instead of deleted.
   // ms timestamp of when it was archived; NULL = active.
-  if (!tableHasColumn(d, 'conversations', 'archived_at')) {
+    if (!tableHasColumn(d, 'conversations', 'archived_at')) {
     d.exec('ALTER TABLE conversations ADD COLUMN archived_at INTEGER')
+  }
+  // Sidebar pin (operator pins + drag ordering): ms timestamp of when the chat was
+  // pinned + manual rank among pinned chats. NULL pinned_at = not pinned. A pinned
+  // chat sorts to the top of its workspace section and is skipped by the
+  // auto-archive sweep entirely.
+  if (!tableHasColumn(d, 'conversations', 'pinned_at')) {
+    d.exec('ALTER TABLE conversations ADD COLUMN pinned_at INTEGER')
+  }
+  if (!tableHasColumn(d, 'conversations', 'pin_rank')) {
+    d.exec('ALTER TABLE conversations ADD COLUMN pin_rank INTEGER')
   }
 
 
@@ -765,39 +780,58 @@ export function resetPrimaryWorkspacePiProjectDir(): string {
 
 export function listConversations(workspaceId?: string): ConversationRow[] {
   // Side chats (parent_conversation_id set) never appear in the sidebar.
+  // Pinned chats sort above unpinned ones in their section (pin_rank ASC manual
+  // drag order), then the old recency order applies.
+  const ORDER =
+    'ORDER BY (conversations.pinned_at IS NULL) ASC, COALESCE(pin_rank, 2147483647) ASC, updated_at DESC'
+  const PIN_COLS = ', pinned_at, pin_rank'
   if (workspaceId === undefined) {
     return getDb()
       .prepare(
-        'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, subagent_models_json FROM conversations WHERE parent_conversation_id IS NULL AND archived_at IS NULL ORDER BY updated_at DESC',
+        `SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, subagent_models_json${PIN_COLS} FROM conversations WHERE parent_conversation_id IS NULL AND archived_at IS NULL ${ORDER}`,
       )
       .all() as ConversationRow[]
   }
   return getDb()
     .prepare(
-      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, subagent_models_json FROM conversations WHERE workspace_id = ? AND parent_conversation_id IS NULL AND archived_at IS NULL ORDER BY updated_at DESC',
+      `SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, subagent_models_json${PIN_COLS} FROM conversations WHERE workspace_id = ? AND parent_conversation_id IS NULL AND archived_at IS NULL ${ORDER}`,
     )
     .all(workspaceId) as ConversationRow[]
 }
 
-/** Non-archived, non-child conversations whose last activity is before the cutoff (used by the auto-archive sweep). */
+/** Non-archived, non-child conversations whose last activity is before the cutoff (used by the auto-archive sweep).
+ *  Pinned chats are exempt — pinning means "keep this visible", so the sweep never archives or
+ *  deletes them even past the retention window. */
+/** Title map across EVERY conversation (archived + side chats included) — the
+ *  global Agent panel rows reference conversations the sidebar listing filters
+ *  out; without this their owning-chat name degrades to an id tail. */
+export function listConversationTitlesAll(): { id: string; title: string }[] {
+  return getDb()
+    .prepare(`SELECT id, title FROM conversations`)
+    .all() as { id: string; title: string }[]
+}
+
 export function listConversationsUpdatedBefore(updatedBeforeMs: number): ConversationRow[] {
   return getDb()
     .prepare(
-      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, subagent_models_json FROM conversations WHERE updated_at < ? AND parent_conversation_id IS NULL AND archived_at IS NULL ORDER BY updated_at ASC',
+      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, subagent_models_json FROM conversations WHERE updated_at < ? AND parent_conversation_id IS NULL AND archived_at IS NULL AND pinned_at IS NULL ORDER BY updated_at ASC',
     )
     .all(updatedBeforeMs) as ConversationRow[]
 }
 
 /** Most recently touched conversation in the workspace with zero messages (reuse as "new chat"). */
 export function findLatestEmptyConversationId(workspaceId: string): string | undefined {
-  const wid = typeof workspaceId === 'string' ? workspaceId.trim() : ''
+    const wid = typeof workspaceId === 'string' ? workspaceId.trim() : ''
   if (!wid) return undefined
   const row = getDb()
     .prepare(
+      // Pinned chats are excluded: an operator-pinned empty chat must not be silently
+      // cannibalized as the "reuse as new chat" target by a New-chat click.
       `SELECT c.id FROM conversations c
        WHERE c.workspace_id = ?
        AND c.parent_conversation_id IS NULL
        AND c.archived_at IS NULL
+       AND c.pinned_at IS NULL
        AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
        ORDER BY c.updated_at DESC
        LIMIT 1`,
@@ -852,7 +886,7 @@ export function getLatestUserMessageFirstLine(conversationId: string): string | 
 export function getConversation(id: string): ConversationRow | undefined {
   return getDb()
     .prepare(
-      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, subagent_models_json, archived_at FROM conversations WHERE id = ?',
+      'SELECT id, title, created_at, updated_at, workspace_id, pi_session_relpath, model_provider, model_id, image_model_id, image_model_provider, thinking_level, subagent_models_json, archived_at, pinned_at, pin_rank FROM conversations WHERE id = ?',
     )
     .get(id) as ConversationRow | undefined
 }
@@ -888,6 +922,51 @@ export function setConversationArchived(id: string, archived: boolean): void {
   } else {
     d.prepare('UPDATE conversations SET archived_at = NULL, updated_at = ? WHERE id = ?').run(Date.now(), id)
   }
+}
+
+// ── Sidebar pin ─────────────────────────────────────────────────────────
+
+/**
+ * Pin or unpin a chat. A pinned chat sorts above unpinned chats in its workspace
+ * section and is exempt from the auto-archive sweep (see
+ * `listConversationsUpdatedBefore`). `pin_rank` is the manual drag order among
+ * pinned chats (lower = higher); a newly pinned chat attaches below existing pins.
+ * Manual archives still work on pinned chats — pinning only shields against the
+ * AUTOMATIC sweep, not the operator's own actions.
+ */
+export function setConversationPinned(id: string, pinned: boolean): void {
+  const d = getDb()
+  if (pinned) {
+    const row = d
+      .prepare('SELECT COALESCE(MAX(pin_rank), -1) AS m FROM conversations WHERE pinned_at IS NOT NULL')
+      .get() as { m: number }
+    d.prepare('UPDATE conversations SET pinned_at = ?, pin_rank = ? WHERE id = ?').run(
+      Date.now(),
+      row.m + 1,
+      id,
+    )
+  } else {
+    d.prepare('UPDATE conversations SET pinned_at = NULL, pin_rank = NULL WHERE id = ?').run(id)
+  }
+}
+
+/**
+ * Persist the manual drag order of pinned chats. `orderedIds` is the pinned
+ * chats of one workspace section in their new on-screen order; each gets
+ * pin_rank = index. Ids already unpinned (raced with an unpin) are skipped, and
+ * pinned chats of OTHER workspaces keep their ranks — sections don't collide
+ * into one global order.
+ */
+export function reorderPinnedConversations(orderedIds: string[]): void {
+  const ids = orderedIds.filter((id) => typeof id === 'string' && id)
+  if (ids.length === 0) return
+  const d = getDb()
+  const stmt = d.prepare(
+    'UPDATE conversations SET pin_rank = ? WHERE id = ? AND pinned_at IS NOT NULL',
+  )
+  d.transaction((list: string[]) => {
+    list.forEach((id, index) => stmt.run(index, id))
+  })(ids)
 }
 
 /** Archived top-level chats (side chats are never listed), most recently archived first. */
@@ -1403,6 +1482,34 @@ export function listMessages(conversationId: string): MessageRow[] {
       'SELECT id, conversation_id, role, content, tool_calls_json, status, created_at, original_text, edited FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC',
     )
     .all(conversationId) as MessageRow[]
+}
+
+export type ConversationWeightRow = {
+  id: string
+  title: string
+  row_count: number
+  payload_chars: number
+  biggest_chars: number
+}
+
+/** Perf probe (Developer → Testing): per-conversation chat-timeline weight
+ *  WITHOUT loading bodies — COUNT + SUM(LENGTH) aggregates only, so the probe
+ *  itself never stalls the app the way `listMessages` per chat would. */
+export function conversationWeightStats(limit = 12): ConversationWeightRow[] {
+  return getDb()
+    .prepare(
+      `SELECT m.conversation_id AS id,
+              COALESCE(c.title, '') AS title,
+              COUNT(*) AS row_count,
+              SUM(LENGTH(m.content) + LENGTH(COALESCE(m.tool_calls_json, ''))) AS payload_chars,
+              MAX(LENGTH(m.content) + LENGTH(COALESCE(m.tool_calls_json, ''))) AS biggest_chars
+       FROM messages m
+       LEFT JOIN conversations c ON c.id = m.conversation_id
+       GROUP BY m.conversation_id
+       ORDER BY payload_chars DESC
+       LIMIT ?`,
+    )
+    .all(Math.max(1, limit)) as ConversationWeightRow[]
 }
 
 /** created_at of one message, or null when the id is unknown. */

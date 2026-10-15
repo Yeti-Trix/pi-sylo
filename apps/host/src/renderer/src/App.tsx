@@ -14,7 +14,6 @@ import { convActivityStatus, type ConvActivityStatus } from './chat/conv-activit
 import { ChatComposer, type ChatComposerHandle } from './chat/ChatComposer'
 import { PLAN_MODE_NOTICE, planModePrefKey } from '../../shared/plan-mode.js'
 import { forwardDroppedFiles } from './chat/chatDropBus'
-import { ChatPlanGoalsBar } from './chat/ChatPlanGoalsBar'
 import { ChatModelBar } from './chat/ChatModelBar'
 import { CompactControl } from './chat/CompactControl'
 import { LiveElapsedLabel } from './chat/LiveElapsedLabel'
@@ -57,12 +56,13 @@ import { CanvasPopoutView } from './components/canvas/CanvasPopoutView'
 import { CanvasResizeHandle } from './components/canvas/CanvasResizeHandle'
 import { useCanvasTabs } from './components/canvas/useCanvasTabs'
 import { useTerminalSessions } from './components/canvas/useTerminalSessions'
-import type { AppTabKind } from './components/canvas/canvasTypes'
+import type { AppTabKind, SkillRouteTabPayload } from './components/canvas/canvasTypes'
 import { APP_TAB_KIND_LABEL, canvasTabLabel, tabKind } from './components/canvas/canvasTypes'
 import type { AtRefCanvasItem, AtRefTerminalItem } from './chat/ChatComposer'
 import { storedSrcForTab } from './components/canvas/BrowserPane'
 import {
   CHAT_PANE_SIZE_DEFAULT,
+  chatPaneMaxForWindow,
   chatPaneSizeForWindow,
   chatPaneSizeFromDrag,
   clampChatPaneSize,
@@ -70,7 +70,7 @@ import {
 import { SYLO_SKILL_SURFACE_CAPABILITY_DESCRIPTOR } from './skill-surface/hostCapabilityDescriptor'
 import { SkillSurfaceSandbox } from './skill-surface/iframe-host'
 import { CapabilityManagerPanel } from './panels/capability'
-import { EvalDashboardPanel } from './panels/EvalDashboardPanel'
+import { TestingPanel } from './panels/TestingPanel'
 import { ProposalsPanel } from './panels/ProposalsPanel'
 import { SchedulesPanel } from './panels/schedules/SchedulesPanel'
 import { CheckpointsPanel } from './panels/checkpoints/CheckpointsPanel'
@@ -106,9 +106,14 @@ import {
   btnPrimary,
   convActionBtn,
   convActionDanger,
+  convDropLine,
+  convPinGlyph,
   convRow,
   convRowActions,
+  convRowDragging,
+  convRowDraggable,
   convRowMain,
+  convRowPinned,
   convRowSelect,
   convRowSelectActive,
   convRowSelectLabel,
@@ -588,6 +593,29 @@ function detailsOpenFromToggleEvent(e: React.SyntheticEvent<HTMLDetailsElement>)
 
 type Tab = 'chat' | 'schedules' | 'checkpoints' | 'rules' | 'evals' | 'proposals' | 'skills' | 'settings' | 'skill-route'
 
+/** Dock-in-canvas affordance — generic folder/route matcher. Images proved
+ *  the docked-pane mount (the one dashboard originally verified); Videos joins
+ *  it per plan §6 ("the dock button mirrors Images") — both dock through the
+ *  GENERIC skill-route machinery (canvasTypes 'skill-route' + WidgetPane's
+ *  route branch + the sibling fan props); no new canvas kind. Widen this
+ *  predicate deliberately, one proven route at a time. */
+function isDockableImagesRoute(r: SkillRouteRow | null): boolean {
+  if (!r) return false
+  if (
+    r.skillFolderName.toLowerCase() === 'image-gen' &&
+    (r.routeId.toLowerCase() === 'images' || r.title.toLowerCase() === 'images')
+  ) {
+    return true
+  }
+  if (
+    r.skillFolderName.toLowerCase() === 'video-gen' &&
+    (r.routeId.toLowerCase() === 'videos' || r.title.toLowerCase() === 'videos')
+  ) {
+    return true
+  }
+  return false
+}
+
 type SkillRouteRow = {
   skillName: string
   skillFolderName: string
@@ -616,6 +644,10 @@ type Conv = {
   updated_at: number
   workspace_id: string | null
   pi_session_relpath: string | null
+  /** Sidebar pin (main-provided; also self-heals when absent on stale rows). */
+  pinned_at?: number | null
+  /** Manual drag order among pinned chats (lower = higher). */
+  pin_rank?: number | null
 }
 type WorkspaceRow = {
   id: string
@@ -658,6 +690,29 @@ type WorkspaceDropHint = { id: string; edge: 'before' | 'after' }
 function workspaceDropEdge(section: HTMLElement, clientY: number): 'before' | 'after' {
   const row = section.querySelector('summary')?.getBoundingClientRect() ?? section.getBoundingClientRect()
   return clientY < row.top + row.height / 2 ? 'before' : 'after'
+}
+
+/** Top half of a chat row = insert before; bottom half = after (mirrors workspaceDropEdge). */
+function convDropEdge(row: HTMLElement, clientY: number): 'before' | 'after' {
+  const rect = row.getBoundingClientRect()
+  return clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+}
+
+/**
+ * Sidebar order for the main chat list: pinned chats first (the drag-rank order),
+ * everything else by updated_at — the same rule the main SQL applies, re-implemented
+ * here so a dropped reorder can be painted optimistically without a full re-list.
+ */
+function sortConversationsPinnedFirst(list: Conv[], pinRank: Map<string, number>): Conv[] {
+  return [...list].sort((a, b) => {
+    const aPinned = a.pinned_at != null
+    const bPinned = b.pinned_at != null
+    if (aPinned && bPinned) {
+      return (pinRank.get(a.id) ?? 0) - (pinRank.get(b.id) ?? 0)
+    }
+    if (aPinned !== bPinned) return aPinned ? -1 : 1
+    return b.updated_at - a.updated_at
+  })
 }
 
 function scrollChatAreaToBottom(el: HTMLElement): void {
@@ -716,6 +771,16 @@ export function App(): React.ReactElement {
   const [dropHint, setDropHint] = useState<WorkspaceDropHint | null>(null)
   const dragWsIdRef = useRef<string | null>(null)
   const suppressWsToggleRef = useRef(false)
+  // Pinned-chat drag reorder: same HTML5 pattern as workspace sections, scoped to
+  // pinned rows. Only pinned rows are draggable AND are drop targets, so the drag
+  // never fights click-to-open or the workspace drag (refs disambiguate which drag
+  // is live; a conv drag starting must not trigger ws drop handlers and vice versa).
+  const [dragConvId, setDragConvId] = useState<string | null>(null)
+  const [convDropHint, setConvDropHint] = useState<WorkspaceDropHint | null>(null)
+  const dragConvIdRef = useRef<string | null>(null)
+  /** Workspace the live chat-drag started in — cross-workspace drags show no drop
+   *  line and no-op on drop (pins reorder within one section at a time). */
+  const dragConvWsRef = useRef<string>('')
   const [sidebarWorkspaceId, setSidebarWorkspaceId] = useState<string>('')
   /** Peek mode (Cursor-style): expanding a non-active workspace section just OPENS it to show
    *  that workspace's chats — expanding never switches the app. The old expand-to-switch was
@@ -1052,6 +1117,42 @@ export function App(): React.ReactElement {
   const [compactNowBusyId, setCompactNowBusyId] = useState<string | null>(null)
   /** Wall-clock moment the current manual compaction was requested (optimistic card). */
   const [compactNowTs, setCompactNowTs] = useState(0)
+
+  // ── sylo-image-gen change fan (§8 step 7) ────────────────────────────────
+  // Agent-side (broker child) library mutations → main
+  // `imagegen:library-changed` ipc → this state → SkillSurfaceSandbox
+  // `libraryChangedFan` prop → `libraryChanged` bridge event into the route
+  // iframe → the route refetches. New object per event = identity-based push.
+  const [imagegenLibraryFan, setImagegenLibraryFan] = useState<{
+    workspaceKey: string
+    reason: string
+  } | null>(null)
+  useEffect(() => {
+    const off = window.sylo.imagegen.onLibraryChanged(({ workspaceKey, reason }) => {
+      setImagegenLibraryFan({
+        workspaceKey: String(workspaceKey ?? ''),
+        reason: String(reason ?? ''),
+      })
+    })
+    return off
+  }, [])
+  // ── sylo-video-gen change fan twin (§5.5, §8 step 7 — CLONE of the imagegen
+  // fan above, NOT a generalization: a separate state + subscription on the
+  // `videogen:library-changed` channel; the payload carries the optional
+  // `source` tag). Same push choreography into the route sandbox.
+  const [videogenLibraryFan, setVideogenLibraryFan] = useState<{
+    workspaceKey: string
+    reason: string
+  } | null>(null)
+  useEffect(() => {
+    const off = window.sylo.videogen.onLibraryChanged(({ workspaceKey, reason }) => {
+      setVideogenLibraryFan({
+        workspaceKey: String(workspaceKey ?? ''),
+        reason: String(reason ?? ''),
+      })
+    })
+    return off
+  }, [])
   const chatTimeline = useMemo(() => {
     const base = buildChatTimeline({
       messages,
@@ -1332,6 +1433,7 @@ export function App(): React.ReactElement {
   const [convContextMenu, setConvContextMenu] = useState<{
     id: string
     title: string
+    pinned: boolean
     clientX: number
     clientY: number
   } | null>(null)
@@ -2218,6 +2320,7 @@ export function App(): React.ReactElement {
     openAgentBoardTab,
     openWidgetTab,
     openDiffTab,
+    openSkillRouteTab,
   } = useCanvasTabs({
     workspaceId: sidebarWorkspaceId,
     conversationId: activeId,
@@ -2233,18 +2336,38 @@ export function App(): React.ReactElement {
   // survive restarts — only kind, title, terminal cwd, last browser URL.
   useEffect(() => {
     if (!sidebarWorkspaceId) return
-    const pool = canvasTabs
+    type PoolRow =
+      | { kind: 'terminal' | 'browser'; title: string; terminalCwd?: string; browserUrl?: string; scrollback?: string }
+      | { kind: 'skill-route'; title: string; skillFolderName: string; routeId: string; fixturePath: string }
+    const pool: PoolRow[] = canvasTabs
       .map((t) => ({ t, k: tabKind(t) }))
-      .filter(({ k }) => k === 'terminal' || k === 'browser')
-      .map(({ t, k }) => ({
-        kind: k as 'terminal' | 'browser',
-        title: t.title ?? APP_TAB_KIND_LABEL[k],
-        terminalCwd:
-          k === 'terminal' ? terminals.get(t.id)?.cwd ?? workspaceCwdRef.current : undefined,
-        browserUrl: k === 'browser' ? storedSrcForTab(t.id) ?? t.browserUrl : undefined,
-        scrollback:
-          k === 'terminal' ? terminals.get(t.id)?.buffer.slice(-200_000) : undefined,
-      }))
+      .filter(({ k }) => k === 'terminal' || k === 'browser' || k === 'skill-route')
+      .flatMap(({ t, k }): PoolRow[] => {
+        if (k === 'skill-route') {
+          const r = t.skillRoute
+          if (!r) return []
+          return [
+            {
+              kind: 'skill-route' as const,
+              title: t.title ?? r.title,
+              skillFolderName: r.skillFolderName,
+              routeId: r.routeId,
+              fixturePath: r.fixturePath,
+            },
+          ]
+        }
+        return [
+          {
+            kind: k as 'terminal' | 'browser',
+            title: t.title ?? APP_TAB_KIND_LABEL[k],
+            terminalCwd:
+              k === 'terminal' ? terminals.get(t.id)?.cwd ?? workspaceCwdRef.current : undefined,
+            browserUrl: k === 'browser' ? storedSrcForTab(t.id) ?? t.browserUrl : undefined,
+            scrollback:
+              k === 'terminal' ? terminals.get(t.id)?.buffer.slice(-200_000) : undefined,
+          },
+        ]
+      })
     // v2 payload: active ws-pool tab id + terminal scrollback (last 200KB
     // per tab) survive restarts; pty sessions themselves restart fresh in
     // the saved cwd with the scrollback replayed as backlog.
@@ -2309,6 +2432,30 @@ export function App(): React.ReactElement {
       })
     },
     [closeCanvasTab, terminals],
+  )
+
+  /** Dock the current full-area route as a canvas tab (Images dashboards).
+   *  Creates a `skill-route` app-pane tab via the same pooled-open path
+   *  browser/terminal tabs use, then switches the full-area tab back to chat
+   *  — the operator asked for chat-left/dashboard-right, and mirroring the
+   *  pop-out flow's leave-the-tab UX means the header is no longer needed.
+   *  Route panes need no session disposal on close (the iframe dies with the
+   *  tab) — closeCanvasTab handles it like browsers. */
+  const dockSkillRouteInCanvas = useCallback(
+    (route: SkillRouteRow) => {
+      const payload: SkillRouteTabPayload = {
+        skillFolderName: route.skillFolderName,
+        routeId: route.routeId,
+        title: route.title,
+        fixturePath: route.fixturePath,
+      }
+      // Pool per workspace (browser semantics) + muted origin chip naming
+      // the chat that docked it — openAppsPaneTabWithSessions parity.
+      const origin = activeId ? (conversations.find((c) => c.id === activeId)?.title ?? '') : ''
+      openSkillRouteTab(payload, origin)
+      setTab('chat')
+    },
+    [openSkillRouteTab, activeId, conversations],
   )
   const closeCanvasTabWithSessions = useCallback(
     (tabId: string) => {
@@ -3926,7 +4073,78 @@ export function App(): React.ReactElement {
     setActiveId(id)
     setTab('chat')
     await refreshConversations()
+
+    // Pinned chats keep their pin across manual archive/unarchive — unarchive puts
+    // the chat right back at the top of its section where the pin parked it.
+    void refreshPinnedOrder()
   }
+
+  /** Pin or unpin a chat (right-click → Pin/Unpin). Pinned chats stay above unpinned
+   *  ones in their workspace section and are exempt from the auto-archive sweep; a
+   *  chat that is auto-archivable can never be archived behind the operator's back. */
+  const togglePinConversation = useCallback(
+    async (id: string, currentlyPinned: boolean) => {
+      await window.sylo.conversations.setPinned(id, !currentlyPinned)
+      await refreshConversations()
+    },
+    [refreshConversations],
+  )
+
+  /** Refetch the peeked-section rows after a pinned order changes under them. */
+  const refreshPinnedOrder = useCallback(async () => {
+    if (peekOpenWs.size === 0) return
+    for (const wsId of peekOpenWs) {
+      if (wsId === sidebarWorkspaceId) continue
+      try {
+        const list = (await window.sylo.conversations.list(wsId)) as Conv[]
+        setPeekConvsByWs((prev) => ({ ...prev, [wsId]: list }))
+      } catch {
+        /* keep previous peek rows */
+      }
+    }
+  }, [peekOpenWs, sidebarWorkspaceId])
+
+  /**
+   * Drop handler for the pinned-chat drag reorder (fromRow dropped onto toRow).
+   * Computes the new pinned order from the section's displayed rows, paints the
+   * ACTIVE workspace's list optimistically (peeked sections repaint via their own
+   * re-fetch), then persists pin_rank and refreshes peek snapshots for truth.
+   */
+  const reorderPinnedChats = useCallback(
+    async (
+      fromId: string,
+      toId: string,
+      edge: 'before' | 'after',
+      sectionRows: Conv[],
+      sectionWsId: string,
+    ) => {
+      const pinned = sectionRows.filter((c) => c.pinned_at != null)
+      const fromIdx = pinned.findIndex((c) => c.id === fromId)
+      const toIdxRaw = pinned.findIndex((c) => c.id === toId)
+      if (fromIdx < 0 || toIdxRaw < 0) return
+      let toIdx = edge === 'after' ? toIdxRaw + 1 : toIdxRaw
+      const next = [...pinned]
+      const [moved] = next.splice(fromIdx, 1)
+      if (fromIdx < toIdx) toIdx -= 1
+      if (toIdx === fromIdx) return
+      next.splice(toIdx, 0, moved)
+      const pinRank = new Map(next.map((c, i) => [c.id, i] as const))
+      // Optimistic paint — but ONLY for the active workspace's list (the global
+      // `conversations` state belongs to it); a peeked section's rows live elsewhere.
+      if (sectionWsId === sidebarWorkspaceId) {
+        setConversations((prev) => sortConversationsPinnedFirst(prev, pinRank))
+      }
+      const res = await window.sylo.conversations.reorderPinned(next.map((c) => c.id))
+      if (!res.ok) {
+        // Re-list (DB order wins) and leave the peek snapshots for the next refresh.
+        await refreshConversations()
+        return
+      }
+      // Peeked sections re-fetch (their rows were reordered in the DB just now).
+      await refreshPinnedOrder()
+    },
+    [refreshConversations, refreshPinnedOrder, sidebarWorkspaceId],
+  )
 
   /** Bulk: unarchive every archived chat in the workspace (no chat is opened). */
   const restoreAllArchived = async () => {
@@ -4053,9 +4271,13 @@ export function App(): React.ReactElement {
     const bridgeTargetRoute = routePopoutKey ? popoutRoute : activeSkillRoute
 
   const handleSkillRouteBridge = useCallback(
-    async (op: SkillRouteBridgeOp, payload: unknown) => {
+    async (op: SkillRouteBridgeOp, payload: unknown, routeOverride?: Pick<SkillRouteRow, 'skillFolderName' | 'routeId'>) => {
       op = normalizeSkillRouteBridgeOp(op)
-      const route = bridgeTargetRoute
+      // RouteOverride: docked canvas route tabs pin their OWN route row (see
+      // `skillRouteBridgeFor` below) — the default target resolves whatever
+      // full-area/pop-out route is active, which is wrong while several
+      // routes are open at once.
+      const route = routeOverride ?? bridgeTargetRoute
       if (!route) throw new Error('no_active_route')
       const sk = route.skillFolderName
       if (op === 'ping') {
@@ -4447,6 +4669,220 @@ export function App(): React.ReactElement {
         if (!r.ok) throw new Error(r.error)
         return r
       }
+      // ── sylo-image-gen Images route (plan §5.6, §8 step 5) ────────────────
+      // The dashboard iframe is workspace-scoped like the tasks ops: the host
+      // injects the active workspace's resolved cwd into every call so the
+      // route itself never resolves it (imagegen-host then calls the SAME
+      // shared/* store modules the agent tools use — doctor parity).
+      if (
+        op === 'imageGenStatus' ||
+        op === 'imageGenConfigGet' ||
+        op === 'imageGenConfigSave' ||
+        op === 'imageGenGenerate' ||
+        op === 'imageGenJobGet' ||
+        op === 'imageGenQueueList' ||
+        op === 'imageGenLibraryList' ||
+        op === 'imageGenImageGet' ||
+        op === 'imageGenImageUpdate' ||
+        op === 'imageGenImageDelete' ||
+        op === 'imageGenRevealFile'
+      ) {
+        const wid = sidebarWorkspaceId.trim()
+        const hit = workspaces.find((w) => w.id === wid)
+        const workspaceCwd = (hit?.resolved_pi_cwd ?? diagnostics.resolvedHostPiCwd ?? '').trim()
+        const p = (payload ?? {}) as Record<string, unknown>
+        const withCwd = { ...p, workspaceCwd }
+        if (op === 'imageGenStatus')
+          return await window.sylo.imagegen.status({
+            workspaceCwd,
+            with_models: p.with_models === true,
+          })
+        if (op === 'imageGenConfigGet') return await window.sylo.imagegen.configGet()
+        if (op === 'imageGenConfigSave') {
+          const v = (p.values ?? p) as Record<string, unknown>
+          const r = await window.sylo.imagegen.configSave(v ?? {})
+          if (!r.ok) throw new Error(r.error)
+          return r
+        }
+        if (op === 'imageGenGenerate') {
+          const req = (p.request && typeof p.request === 'object' ? p.request : {}) as Record<string, unknown>
+          const r = await window.sylo.imagegen.generate({ workspaceCwd, request: req })
+          if (!r.ok) throw new Error(r.error)
+          return r.job
+        }
+        if (op === 'imageGenJobGet') {
+          const r = await window.sylo.imagegen.jobGet({ job_id: String(p.job_id ?? '') })
+          if (!r.ok) throw new Error(r.error)
+          return r.job
+        }
+        if (op === 'imageGenQueueList') {
+          const r = await window.sylo.imagegen.queueList({ workspaceCwd })
+          if (!r.ok) throw new Error(r.error)
+          return r
+        }
+        if (op === 'imageGenLibraryList') {
+          const r = await window.sylo.imagegen.libraryList(withCwd)
+          if (!r.ok) throw new Error(r.error)
+          return r
+        }
+        if (op === 'imageGenImageGet') {
+          const r = await window.sylo.imagegen.imageGet({
+            workspaceCwd,
+            image_id: String(p.image_id ?? ''),
+          })
+          // Host resolves a missing id as null (record deleted e.g. during refresh).
+          if (r === null || !r.ok)
+            throw new Error((r as { error?: string } | null)?.error ?? 'image_not_found')
+          return r
+        }
+        if (op === 'imageGenImageUpdate') {
+          const r = await window.sylo.imagegen.imageUpdate({
+            workspaceCwd,
+            image_id: String(p.image_id ?? ''),
+            ...(Array.isArray(p.add_tags) ? { add_tags: p.add_tags as string[] } : {}),
+            ...(Array.isArray(p.remove_tags) ? { remove_tags: p.remove_tags as string[] } : {}),
+            ...(typeof p.favorite === 'boolean' ? { favorite: p.favorite } : {}),
+          })
+          if (!r.ok) throw new Error(r.error)
+          return r
+        }
+        if (op === 'imageGenImageDelete') {
+          const r = await window.sylo.imagegen.imageDelete({
+            workspaceCwd,
+            image_id: String(p.image_id ?? ''),
+          })
+          if (!r.ok) throw new Error(r.error)
+          return r
+        }
+        const reveal = await window.sylo.imagegen.revealFile({
+          workspaceCwd,
+          image_id: String((p as { image_id?: unknown }).image_id ?? ''),
+        })
+        if (!reveal.ok) throw new Error(reveal.error)
+        return reveal
+      }
+      // ── sylo-video-gen Videos route (plan §5, §8 step 7) ─────────────────
+      // CLONE of the imageGen* arm above over `window.sylo.videogen` → the
+      // `videogen:*` IPC handlers (videogen-host.ts composes the shared video
+      // modules the agent tools use — doctor parity). Additive names per the
+      // §4.3 durable-ledger divergence: videoGenJobsList (ledger query),
+      // videoGenJobsReplay (read-only ComfyUI /history re-poll — never
+      // resubmits), videoGenDoctor (Settings health card = status with the
+      // doctor's model probe).
+      if (
+        op === 'videoGenStatus' ||
+        op === 'videoGenConfigGet' ||
+        op === 'videoGenConfigSave' ||
+        op === 'videoGenGenerate' ||
+        op === 'videoGenJobGet' ||
+        op === 'videoGenQueueList' ||
+        op === 'videoGenJobsList' ||
+        op === 'videoGenJobsReplay' ||
+        op === 'videoGenDoctor' ||
+        op === 'videoGenLibraryList' ||
+        op === 'videoGenVideoGet' ||
+        op === 'videoGenVideoUpdate' ||
+        op === 'videoGenVideoDelete' ||
+        op === 'videoGenRevealFile'
+      ) {
+        const wid = sidebarWorkspaceId.trim()
+        const hit = workspaces.find((w) => w.id === wid)
+        const workspaceCwd = (hit?.resolved_pi_cwd ?? diagnostics.resolvedHostPiCwd ?? '').trim()
+        const p = (payload ?? {}) as Record<string, unknown>
+        const withCwd = { ...p, workspaceCwd }
+        if (op === 'videoGenStatus')
+          return await window.sylo.videogen.status({
+            workspaceCwd,
+            with_models: p.with_models === true,
+          })
+        if (op === 'videoGenDoctor')
+          // The Settings health card's doctor pass — status + the model/node probe.
+          return await window.sylo.videogen.status({
+            workspaceCwd,
+            with_models: true,
+          })
+        if (op === 'videoGenConfigGet') return await window.sylo.videogen.configGet()
+        if (op === 'videoGenConfigSave') {
+          const v = (p.values ?? p) as Record<string, unknown>
+          const r = await window.sylo.videogen.configSave(v ?? {})
+          if (!r.ok) throw new Error(r.error)
+          return r
+        }
+        if (op === 'videoGenGenerate') {
+          const req = (p.request && typeof p.request === 'object' ? p.request : {}) as Record<string, unknown>
+          const r = await window.sylo.videogen.generate({ workspaceCwd, request: req })
+          if (!r.ok) throw new Error(r.error)
+          return r.job
+        }
+        if (op === 'videoGenJobGet') {
+          const r = await window.sylo.videogen.jobGet({ workspaceCwd, job_id: String(p.job_id ?? '') })
+          if (!r.ok) throw new Error(r.error)
+          return r.job
+        }
+        if (op === 'videoGenQueueList') {
+          const r = await window.sylo.videogen.queueList({ workspaceCwd })
+          if (!r.ok) throw new Error(r.error)
+          return r
+        }
+        if (op === 'videoGenJobsList') {
+          const r = await window.sylo.videogen.jobsList({
+            workspaceCwd,
+            ...(typeof (p as { status?: unknown }).status === 'string' ? { status: (p as { status?: unknown }).status as string } : {}),
+            ...(typeof (p as { limit?: unknown }).limit === 'number' ? { limit: (p as { limit?: unknown }).limit as number } : {}),
+            ...(typeof (p as { offset?: unknown }).offset === 'number' ? { offset: (p as { offset?: unknown }).offset as number } : {}),
+          })
+          if (!r.ok) throw new Error(r.error)
+          return r
+        }
+        if (op === 'videoGenJobsReplay') {
+          const r = await window.sylo.videogen.jobsReplay({ workspaceCwd })
+          if (!r.ok) throw new Error(r.error)
+          return r
+        }
+        if (op === 'videoGenLibraryList') {
+          const r = await window.sylo.videogen.libraryList(withCwd)
+          if (!r.ok) throw new Error(r.error)
+          return r
+        }
+        if (op === 'videoGenVideoGet') {
+          const r = await window.sylo.videogen.videoGet({
+            workspaceCwd,
+            video_id: String(p.video_id ?? ''),
+          })
+          // Host resolves a missing id as null (record deleted e.g. during refresh).
+          if (r === null || !r.ok)
+            throw new Error((r as { error?: string } | null)?.error ?? 'video_not_found')
+          return r
+        }
+        if (op === 'videoGenVideoUpdate') {
+          const r = await window.sylo.videogen.videoUpdate({
+            workspaceCwd,
+            video_id: String(p.video_id ?? ''),
+            ...(Array.isArray(p.add_tags) ? { add_tags: p.add_tags as string[] } : {}),
+            ...(Array.isArray(p.remove_tags) ? { remove_tags: p.remove_tags as string[] } : {}),
+            ...(typeof p.favorite === 'boolean' ? { favorite: p.favorite } : {}),
+          })
+          if (!r.ok) throw new Error(r.error)
+          return r
+        }
+        if (op === 'videoGenVideoDelete') {
+          const r = await window.sylo.videogen.videoDelete({
+            workspaceCwd,
+            video_id: String(p.video_id ?? ''),
+          })
+          if (!r.ok) throw new Error(r.error)
+          return r
+        }
+        const reveal = await window.sylo.videogen.revealFile({
+          workspaceCwd,
+          video_id: String((p as { video_id?: unknown }).video_id ?? ''),
+          ...(typeof (p as { kind?: unknown }).kind === 'string'
+            ? { kind: (p as { kind?: unknown }).kind as 'clip' | 'poster' }
+            : {}),
+        })
+        if (!reveal.ok) throw new Error(reveal.error)
+        return reveal
+      }
       if (op === 'thinkTankConfigGet') {
         return await window.sylo.thinkTank.configGet()
       }
@@ -4523,6 +4959,17 @@ export function App(): React.ReactElement {
     ],
   )
 
+  /** Per-tab docked-route bridge factory: pins the shared skill-route bridge
+   *  to the TAB's own route row (SkillRouteTabPayload carries exactly the
+   *  fields the handler reads — skillFolderName + routeId) so a docked
+   *  dashboard keeps its identity even while other routes are open
+   *  full-area or in pop-out windows. */
+  const skillRouteBridgeFor = useCallback(
+    (route: SkillRouteTabPayload) => (op: SkillRouteBridgeOp, payload: unknown) =>
+      handleSkillRouteBridge(op, payload, route),
+    [handleSkillRouteBridge],
+  )
+
   const endSidebarResize = useCallback((clientX: number) => {
     const drag = sidebarResizeRef.current
     if (!drag) return
@@ -4560,16 +5007,23 @@ export function App(): React.ReactElement {
     e.currentTarget.releasePointerCapture(e.pointerId)
   }
 
-    const endCanvasResize = useCallback((clientX: number) => {
+    // Largest chat-pane size this render: leave room left of the workbench for
+  // the sidebar, then the canvas's minimum strip. Without this the legacy
+  // chatPaneSizeFromDrag clamp (hard 960px) pinned the canvas at
+  // windowWidth − 960 on wide monitors — it could never shrink past that.
+  const chatPaneCeil = () =>
+    chatPaneMaxForWindow(window.innerWidth, sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth)
+
+  const endCanvasResize = useCallback((clientX: number) => {
     const drag = canvasResizeRef.current
     if (!drag) return
-    const next = chatPaneSizeFromDrag(drag.startSize, drag.startX, clientX)
+    const next = chatPaneSizeFromDrag(drag.startSize, drag.startX, clientX, chatPaneCeil())
     setChatPaneSize(next)
     void window.sylo.prefs.set('sylo.chat.workbench_width', next)
     canvasResizeRef.current = null
     document.body.style.cursor = ''
     document.body.style.userSelect = ''
-  }, [])
+  }, [sidebarCollapsed, sidebarWidth])
 
   const onCanvasResizePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault()
@@ -4586,7 +5040,7 @@ export function App(): React.ReactElement {
   const onCanvasResizePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const drag = canvasResizeRef.current
     if (!drag || e.pointerId !== drag.pointerId) return
-    setChatPaneSize(chatPaneSizeFromDrag(drag.startSize, drag.startX, e.clientX))
+    setChatPaneSize(chatPaneSizeFromDrag(drag.startSize, drag.startX, e.clientX, chatPaneCeil()))
   }
 
   const onCanvasResizePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -4967,12 +5421,83 @@ export function App(): React.ReactElement {
                     {(wsActive ? wsConvs : (peekConvsByWs[ws.id] ?? [])).map((c) => {
             const selected = c.id === activeId
             const activity = convActivityStatus(c.id, sendingConvIds, unreadConvIds, questionConvIds)
+            // Sidebar pin: pinned rows stay above unpinned ones (main-provided order),
+            // show a pin glyph, and drag-reorder among themselves. Reordering is
+            // suspended while the search filter is active (rows on screen are a
+            // filtered subset — ranks computed from them would be wrong).
+            const isPinned = c.pinned_at != null
+            const canReorderPin = isPinned && !searching
+            const pinDropLineHere = dragConvId !== null && dragConvId !== c.id && convDropHint?.id === c.id
+            // The section's rows (same expression the map and the empty-check use);
+            // the drop handler needs it to compute the new pinned order.
+            const sectionRows: Conv[] = wsActive ? wsConvs : (peekConvsByWs[ws.id] ?? [])
             return (
             <div
               key={c.id}
-              className={cn(convRow, selected ? convRowSelected : 'hover:bg-bg-tertiary')}
+              data-conv-id={c.id}
+              className={cn(
+                convRow,
+                'relative',
+                selected ? convRowSelected : 'hover:bg-bg-tertiary',
+                isPinned && convRowPinned,
+                canReorderPin && convRowDraggable,
+                dragConvId === c.id && convRowDragging,
+              )}
               role="presentation"
+              draggable={canReorderPin}
+              onDragStart={(e) => {
+                if (!canReorderPin) {
+                  e.preventDefault()
+                  return
+                }
+                e.dataTransfer.setData('text/plain', c.id)
+                e.dataTransfer.effectAllowed = 'move'
+                e.dataTransfer.setDragImage(e.currentTarget, 12, 10)
+                dragConvIdRef.current = c.id
+                dragConvWsRef.current = ws.id
+                setDragConvId(c.id)
+              }}
+              onDragEnd={() => {
+                dragConvIdRef.current = null
+                dragConvWsRef.current = ''
+                setDragConvId(null)
+                setConvDropHint(null)
+              }}
+              onDragOver={(e) => {
+                if (!canReorderPin) return
+                const fromId = dragConvIdRef.current
+                if (!fromId || fromId === c.id) return
+                if (dragConvWsRef.current !== ws.id) return
+                e.preventDefault()
+                e.stopPropagation()
+                e.dataTransfer.dropEffect = 'move'
+                const edge = convDropEdge(e.currentTarget, e.clientY)
+                if (convDropHint?.id !== c.id || convDropHint.edge !== edge) {
+                  setConvDropHint({ id: c.id, edge })
+                }
+              }}
+              onDragLeave={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node | null) && convDropHint?.id === c.id) {
+                  setConvDropHint(null)
+                }
+              }}
+              onDrop={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                const fromId = dragConvIdRef.current
+                const sameWs = dragConvWsRef.current === ws.id
+                dragConvIdRef.current = null
+                dragConvWsRef.current = ''
+                setDragConvId(null)
+                setConvDropHint(null)
+                if (!fromId || fromId === c.id || !sameWs) return
+                const edge = convDropEdge(e.currentTarget, e.clientY)
+                void reorderPinnedChats(fromId, c.id, edge, sectionRows, ws.id)
+              }}
             >
+              {pinDropLineHere && convDropHint.edge === 'before' ? (
+                <div className={cn(convDropLine, 'top-0')} aria-hidden="true" />
+              ) : null}
               <div className={convRowMain}>
                 <button
                   type="button"
@@ -5003,11 +5528,15 @@ export function App(): React.ReactElement {
                     setConvContextMenu({
                       id: c.id,
                       title: c.title ?? '',
+                      pinned: c.pinned_at != null,
                       clientX: e.clientX,
                       clientY: e.clientY,
                     })
                   }}
                 >
+                  {isPinned ? (
+                    <PinGlyph className={convPinGlyph} />
+                  ) : null}
                                     <ConvStatusIndicator status={activity} />
                   <span
                     className={cn(
@@ -5076,6 +5605,9 @@ export function App(): React.ReactElement {
                   </button>
                 </div>
               </div>
+              {pinDropLineHere && convDropHint.edge === 'after' ? (
+                <div className={cn(convDropLine, 'bottom-0')} aria-hidden="true" />
+              ) : null}
             </div>
             )
           })}
@@ -5122,7 +5654,7 @@ export function App(): React.ReactElement {
             return archivedConversations.length > 0 ? (
             <details
               className={cn(sidebarWsSection, 'mt-1 border-t border-border/50 pt-1')}
-              title="Chats idle for 30+ days are archived here automatically — nothing is deleted"
+              title="Chats idle for 30+ days are archived here automatically — nothing is deleted. Pinned chats are never auto-archived."
               open={aq ? true : undefined}
             >
               <summary className={cn(sidebarWsSectionSummary, 'text-text-muted')}>
@@ -5414,8 +5946,16 @@ export function App(): React.ReactElement {
                 <div
                   className={cn(chatPane, 'min-w-0 shrink-0')}
                   style={{
-                    width: chatPaneSizeForWindow(chatPaneSize, window.innerWidth),
-                    flex: `0 0 ${chatPaneSizeForWindow(chatPaneSize, window.innerWidth)}px`,
+                    width: chatPaneSizeForWindow(
+                      chatPaneSize,
+                      window.innerWidth,
+                      sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth,
+                    ),
+                    flex: `0 0 ${chatPaneSizeForWindow(
+                      chatPaneSize,
+                      window.innerWidth,
+                      sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth,
+                    )}px`,
                   }}
                 >
                   <div
@@ -5551,6 +6091,10 @@ export function App(): React.ReactElement {
                   }}
                   terminals={terminals}
                   sideChatParentId={activeId ?? null}
+                  skillRouteBridgeFor={skillRouteBridgeFor}
+                  skillRouteHostPiCwd={activeWorkspaceForSettings.resolvedPiCwd}
+                  skillRouteLibraryFan={imagegenLibraryFan}
+                  skillRouteVideoLibraryFan={videogenLibraryFan}
                   onUpdatePayload={(p) => updateActiveCanvasSnapshot(() => p)}
                                     className="min-w-0 flex-1"
                   sketchBackupRef={sketchBackupRef}
@@ -5690,7 +6234,6 @@ export function App(): React.ReactElement {
               </div>
             )
             }
-            <ChatPlanGoalsBar conversationId={activeId} />
             <ChatComposer
               ref={composerRef}
               activeId={activeId}
@@ -5762,7 +6305,7 @@ export function App(): React.ReactElement {
 
         {tab === 'evals' && (
           <div className={panelShell}>
-            <EvalDashboardPanel />
+            <TestingPanel />
           </div>
         )}
 
@@ -5799,12 +6342,30 @@ export function App(): React.ReactElement {
 
         {tab === 'skill-route' && activeSkillRoute ?
           <div className={cn(panelShell, 'flex min-h-0 flex-col')}>
-            <header className="mb-2 shrink-0">
-              <h2 className={panelTitle}>{activeSkillRoute.title}</h2>
-              <p className={cn(mutedText, 'm-0 text-[0.74rem]')}>
-                <code>{activeSkillRoute.skillFolderName}</code> /{' '}
-                <code>{activeSkillRoute.routeId}</code>
-              </p>
+            <header className="mb-2 flex shrink-0 items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h2 className={panelTitle}>{activeSkillRoute.title}</h2>
+                <p className={cn(mutedText, 'm-0 text-[0.74rem]')}>
+                  <code>{activeSkillRoute.skillFolderName}</code> /{' '}
+                  <code>{activeSkillRoute.routeId}</code>
+                </p>
+              </div>
+              {/* Dock in canvas: for the Images + Videos dashboards (see
+                  isDockableImagesRoute — widened per plan §6 for Videos, same
+                  generic skill-route machinery) — moves the route into a pooled
+                  `skill-route` canvas tab so chat stays visible on the left;
+                  full-area tab switches back to chat, mirroring the pop-out
+                  flow's leave-the-chat-usable UX. */}
+              {isDockableImagesRoute(activeSkillRoute) ?
+                <button
+                  type="button"
+                  className={cn(btnGhostSm, 'shrink-0')}
+                  title="Dock this dashboard as a canvas tab — chat stays on the left and survives restarts"
+                  onClick={() => dockSkillRouteInCanvas(activeSkillRoute)}
+                >
+                  Dock in canvas
+                </button>
+              : null}
             </header>
             <SkillSurfaceSandbox
               key={`${activeSkillRoute.skillFolderName}:${activeSkillRoute.routeId}`}
@@ -5814,6 +6375,8 @@ export function App(): React.ReactElement {
               widgetData={{}}
               compactChrome
               hostPiCwd={activeWorkspaceForSettings.resolvedPiCwd}
+              libraryChangedFan={imagegenLibraryFan}
+              videogenLibraryChangedFan={videogenLibraryFan}
               onSkillBridgeRpc={handleSkillRouteBridge}
               onBridgeReject={() => {}}
               onError={() => {}}
@@ -7208,6 +7771,8 @@ export function App(): React.ReactElement {
               title={popoutRoute.title}
               widgetData={{}}
               hostPiCwd={activeWorkspaceForSettings.resolvedPiCwd}
+              libraryChangedFan={imagegenLibraryFan}
+              videogenLibraryChangedFan={videogenLibraryFan}
               onSkillBridgeRpc={handleSkillRouteBridge}
               onBridgeReject={() => {}}
               onError={() => {}}
@@ -7272,6 +7837,19 @@ export function App(): React.ReactElement {
               role="menu"
               onMouseDown={(e) => e.stopPropagation()}
             >
+              <button
+                type="button"
+                className={routeCtxItem}
+                role="menuitem"
+                title="Pinned chats stay at the top of their section, keep their manual order, and are never auto-archived"
+                onClick={() => {
+                  const { id, pinned } = convContextMenu
+                  setConvContextMenu(null)
+                  void togglePinConversation(id, pinned)
+                }}
+              >
+                {convContextMenu.pinned ? 'Unpin' : 'Pin'}
+              </button>
               <button
                 type="button"
                 className={routeCtxItem}

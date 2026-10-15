@@ -27,6 +27,8 @@ import { TerminalPane } from './TerminalPane'
 import { WidgetPane } from './WidgetPane'
 import { DiffPane } from './DiffPane'
 import type { TerminalRegistry } from './useTerminalSessions'
+import type { SkillRouteTabPayload } from './canvasTypes'
+import type { SkillRouteBridgeOp } from '../../skill-surface/bridge'
 
 // `+` picker entries (lucide-style stroke icons, 16px). Module-level so the
 // JSX isn't rebuilt every render.
@@ -147,6 +149,17 @@ type Props = {
   terminals?: TerminalRegistry
   /** Active conversation id — parent for side-chat panes (null → placeholder). */
   sideChatParentId?: string | null
+  /** Docked skill-route tabs (e.g. the Images dashboard): App-level ws
+   *  context threaded down to WidgetPane's route branch. `bridgeFor` pins the
+   *  REAL route bridge to each tab's own route row. Route branch never needs
+   *  WidgetTabPayload's view-only log — see WidgetPane.tsx. */
+  skillRouteBridgeFor?: (
+    route: SkillRouteTabPayload,
+  ) => (op: SkillRouteBridgeOp, payload: unknown) => Promise<unknown>
+  skillRouteHostPiCwd?: string
+  skillRouteLibraryFan?: { workspaceKey: string; reason: string } | null
+  /** Route-only: videogen twin of `skillRouteLibraryFan` (plan §5.5, §8 step 7 — sibling fan threaded to WidgetPane). */
+  skillRouteVideoLibraryFan?: { workspaceKey: string; reason: string } | null
     /** Replace the currently shown snapshot payload — used by Refresh after
  *  re-reading a file-backed view from disk. */
   onUpdatePayload?: (p: CanvasPayload) => void
@@ -180,6 +193,10 @@ export function CanvasPanel({
   onAddTab,
   terminals,
   sideChatParentId,
+  skillRouteBridgeFor,
+  skillRouteHostPiCwd,
+  skillRouteLibraryFan,
+  skillRouteVideoLibraryFan,
     onUpdatePayload,
   onOpenChat,
 }: Props): React.ReactElement {
@@ -741,6 +758,30 @@ export function CanvasPanel({
               )}
             >
               <WidgetPane widget={t.widget} />
+            </div>
+          ))
+      : null}
+      {/* Skill-route panes stay mounted (hidden, like browsers/widgets) so
+          dashboard iframe state survives tab switches. Route panes reuse
+          WidgetPane's route branch — same mount block, distinct kind+payload. */}
+      {variant === 'docked' ?
+        (tabs ?? [])
+          .filter((t) => tabKind(t) === 'skill-route')
+          .map((t) => (
+            <div
+              key={t.id}
+              className={cn(
+                'min-h-0 min-w-0 flex-1',
+                t.id === activeTabId && activeKind === 'skill-route' ? 'flex' : 'hidden',
+              )}
+            >
+              <WidgetPane
+                skillRoute={t.skillRoute}
+                skillRouteBridge={skillRouteBridgeFor && t.skillRoute ? skillRouteBridgeFor(t.skillRoute) : undefined}
+                skillRouteHostPiCwd={skillRouteHostPiCwd}
+                skillRouteLibraryFan={skillRouteLibraryFan}
+                skillRouteVideoLibraryFan={skillRouteVideoLibraryFan}
+              />
             </div>
           ))
       : null}

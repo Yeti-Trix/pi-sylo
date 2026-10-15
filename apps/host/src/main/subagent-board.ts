@@ -18,10 +18,25 @@ export { firstTaskLine } from './subagent-text.js'
  * boards are EXEMPT from the all-finished auto-dispose below — a manually opened
  * empty panel must not blank itself.
  *
- * Per-workspace registry (same restore-on-return model as task boards): each
- * workspace has at most one runs board; it rebinds only when a prior board was
- * disposed. `updateSubagentBoard` drops a board once the workspace has no runs left
- * at all, so the canvas clears instead of freezing at a stale list.
+ * v4 (2026-10-12): operator request — the Agent panel is GLOBAL: one board
+ * (keyed `GLOBAL_BOARD_KEY`) listing agents/subagents from EVERY workspace, so
+ * the panel reads the same whichever workspace's chat is focused. The registry
+ * stays key-based (still exactly one board); every key passed at runtime is the
+ * global one. Snapshot content lives in `buildGlobalRunsSnapshot` (index.ts);
+ * the agent-side `sylo_runs_list` RPC stays workspace-scoped — its contract is
+ * "what is this workspace's own work doing", which a global list would drown.
+ *
+ * Shared liveId across workspace buckets (renderer): each workspace's canvas
+ * `w:` bucket can hold its own Agent tab, but tabs in every bucket point at the
+ * same board liveId, and `canvas:live-update` fans out by liveId to ANY scope —
+ * so all open panels update together and a workspace switch re-subscribes the
+ * new bucket's tab with fresh data (`sub.data` is kept current even while the
+ * renderer is unsubscribed).
+ *
+ * Registry (same restore-on-return model as task boards): the map holds at most
+ * the one global board; it rebinds only when a prior board was disposed.
+ * `updateSubagentBoard` drops the board once its snapshot has no runs left at
+ * all, so the canvas clears instead of freezing at a stale list.
  *
  * No persistence across restart: the board is a view over agent_tasks, and the
  * restart wipes in-flight runs anyway (orphan cards handle the trail).
@@ -30,6 +45,9 @@ export { firstTaskLine } from './subagent-text.js'
  * rendered by the renderer's `SubagentRunsBoard` and returned to agents via the
  * `sylo_runs_list` tool host RPC.
  */
+
+/** The one board registry key since v4 — every bound panel sees every workspace. */
+export const GLOBAL_BOARD_KEY = '__global__'
 
 type BoardBinding = { liveId: string; manual?: boolean }
 
@@ -112,6 +130,7 @@ export function rowsFromAgentTaskRows(
       model?: string
       files?: string[]
       task?: string
+      trace?: SubagentRunBoardRow['trace']
     } = {}
     try {
       spec = JSON.parse(row.spec_json) as typeof spec
@@ -159,6 +178,10 @@ export function rowsFromAgentTaskRows(
       title: sharedFirstTaskLine(spec.task && spec.task.trim() ? spec.task : row.title),
       files: Array.isArray(spec.files) ? spec.files.slice(0, 24) : [],
       resultSummary: row.result_summary ?? null,
+      // Bounded tail of the child's think/text/tool trace — the same array the chat
+      // pill replays as pills. Rows predating the trace feed (or a parse-escaped
+      // spec) fall back to the lone last-tool line in the expanded row.
+      trace: Array.isArray(spec.trace) ? spec.trace.slice(-80) : [],
     })
   }
   // Active first (running → awaiting → paused, oldest started first), then done.

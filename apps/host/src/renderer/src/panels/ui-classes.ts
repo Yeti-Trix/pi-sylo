@@ -819,6 +819,19 @@ export const convTimestamp =
 
 
 
+/** Sidebar pinned chat row: draggable + drag reorder + exemption from auto-archive. */
+export const convRowPinned = 'bg-bg-secondary/30'
+
+export const convPinGlyph =
+  'inline-block h-3 w-3 shrink-0 text-accent/80' /** Pin glyph column before the title. */
+
+export const convRowDraggable = 'cursor-grab active:cursor-grabbing'
+
+export const convRowDragging = 'opacity-55'
+
+export const convDropLine =
+  'pointer-events-none absolute inset-x-1 z-10 h-0.5 rounded-full bg-accent'
+
 export const convStatusDot = 'inline-block h-2 w-2 shrink-0 rounded-full'
 
 
@@ -1138,18 +1151,6 @@ export const chatMentionChipForced = 'border-accent/45 bg-accent/[0.18] text-acc
 export const chatMentionChipRef =
   'border-border bg-[rgb(255_255_255/0.05)] text-text-secondary'
 
-/** Section goals from this chat's `.sylo/plans/<conversationId>.md`. */
-export const chatPlanGoals =
-  'mx-5 mb-1 mt-1 rounded-xl border border-border bg-[#1e1e1e] px-3 py-2'
-
-export const chatPlanGoalsHead =
-  'mb-1.5 flex items-center gap-2 text-[0.78rem] font-medium text-text-primary'
-
-export const chatPlanGoalsList = 'm-0 flex list-none flex-col gap-1 p-0'
-
-export const chatPlanGoalsItem =
-  'flex items-start gap-2 text-[0.8rem] leading-[1.4] text-text-primary'
-
 /** Cursor-style composer: one rounded field holding the textarea + send.
  *  Queue/attachment strips float above it (no border-t). */
 export const chatInputRow =
@@ -1230,6 +1231,19 @@ export const chatStopBtn =
 /** Panel shell — evals, proposals, skill-route tabs (full-height scrolling). */
 export const panelShell =
   'box-border min-h-0 flex-1 w-full overflow-x-hidden overflow-y-auto overscroll-y-contain touch-pan-y p-4'
+
+/** Testing panel (Developer → Testing) sub-tab strip — sections stay small
+ *  instead of stacking everything on one page. Styled like the model-bar
+ *  pills so it reads as navigation, not as another row of buttons. */
+export const testingSubtabBar = 'mb-3 flex flex-wrap items-center gap-2'
+
+export const testingSubtabBtn =
+  'cursor-pointer rounded-full border border-border bg-bg-primary px-3 py-1 text-[0.74rem] text-text-secondary transition-[border-color,color,background] duration-[120ms] hover:border-accent/40 hover:text-text-primary'
+
+export const testingSubtabBtnOn =
+  'cursor-pointer rounded-full border border-accent/60 bg-accent/10 px-3 py-1 text-[0.74rem] font-semibold text-text-primary'
+
+export const testingSubtabHint = 'text-[0.72rem] text-text-secondary'
 
 export const panelTitle = 'mt-0 text-base'
 

@@ -2,6 +2,21 @@ export type AgentTaskStatus = 'running' | 'awaiting_input' | 'paused' | 'succeed
 
 export type SubagentRunMode = 'single' | 'parallel' | 'chain'
 
+/** One pill of the run's working trace (mirrors the host's SubagentTraceEntry).
+ *  Renderer keeps its own copy — it cannot import from apps/host/src/shared. */
+export type SubagentTraceEntry =
+  | { seq: number; k: 'think'; text: string }
+  | { seq: number; k: 'text'; text: string }
+  | {
+      seq: number
+      k: 'tool'
+      name: string
+      preview: string
+      ms?: number
+      err?: boolean
+      tail?: string
+    }
+
 export type AgentTaskRow = {
   id: string
   host_session_id: string
@@ -31,12 +46,19 @@ export type AgentTaskSpec = {
   agent?: string
   groupRunId?: string
   stepIndex?: number
+  goal?: string
   lastPartialText?: string
   lastPartialThinking?: string
   lastThinkingLive?: boolean
   lastToolName?: string
   lastToolPreview?: string
   model?: string
+  question?: string
+  what_i_tried?: string
+  context_digest?: string
+  files?: string[]
+  /** Working trace pills — bound think/text/tool sequence emitted by the child. */
+  trace?: SubagentTraceEntry[]
 }
 
 export type TaskGroup =

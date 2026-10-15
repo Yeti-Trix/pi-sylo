@@ -16,11 +16,12 @@ function trimOrNull(v: string | null | undefined): string | null {
 }
 
 /**
- * Per-chat model selector for the companion (phone) chat footer. Mirrors the
- * desktop ChatModelBar: each chat stores an optional override (null fields
- * inherit the global default from Settings). When the selected main model is
- * text-only, a second selector for the image (fallback) model appears, defaulted
- * to the global image model and overridable per chat.
+ * Per-chat model selector for the companion (phone) app, rendered as a compact
+ * chip for the chat header that opens a bottom sheet (mobile pattern used by
+ * ChatGPT/Claude apps — model picker up top, full controls in a sheet).
+ * Mirrors the desktop ChatModelBar: each chat stores an optional override
+ * (null fields inherit the global default from Settings). When the selected
+ * main model is text-only, a selector for the image (fallback) model appears.
  */
 export function CompanionModelBar({
   conversation,
@@ -39,6 +40,7 @@ export function CompanionModelBar({
     image_model_provider: null,
   })
   const [saving, setSaving] = useState(false)
+  const [sheetOpen, setSheetOpen] = useState(false)
 
   useEffect(() => {
     void fetchModels()
@@ -117,127 +119,192 @@ export function CompanionModelBar({
   const globalModelLabel = choice?.global.modelId || '(unset)'
   const globalImageLabel = choice?.global.imageModelId || '(none)'
 
-  const selectCls =
-    'h-8 rounded-lg border border-border bg-bg-primary px-2 py-1 text-xs text-text-primary outline-none focus:border-accent disabled:opacity-40'
+  const chipLabel = isGlobal
+    ? `Global (${globalProviderLabel})`
+    : `${effProvider} · ${effModelId || '(unset)'}`
+
+  // Sheet controls: stacked full-width rows with big touch targets (mobile).
+  const sheetSelectCls =
+    'w-full rounded-lg border border-border bg-bg-primary px-3 py-2.5 text-base text-text-primary outline-none focus:border-accent disabled:opacity-40'
 
   return (
-    <div className="flex flex-col gap-1.5">
-      <div className="flex flex-wrap items-center gap-1.5">
-        <select
-          className={selectCls}
-          value={providerValue}
-          onChange={(e) => onProviderChange(e.target.value)}
-          disabled={!brokerReady}
-          aria-label="Model provider"
-        >
-          <option value={GLOBAL_SENTINEL}>Global ({globalProviderLabel})</option>
-          {(choice?.providers ?? ['ollama', 'openai-codex', 'openai', 'anthropic', 'groq', 'openrouter']).map((p) => (
-            <option key={p} value={p}>
-              {p === 'openai-codex' ? 'ChatGPT OAuth' : p === 'openai' ? 'OpenAI API' : p}
-            </option>
-          ))}
-        </select>
+    <>
+      <button
+        type="button"
+        className="flex min-w-0 max-w-[10rem] shrink-0 items-center gap-1 rounded-lg border border-border bg-bg-primary px-2.5 py-1.5 text-xs disabled:opacity-40"
+        disabled={saving}
+        onClick={() => setSheetOpen(true)}
+        title="Model for this chat"
+        aria-haspopup="dialog"
+        aria-expanded={sheetOpen}
+      >
+        <span className="min-w-0 truncate font-medium text-text-primary">{chipLabel}</span>
+        <span
+          className="shrink-0 border-l-4 border-transparent border-t-[5px] border-t-text-secondary"
+          aria-hidden="true"
+        />
+      </button>
 
-        {/* Model selector — only when a specific provider is chosen (not Global). */}
-        {!isGlobal ? (
-          isOllama ? (
-            <select
-              className={`${selectCls} min-w-0 flex-1`}
-              value={modelValue}
-              onChange={(e) => onModelChange(e.target.value)}
-              disabled={!brokerReady}
-              aria-label="Model"
-            >
-              <option value={GLOBAL_SENTINEL}>Global ({globalModelLabel})</option>
-              {(choice?.ollamaModels ?? []).map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.id}
-                  {m.visionCapable ? ' 👁' : ''}
-                </option>
-              ))}
-              {override.model_id && !(choice?.ollamaModels ?? []).some((m) => m.id === override.model_id) ? (
-                <option value={override.model_id}>{override.model_id} (not listed)</option>
-              ) : null}
-            </select>
-          ) : effProvider === 'openai-codex' ? (
-            <select
-              className={`${selectCls} min-w-0 flex-1`}
-              value={modelValue}
-              onChange={(e) => onModelChange(e.target.value)}
-              disabled={!brokerReady}
-              aria-label="ChatGPT Codex model"
-            >
-              <option value={GLOBAL_SENTINEL}>Global ({globalModelLabel})</option>
-              {(choice?.chatgptModels ?? []).map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                </option>
-              ))}
-              {override.model_id && !(choice?.chatgptModels ?? []).some((m) => m.id === override.model_id) ? (
-                <option value={override.model_id}>{override.model_id} (not listed)</option>
-              ) : null}
-            </select>
-          ) : (
-            <input
-              className={`${selectCls} min-w-0 flex-1`}
-              value={override.model_id ?? ''}
-              onChange={(e) => onModelChange(e.target.value)}
-              placeholder={`Model id (global: ${globalModelLabel})`}
-              disabled={!brokerReady}
-              aria-label="Model id"
-            />
-          )
-        ) : null}
-
-        {inheritingGlobal ? (
-          <span className="rounded bg-bg-tertiary px-1.5 py-0.5 text-[0.62rem] text-text-secondary">
-            global default
-          </span>
-        ) : (
-          <button
-            type="button"
-            className="rounded px-1.5 py-0.5 text-[0.62rem] text-text-secondary active:bg-bg-primary"
-            onClick={() =>
-              void persist({
-                model_provider: null,
-                model_id: null,
-                image_model_id: null,
-                image_model_provider: null,
-              })
-            }
-            title="Reset this chat to the global default model"
+      {sheetOpen ? (
+        <div className="fixed inset-0 z-50 bg-black/50" onClick={() => setSheetOpen(false)}>
+          <div
+            className="absolute inset-x-0 bottom-0 mx-auto max-w-md rounded-t-2xl border border-border bg-bg-secondary p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
+            onClick={(e) => e.stopPropagation()}
           >
-            reset
-          </button>
-        )}
-        {saving ? <span className="text-[0.62rem] text-text-secondary">saving…</span> : null}
-      </div>
-
-      {!isGlobal && showImageSelector ? (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[0.62rem] text-text-secondary">image ↦</span>
-          <select
-            className={`${selectCls} min-w-0 flex-1`}
-            value={imageValue}
-            onChange={(e) => onImageModelChange(e.target.value)}
-            disabled={!brokerReady}
-            aria-label="Image fallback model"
-          >
-            <option value={GLOBAL_SENTINEL}>Global ({globalImageLabel})</option>
-            {(choice?.ollamaModels ?? [])
-              .filter((m) => m.visionCapable)
-              .map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.id}
-                </option>
-              ))}
-            {override.image_model_id &&
-            !(choice?.ollamaModels ?? []).some((m) => m.id === override.image_model_id) ? (
-              <option value={override.image_model_id}>{override.image_model_id} (not listed)</option>
+            <div className="mb-1 flex items-center justify-between gap-2">
+              <h2 className="m-0 text-base font-semibold">Model for this chat</h2>
+              {saving ? <span className="text-xs text-text-secondary">saving…</span> : null}
+            </div>
+            <p className="m-0 mb-3 text-xs text-text-secondary">
+              Leave on Global to follow the desktop default (Settings → Model).
+            </p>
+            {!brokerReady ? (
+              <p className="m-0 mb-3 text-xs text-danger">
+                Desktop broker not ready — changes apply once it&apos;s back.
+              </p>
             ) : null}
-          </select>
+
+            <div className="flex flex-col gap-2.5">
+              <label className="flex flex-col gap-1 text-xs text-text-secondary">
+                Provider
+                <select
+                  className={sheetSelectCls}
+                  value={providerValue}
+                  onChange={(e) => onProviderChange(e.target.value)}
+                  disabled={!brokerReady}
+                  aria-label="Model provider"
+                >
+                  <option value={GLOBAL_SENTINEL}>Global ({globalProviderLabel})</option>
+                  {(choice?.providers ?? ['ollama', 'openai-codex', 'openai', 'anthropic', 'groq', 'openrouter']).map((p) => (
+                    <option key={p} value={p}>
+                      {p === 'openai-codex' ? 'ChatGPT OAuth' : p === 'openai' ? 'OpenAI API' : p}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {/* Model selector — only when a specific provider is chosen (not Global). */}
+              {!isGlobal ? (
+                isOllama ? (
+                  <label className="flex flex-col gap-1 text-xs text-text-secondary">
+                    Model
+                    <select
+                      className={sheetSelectCls}
+                      value={modelValue}
+                      onChange={(e) => onModelChange(e.target.value)}
+                      disabled={!brokerReady}
+                      aria-label="Model"
+                    >
+                      <option value={GLOBAL_SENTINEL}>Global ({globalModelLabel})</option>
+                      {(choice?.ollamaModels ?? []).map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.id}
+                          {m.visionCapable ? ' 👁' : ''}
+                        </option>
+                      ))}
+                      {override.model_id && !(choice?.ollamaModels ?? []).some((m) => m.id === override.model_id) ? (
+                        <option value={override.model_id}>{override.model_id} (not listed)</option>
+                      ) : null}
+                    </select>
+                  </label>
+                ) : effProvider === 'openai-codex' ? (
+                  <label className="flex flex-col gap-1 text-xs text-text-secondary">
+                    ChatGPT Codex model
+                    <select
+                      className={sheetSelectCls}
+                      value={modelValue}
+                      onChange={(e) => onModelChange(e.target.value)}
+                      disabled={!brokerReady}
+                      aria-label="ChatGPT Codex model"
+                    >
+                      <option value={GLOBAL_SENTINEL}>Global ({globalModelLabel})</option>
+                      {(choice?.chatgptModels ?? []).map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.name}
+                        </option>
+                      ))}
+                      {override.model_id && !(choice?.chatgptModels ?? []).some((m) => m.id === override.model_id) ? (
+                        <option value={override.model_id}>{override.model_id} (not listed)</option>
+                      ) : null}
+                    </select>
+                  </label>
+                ) : (
+                  <label className="flex flex-col gap-1 text-xs text-text-secondary">
+                    Model id
+                    <input
+                      className={sheetSelectCls}
+                      value={override.model_id ?? ''}
+                      onChange={(e) => onModelChange(e.target.value)}
+                      placeholder={`Model id (global: ${globalModelLabel})`}
+                      disabled={!brokerReady}
+                      aria-label="Model id"
+                      spellCheck={false}
+                    />
+                  </label>
+                )
+              ) : null}
+
+              {!isGlobal && showImageSelector ? (
+                <label className="flex flex-col gap-1 text-xs text-text-secondary">
+                  <span>
+                    Image fallback model <span className="text-text-secondary/70">(main model can&apos;t see images)</span>
+                  </span>
+                  <select
+                    className={sheetSelectCls}
+                    value={imageValue}
+                    onChange={(e) => onImageModelChange(e.target.value)}
+                    disabled={!brokerReady}
+                    aria-label="Image fallback model"
+                  >
+                    <option value={GLOBAL_SENTINEL}>Global ({globalImageLabel})</option>
+                    {(choice?.ollamaModels ?? [])
+                      .filter((m) => m.visionCapable)
+                      .map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.id}
+                        </option>
+                      ))}
+                    {override.image_model_id &&
+                    !(choice?.ollamaModels ?? []).some((m) => m.id === override.image_model_id) ? (
+                      <option value={override.image_model_id}>{override.image_model_id} (not listed)</option>
+                    ) : null}
+                  </select>
+                </label>
+              ) : null}
+
+              {inheritingGlobal ? (
+                <span className="self-start rounded-lg bg-bg-tertiary px-2.5 py-1.5 text-xs text-text-secondary">
+                  Following global default
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="self-start rounded-lg border border-border px-3 py-2 text-xs text-text-secondary active:bg-bg-tertiary"
+                  onClick={() =>
+                    void persist({
+                      model_provider: null,
+                      model_id: null,
+                      image_model_id: null,
+                      image_model_provider: null,
+                    })
+                  }
+                  title="Reset this chat to the global default model"
+                >
+                  Reset to global default
+                </button>
+              )}
+            </div>
+
+            <button
+              type="button"
+              className="mt-4 w-full rounded-lg bg-accent py-3 font-medium text-bg-primary"
+              onClick={() => setSheetOpen(false)}
+            >
+              Done
+            </button>
+          </div>
         </div>
       ) : null}
-    </div>
+    </>
   )
 }

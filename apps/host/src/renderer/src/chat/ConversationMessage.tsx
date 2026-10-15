@@ -670,6 +670,9 @@ function InterleavedAssistantBody({
   type WorkRun = {
     pieces: React.ReactNode[]
     overlay: React.ReactNode[]
+    /** Upload/document picture galleries (PDF page previews etc.) — LEAD the
+     * run so the "Working…" pill renders UNDER the pictures (op 2026-10-10). */
+    media: React.ReactNode[]
     galleries: React.ReactNode[]
     segs: AssistantSegment[]
     /** Newest agent text chunk inside the group — preview line for the header. */
@@ -683,7 +686,7 @@ function InterleavedAssistantBody({
   // question, which read out of order.
   const runs: WorkRun[] = []
   const newRun = (): WorkRun => {
-    const r: WorkRun = { pieces: [], overlay: [], galleries: [], segs: [], lastGroupChunk: '' }
+    const r: WorkRun = { pieces: [], overlay: [], media: [], galleries: [], segs: [], lastGroupChunk: '' }
     runs.push(r)
     return r
   }
@@ -820,9 +823,12 @@ function InterleavedAssistantBody({
     if (seg.kind === 'tool' && seg.resultPreview != null) {
       const segImages = collectToolResultImages([seg.resultPreview])
       if (segImages.length > 0) {
-        // Galleries stay outside the collapsed work group so images aren't
-        // buried behind the expand chevron.
-        ;(grouped ? run.galleries : run.pieces).push(
+        // Picture galleries stay outside the collapsed work group so images
+        // aren't buried behind the expand chevron, and bucket as `media` so
+        // they LEAD the run: the "Working…" pill renders UNDER the pictures
+        // (operator request 2026-10-10). Subagent blocks keep the pill-below
+        // placement in `galleries`.
+        ;(grouped ? run.media : run.pieces).push(
           <AssistantImageGallery
             key={`seg-images-${seg.id}-${i}`}
             images={segImages}
@@ -833,7 +839,7 @@ function InterleavedAssistantBody({
       }
       const segAudios = collectToolResultAudios([seg.resultPreview])
       if (segAudios.length > 0) {
-        ;(grouped ? run.galleries : run.pieces).push(
+        ;(grouped ? run.media : run.pieces).push(
           <AssistantAudioGallery
             key={`seg-audio-${seg.id}-${i}`}
             audios={segAudios}
@@ -877,7 +883,7 @@ function InterleavedAssistantBody({
     )
   }
 
-  if (runs.every((r) => r.pieces.length === 0 && r.overlay.length === 0)) {
+  if (runs.every((r) => r.pieces.length === 0 && r.overlay.length === 0 && r.media.length === 0)) {
     if (openGap) {
       return (
         <div className={chatInterleaved}>
@@ -934,6 +940,10 @@ function InterleavedAssistantBody({
       <div className={chatInterleaved}>
                     {runViews.map(({ r, completed, title, lastCommentPreview, startTs }, j) => (
           <React.Fragment key={`work-run-of-${messageId}-${j}`}>
+            {/* Media first, THEN the work pill: upload/page previews lead the
+                run and the "Working…" header sits under the pictures — live
+                and completed runs share one stable order (no completion jump). */}
+            {r.media.length > 0 ? r.media : null}
             {r.segs.length > 0 ?
               <details className={chatSegmentRootClass('tool', {})}>
                 <summary className={chatSegmentSummary}>
@@ -970,6 +980,8 @@ function InterleavedAssistantBody({
               </details>
             : null}
             {r.overlay.length > 0 ? r.overlay : null}
+            {/* Subagent run pills: still external to the group, UNDER the pill
+                (committed live-pill UX), unlike media which leads the run. */}
             {r.galleries.length > 0 ? r.galleries : null}
           </React.Fragment>
         ))}

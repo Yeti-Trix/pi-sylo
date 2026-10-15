@@ -136,6 +136,7 @@ import {
 import { readSkillMd, writeSkillMd } from './skill-md-io.js'
 import {
   disposeSubagentBoards,
+  GLOBAL_BOARD_KEY,
   rowsFromAgentTaskRows,
   showSubagentBoard,
   subagentBoardForWorkspace,
@@ -202,6 +203,7 @@ import {
   type OverflowBrokerSlot,
 } from './concurrent-broker-pool.js'
 import { DEFAULT_MAX_CONCURRENT_TURNS, SYLO_MAX_CONCURRENT_TURNS_PREF } from '../shared/concurrent-turns.js'
+import { MS_PER_DAY } from '../shared/sylo-chat-retention-settings.js'
 import {
   PI_DEFAULT_COMPACTION_RESERVE_TOKENS,
   PI_FALLBACK_CONTEXT_WINDOW_TOKENS,
@@ -216,6 +218,8 @@ import {
 import { BrokerSupervisor, type BrokerImageContent, type BrokerOutMessage, type BrokerResolvedModel } from './broker-supervisor.js'
 import type { SystemPromptStats } from '../shared/system-prompt-stats.js'
 import { encodeImageAttachmentsForPi } from './image-attachments.js'
+import { perfMark, perfRecent } from './perf-log.js'
+import { probeConversationLoad, probeImageEncode } from './perf-probes.js'
 import {
   USER_ATTACHMENT_HINT,
   IMAGE_TOOL_HINT_TEXTONLY,
@@ -289,10 +293,10 @@ import {
 } from './github-auth.js'
 import { deriveChatTitleFromUserText, isAutoTitleEligible } from './chat-title.js'
 import {
-  CONVERSATION_RETENTION_MS,
   archiveStaleConversations,
   deleteWorkspaceFully,
   fullyRemoveConversation,
+  resolveConversationRetentionDays,
 } from './conversation-lifecycle.js'
 import {
   ensurePasteImagesDir,
@@ -321,14 +325,21 @@ import {
   shutdownSubagentTaskHostSession,
   subagentTaskStore,
 } from './subagent-tasks-service.js'
+import { SUBAGENT_RUN_QUIET_MS } from './subagent-tasks-db.js'
 import {
   clearPlanForNewChat,
-  hidePlanTodos,
   isolatePlanForConversation,
-  readPlanTodos,
-  setPlanTodosListener,
 } from './plan-todos-host.js'
+// Host-side plan-file helpers: a finished planner's background result is ALSO
+// saved as this chat's plan file, so a truncated wake prompt can point at that
+// durable copy instead of a bare truncation marker.
+import {
+  conversationPlanRel,
+  isPlannerAgentName,
+  isSafePlanConversationId,
+} from '../../../../packages/sylo-subagents/extensions/plan-file.ts'
 import type {
+  AgentTaskRow,
   ChatPresenceRow,
   SubagentBoardData,
   SyloSubagentHostEvent,
@@ -409,6 +420,36 @@ import {
   writeTtsConfig,
 } from './tts-config.js'
 import { generateTtsWav, listTtsVoices, synthOptionsFromRecords } from './tts-engine.js'
+// sylo-image-gen route plumbing (plan §5.6, §8 step 5) — config + op handlers
+// that share the agent tools' shared/* modules (doctor parity, §3 notes 1/3).
+import { ensureImagegenConfigSchema, imagegenConfigEnvPath, readImagegenConfig, writeImagegenConfig } from './imagegen-config.js'
+import { ensureVideogenConfigSchema, readVideogenConfig, videogenConfigEnvPath, writeVideogenConfig } from './videogen-config.js'
+import {
+  imagegenGenerate,
+  imagegenImageDelete,
+  imagegenImageGet,
+  imagegenImageUpdate,
+  imagegenJobGet,
+  imagegenLibraryList,
+  imagegenQueueList,
+  imagegenRevealFile,
+  imagegenStatus,
+} from './imagegen-host.js'
+// sylo-video-gen (plan §5, §8 step 7) — Videos route host bridge; mirrors the imagegen-host block above.
+import {
+  videogenGenerate,
+  videogenJobGet,
+  videogenJobsList,
+  videogenJobsReplay,
+  videogenLibraryList,
+  videogenQueueList,
+  videogenRevealFile,
+  videogenStatus,
+  videogenVideoDelete,
+  videogenVideoGet,
+  videogenVideoUpdate,
+  videogenWorkspaceHasLedger,
+} from './videogen-host.js'
 import { readUserPackages } from './user-packages.js'
 import {
   ensureLocalPackageSkillsInstalled,
@@ -1123,6 +1164,13 @@ const LOCAL_MEDIA_EXTENSIONS = new Set([
   '.m4a',
   '.aac',
   '.flac',
+  // Video containers (plan §5.5, §8 step 7): the Videos route renders native
+  // `<video>` elements with `sylo-file://` srcs — without these the §5.4/§8.7
+  // gate above 404s every clip and restyle source. Plan's exact set: .mp4,
+  // .webm, and .mov for restyle sources (all §8.2-record-legal containers).
+  '.mp4',
+  '.webm',
+  '.mov',
 ])
 
 function isLocalMediaFilePath(filePath: string): boolean {
@@ -1183,6 +1231,26 @@ function isExternalLink(url: string): boolean {
   return /^https?:\/\//i.test(url) || /^mailto:/i.test(url)
 }
 
+/** Local filesystem path from a renderer link URL, for "click to open in the
+ *  default OS app" behavior (found broken live 2026-10-13: tool-result images
+ *  carry sylo-file://preview?path=<abs> hrefs which are NOT http(s), so
+ *  setWindowOpenHandler silently denied them — clicking "open the source" did
+ *  nothing). Handles the sylo-file preview scheme (path query param, already
+ *  encoded by the preload bridge) and plain file:/// URLs. Never throws. */
+function extractOpenableLocalPath(rawUrl: string): string | null {
+  try {
+    const u = new URL(rawUrl)
+    if (u.protocol === 'file:') return fileURLToPath(u)
+    if (u.protocol === 'sylo-file:') {
+      const p = u.searchParams.get('path')
+      return p && p.trim() ? p : null
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
 /**
  * Route in-chat / in-app links to the OS default browser and block any attempt
  * to navigate a Sylo window away from the renderer. Applied to every window
@@ -1191,7 +1259,15 @@ function isExternalLink(url: string): boolean {
 function registerExternalLinkRouting(): void {
   app.on('web-contents-created', (_event, contents) => {
     contents.setWindowOpenHandler(({ url }) => {
-      if (isExternalLink(url)) void shell.openExternal(url)
+      if (isExternalLink(url)) {
+        void shell.openExternal(url)
+      } else {
+        // Local-file links: open in the operator's default app (Windows Photos
+        // for tool-result stills) instead of swallowing the click. Unknown
+        // schemes still just deny — same hard guarantee as before.
+        const localPath = extractOpenableLocalPath(url)
+        if (localPath) void shell.openPath(localPath)
+      }
       return { action: 'deny' }
     })
     contents.on('will-navigate', (event, url) => {
@@ -2168,9 +2244,22 @@ async function followUpActiveTurn(
   // Honor a caller-supplied prepared message: re-deriving it here silently
   // dropped the composed subagent output on any conversation that already had
   // a turn in flight.
-  const prepared =
-    options?.prepared ?? (await prepareUserMessageWithImages(text, attachments))
-  if (!options?.skipUserInsert) {
+  // Same reorder as startChatTurn (2026-10-11 freeze report): insert the user
+  // row BEFORE the synchronous image encode (bubble + chips visible
+  // immediately), then patch in the delivery metadata after the encode.
+  const prepareInlineFollowUp = !options?.prepared
+  let followUpUserRow: ReturnType<typeof db.insertMessage> | null = null
+  if (prepareInlineFollowUp && !options?.skipUserInsert) {
+    followUpUserRow = db.insertMessage(conversationId, 'user', text, 'complete')
+    maybeAutoTitleFromFirstUserMessage(conversationId, options?.titleText ?? text)
+  }
+  const prepared = options?.prepared ?? (await prepareUserMessageWithImages(text, attachments))
+  if (followUpUserRow && prepared.text !== text) {
+    db.updateMessageContent(followUpUserRow.id, prepared.text, 'complete')
+  }
+  if (!options?.skipUserInsert && !prepareInlineFollowUp) {
+    // Prepared by a caller but the caller still wanted the row insert the old
+    // way (encode already ran wherever the caller prepared) — insert now.
     db.insertMessage(conversationId, 'user', prepared.text, 'complete')
     maybeAutoTitleFromFirstUserMessage(conversationId, options?.titleText ?? text)
   }
@@ -2245,10 +2334,25 @@ const backgroundDeliveries = new Map<string, BackgroundDeliveryState>()
 const BACKGROUND_DELIVERY_BATCH_MS = 250
 const BACKGROUND_DELIVERY_RETRY_MS = 5000
 const BACKGROUND_DELIVERY_MAX_RETRIES = 24
-/** Per-item cap for the wake prompt — the orchestrator needs the substance to act. */
-const BACKGROUND_DELIVERY_TEXT_CAP = 24_000
+/** Per-item fallback cap for the wake prompt — the orchestrator needs the substance to act. */
+const BACKGROUND_DELIVERY_TEXT_CAP_FALLBACK = 48_000
 /** Timeline card cap — the card is for reading; the wake prompt carries more. */
 const BACKGROUND_CARD_TEXT_CAP = 8_000
+
+/**
+ * Wake-prompt cap, pref-adjustable (`sylo.background_delivery_text_cap`).
+ *
+ * The original hard 24 KB cap was silent and hit exactly the runs that carry a
+ * big artifact (a planner plan is ~40–60 KB). 48 KB covers those whole, and
+ * anything still larger is cut WITH a recovery pointer naming where the full
+ * text is durable — the orchestrator is an agent; a readable path turns
+ * "data loss" into a two-step read.
+ */
+function backgroundDeliveryTextCap(): number {
+  const raw = db.getPref<unknown>('sylo.background_delivery_text_cap', BACKGROUND_DELIVERY_TEXT_CAP_FALLBACK)
+  const n = typeof raw === 'number' ? raw : Number.parseInt(String(raw), 10)
+  return Number.isFinite(n) && n >= 1_000 ? n : BACKGROUND_DELIVERY_TEXT_CAP_FALLBACK
+}
 
 function shortRunId(runId: string): string {
   return runId.slice(0, 8)
@@ -2269,34 +2373,52 @@ function backgroundResultCard(item: SubagentCompletedItem): string {
   const body = completedItemText(item)
   const capped =
     body.length > BACKGROUND_CARD_TEXT_CAP ?
-      `${body.slice(0, BACKGROUND_CARD_TEXT_CAP)}\n\n_(result truncated)_`
+      `${body.slice(0, BACKGROUND_CARD_TEXT_CAP)}\n\n_(result truncated — the full text is durable: Subagents board → this run's Details, or \`agent_tasks.result_json\` for run ${shortRunId(item.runId)})_`
     : body
   return [head, `**Task:** ${firstTaskLine(item.task)}`, '', capped || '_(no output)_'].join('\n')
 }
 
-function backgroundWakeSection(item: SubagentCompletedItem): string {
+function backgroundWakeSection(item: SubagentCompletedItem, conversationId: string): string {
   const body = completedItemText(item)
+  const run = shortRunId(item.runId)
+  // A successful planner run's full output is ALSO the chat's plan file (saved
+  // on run_end), so that file is the pointer a truncated wake should reference.
+  const plannerRel =
+    item.status === 'succeeded' && isSafePlanConversationId(conversationId) && isPlannerAgentName(item.agent) ?
+      conversationPlanRel(conversationId)
+    : null
+  const cap = backgroundDeliveryTextCap()
   const capped =
-    body.length > BACKGROUND_DELIVERY_TEXT_CAP ?
-      `${body.slice(0, BACKGROUND_DELIVERY_TEXT_CAP)}\n(text truncated)`
+    body.length > cap ?
+      body.slice(0, cap) +
+        (plannerRel ?
+          `\n(text truncated at ${cap} chars — the full result is durable: the plan file \`${plannerRel}\` in the workspace, and Subagents board Details for run ${run}. Read the plan file before dispatching section work; do not act on this cut digest alone.)`
+        : `\n(text truncated at ${cap} chars — the full result is durable: Subagents board → run ${run} → Details (result_json in the workspace DB). Read it back from there before acting on this cut digest.)`)
     : body
   const statusLabel =
     item.status === 'succeeded' ? 'Result' : item.status === 'failed' ? 'Failed' : 'Stopped (cancelled)'
   return [
-    `### ${statusLabel} — <${item.agent}> (run ${shortRunId(item.runId)})`,
+    `### ${statusLabel} — <${item.agent}> (run ${run})`,
     `Task: ${firstTaskLine(item.task)}`,
+    ...(plannerRel ?
+      [
+        `Plan file: \`${plannerRel}\` (workspace-relative). It is the durable full copy of this result — follow it for section dispatch; other \`.sylo/plans/\` files belong to other chats and must not be read.`,
+      ]
+    : []),
     '',
     capped || '_(no output)_',
   ].join('\n')
 }
 
-function composeBackgroundWakePrompt(items: SubagentCompletedItem[]): string {
+function composeBackgroundWakePrompt(conversationId: string, items: SubagentCompletedItem[]): string {
   return [
     '[Background subagent results]',
     '',
-    ...items.flatMap((item, i) => (i === 0 ? [backgroundWakeSection(item)] : ['---', backgroundWakeSection(item)])),
+    ...items.flatMap((item, i) =>
+      i === 0 ? [backgroundWakeSection(item, conversationId)] : ['---', backgroundWakeSection(item, conversationId)],
+    ),
     '',
-    'Act on these results toward the operator\u2019s goal: apply what matters (read/edit/verify), then reply with a brief digest. A failed section: report the failure and propose the next step. A cancelled section: the operator stopped that run — do not restart it unless asked. Never re-run a completed task.',
+    'Act on these results toward the operator\u2019s goal: apply what matters (read/edit/verify), then reply with a brief digest. A section that ends with a "(text truncated …)" marker names where the full result lives — read it from there and act on the full text. A failed section: report the failure and propose the next step. A cancelled section: the operator stopped that run — do not restart it unless asked. Never re-run a completed task.',
   ].join('\n')
 }
 
@@ -2354,7 +2476,7 @@ async function flushBackgroundDeliveries(conversationId: string): Promise<void> 
     scheduleBackgroundDeliveryRetry(conversationId)
     return
   }
-  const promptText = composeBackgroundWakePrompt(state.items)
+  const promptText = composeBackgroundWakePrompt(conversationId, state.items)
   const active = findPendingTurnForConversation(conversationId)
   if (active) {
     // The orchestrator is mid-turn: ride the followUp queue (same mechanism the
@@ -2379,11 +2501,15 @@ async function flushBackgroundDeliveries(conversationId: string): Promise<void> 
 }
 
 /**
- * Detached background runs died with the broker — agent_tasks rows were orphaned
- * (onBrokerExitOrphanTasks). Post a lost-run card per affected conversation so the
- * operator isn't left waiting for a completion message that will never come.
+ * Lost-run cards for a conversation: each row is a run that died without reporting —
+ * either with the broker (broker-exit sweep) or alone (orphan reconcile sweep).
+ * Post a card per affected conversation so the operator isn't left waiting for a
+ * completion message that will never come.
  */
-function notifyOrphanedBackgroundRuns(rows: Awaited<ReturnType<typeof onBrokerExitOrphanTasks>>): void {
+function notifyOrphanedBackgroundRuns(
+  rows: AgentTaskRow[],
+  headline = '■ **Broker restarted while background agents were running.**',
+): void {
   const running = rows.filter((row) => row.status === 'running' || row.status === 'orphaned')
   if (running.length === 0) return
   const byConversation = new Map<string, typeof running>()
@@ -2393,7 +2519,7 @@ function notifyOrphanedBackgroundRuns(rows: Awaited<ReturnType<typeof onBrokerEx
     byConversation.set(row.conversation_id, list)
   }
   for (const [conversationId, orphans] of byConversation) {
-    const lines: string[] = ['■ **Broker restarted while background agents were running.**']
+    const lines: string[] = [headline]
     for (const row of orphans) {
       lines.push(
         `- <${row.agent_name}> (run \`${row.id.slice(0, 8)}\`) was lost — re-dispatch the task if it is still needed.`,
@@ -2402,7 +2528,70 @@ function notifyOrphanedBackgroundRuns(rows: Awaited<ReturnType<typeof onBrokerEx
     db.insertMessage(conversationId, 'system', lines.join('\n'), 'complete')
     emitChatRefresh(conversationId, 'messages')
     scheduleSubagentBoardUpdate(conversationId, true)
+    // The pill + composer strip read agent_tasks only on 'subagents:lifecycle'
+    // events (broker-funnel paths) — a host-side orphan finalize emits none, so
+    // the chat kept its stale RUNNING pill/strip indefinitely (operator bug
+    // 2026-10-11: worker died silently, sweep finalized the row, chat still
+    // showed "1 subagent running" two minutes later). Ping the channel and let
+    // useSubagentTasks reload from the (now-final) row.
+    mainWindow?.webContents.send('subagents:lifecycle', {
+      conversationId,
+      turnId: null,
+      type: 'subagent_run_orphaned',
+      runIds: orphans.map((r) => r.id),
+      status: 'orphaned',
+    })
   }
+}
+
+/** Orphan-reconcile cadence — cheap tick; it early-exits when nothing is `running`. */
+const ORPHAN_RECONCILE_INTERVAL_MS = 60_000
+
+/**
+ * Quiet threshold before a still-`running` row is declared orphaned. Defaults to
+ * SUBAGENT_RUN_QUIET_MS (15 min) — deliberately ABOVE the broker's stall watchdog
+ * (5 min cloud / 10 min local + 10s finalize grace) so the watchdog's informative
+ * `failed` verdict always lands first and this sweep only ever catches children that
+ * died in a way the watchdog could not report. Pref-adjustable in minutes
+ * (`sylo.orphan_reconcile_stale_minutes`), clamped 5–120.
+ */
+function orphanReconcileStaleMs(): number {
+  const raw = db.getPref<unknown>(
+    'sylo.orphan_reconcile_stale_minutes',
+    SUBAGENT_RUN_QUIET_MS / 60_000,
+  )
+  const minutes = typeof raw === 'number' ? raw : Number.parseInt(String(raw), 10)
+  return Number.isFinite(minutes) ? Math.min(120, Math.max(5, minutes)) * 60_000 : SUBAGENT_RUN_QUIET_MS
+}
+
+let orphanReconcileTimer: ReturnType<typeof setInterval> | undefined
+
+/**
+ * Last-resort orphan sweep for Finding-2-style deaths: a child that died mid-turn
+ * without emitting `run_end` used to leave its agent_tasks row `running` forever —
+ * the board showed a live ghost, subagentsRunning() stayed true, and nothing told the
+ * chat a completion was never coming (the broker-exit sweep only covers the broker
+ * dying as a whole). Every broker lifecycle event bumps the row's updated_at, so a
+ * running row quiet past the stale window is presumed dead: finalize it as
+ * `orphaned` (`child_died_no_run_end`) and post the lost-run card.
+ */
+export function startSubagentOrphanReconcile(): void {
+  if (orphanReconcileTimer) return
+  orphanReconcileTimer = setInterval(() => {
+    try {
+      const candidates = subagentTaskStore.listStaleRunningAgentTasks(orphanReconcileStaleMs())
+      if (candidates.length === 0) return
+      const rows = candidates.flatMap((row) =>
+        subagentTaskStore.orphanAgentTaskById(row.id, 'child_died_no_run_end') ?? [],
+      )
+      notifyOrphanedBackgroundRuns(
+        rows,
+        '■ **A background subagent died without reporting a result.**',
+      )
+    } catch (err) {
+      console.error('[subagent orphan-reconcile] sweep failed', err)
+    }
+  }, ORPHAN_RECONCILE_INTERVAL_MS)
 }
 
 /**
@@ -2529,24 +2718,31 @@ function workspaceKeyForConversation(conversationId: string): string | null {
   return wk ? wk : null
 }
 
-/** (workspace board presence) one row per chat: what its main agent is on. */
-function buildChatPresenceRows(conversations: ReturnType<typeof db.listConversationsForWorkspaceCwd>): ChatPresenceRow[] {
+/** (workspace board presence) one row per chat: what its main agent is on.
+ *  `activeOnly` (global Agent board): keep ONLY chats whose main agent is
+ *  streaming — the panel renders active chats only anyway (idle ones duplicate
+ *  the chat list), and a global snapshot over every workspace's conversations
+ *  would otherwise ship hundreds of dead rows per push. */
+function buildChatPresenceRows(
+  conversations: ReturnType<typeof db.listConversationsForWorkspaceCwd>,
+  activeOnly = false,
+): ChatPresenceRow[] {
+  const rowOf = (conv: (typeof conversations)[number], activeTurn: boolean): ChatPresenceRow => ({
+    conversationId: conv.id,
+    title: conv.title?.trim() || 'Untitled chat',
+    activeTurn,
+    lastPrompt: activeTurn ? db.getLatestUserMessageFirstLine(conv.id) : null,
+    model:
+      conv.model_provider?.trim() && conv.model_id?.trim() ?
+        `${conv.model_provider.trim()}/${conv.model_id.trim()}`
+      : conv.model_id?.trim() || null,
+    updatedAt: conv.updated_at,
+  })
   const out: ChatPresenceRow[] = []
   for (const conv of conversations) {
     const activeTurn = findPendingTurnForConversation(conv.id) != null
-    const modelLabel =
-      conv.model_provider?.trim() && conv.model_id?.trim() ?
-        `${conv.model_provider.trim()}/${conv.model_id.trim()}`
-      : conv.model_id?.trim() || null
-    const lastPrompt = activeTurn ? db.getLatestUserMessageFirstLine(conv.id) : null
-    out.push({
-      conversationId: conv.id,
-      title: conv.title?.trim() || 'Untitled chat',
-      activeTurn,
-      lastPrompt,
-      model: modelLabel,
-      updatedAt: conv.updated_at,
-    })
+    if (activeOnly && !activeTurn) continue
+    out.push(rowOf(conv, activeTurn))
   }
   // Active turns first, then most-recently-active chats.
   return out.sort((a, b) => {
@@ -2561,11 +2757,17 @@ function buildChatPresenceRows(conversations: ReturnType<typeof db.listConversat
  * F2: prevents two chats from colliding on the same files).
  */
 function buildWorkspaceRunsSnapshot(workspaceKey: string): SubagentBoardData {
-  const conversations = db.listConversationsForWorkspaceCwd(workspaceKey).slice(0, 30)
-  const conversationIds = conversations.map((c) => c.id)
+  // Full workspace conversation list (non-archived, un-nested). NOT capped: the
+  // run rows are queried workspace-wide (their conversation ids can exceed any
+  // slice) and presence is only rendered for chats with a live turn, so the
+  // payload stays small. The old `.slice(0, 30)` dropped the tail of a growing
+  // workspace from BOTH the presence list and its agent_tasks — runs from
+  // chats outside the newest-30 were invisible on the Agent panel (pi-sylo-dev
+  // hit the cap at 37 non-archived chats).
+  const conversations = db.listConversationsForWorkspaceCwd(workspaceKey)
   const titles = new Map(conversations.map((c) => [c.id, c.title] as const))
   const rows = rowsFromAgentTaskRows(
-    subagentTaskStore.listAgentTasksForConversationIds(conversationIds),
+    subagentTaskStore.listAgentTasksForWorkspaceCwd(workspaceKey),
     titles,
   ).slice(0, 100)
   return {
@@ -2576,72 +2778,122 @@ function buildWorkspaceRunsSnapshot(workspaceKey: string): SubagentBoardData {
   }
 }
 
+/**
+ * Global Agent panel snapshot (operator 2026-10-12: the dashboard must show
+ * agents/subagents from EVERY workspace no matter which one is open — the
+ * workspace-scoped board hid sibling workspaces' work entirely). The agent-side
+ * `sylo_runs_list` RPC deliberately stays workspace-scoped (see
+ * `buildWorkspaceRunsSnapshot`): its contract is "this workspace's own work",
+ * which a global list would drown.
+ */
+function buildGlobalRunsSnapshot(): SubagentBoardData {
+  // Presence reads the sidebar-visible conversations (active-turn detection is
+  // the expensive part, and archived/child chats can't host live turns) — but the
+  // ROW titles must cover EVERY conversation: 16 of this DB's 104 run rows live in
+  // archived or side chats, and without the full map they'd degrade to id tails.
+  const conversations = db.listConversations()
+  const titles = new Map(db.listConversationTitlesAll().map((c) => [c.id, c.title] as const))
+  const wsNames = new Map(
+    [...new Set(conversations.map((c) => c.workspace_id).filter((v): v is string => Boolean(v)))].map(
+      (wsId) => [wsId, db.getWorkspace(wsId)?.name ?? ''] as const,
+    ),
+  )
+  const rows = rowsFromAgentTaskRows(subagentTaskStore.listAllAgentTasks(), titles).slice(0, 100)
+  const convById = new Map(conversations.map((c) => [c.id, c] as const))
+  const chats = buildChatPresenceRows(conversations, true).map((c) => {
+    const conv = convById.get(c.conversationId)
+    const wsId = conv?.workspace_id ?? undefined
+    return {
+      ...c,
+      workspaceId: wsId,
+      // '' (unknown ws name) → omit; the tag renders only when we know it.
+      workspaceName: wsId ? wsNames.get(wsId) || undefined : undefined,
+    }
+  })
+  return {
+    workspaceKey: GLOBAL_BOARD_KEY,
+    generatedAt: Date.now(),
+    // Global board presence: active-turn chats across ALL workspaces only —
+    // idle chats from five workspaces would flood the panel with dead rows.
+    chats,
+    rows,
+  }
+}
+
 function scheduleSubagentBoardUpdate(conversationId: string, immediate = false): void {
-  const wk = workspaceKeyForConversation(conversationId)
-  if (!wk) return
+  // Auto-show gate only: when the triggering conversation's workspace is the
+  // focused one, the renderer's `canvas:live-show` gate accepts the panel; a
+  // background workspace's run just updates the (already open) global board.
+  const autoShowWk = workspaceKeyForConversation(conversationId) ?? ''
   if (immediate) {
-    const t = subagentBoardUpdateTimers.get(wk)
+    const t = subagentBoardUpdateTimers.get(GLOBAL_BOARD_KEY)
     if (t) {
       clearTimeout(t)
-      subagentBoardUpdateTimers.delete(wk)
+      subagentBoardUpdateTimers.delete(GLOBAL_BOARD_KEY)
     }
-    pushSubagentBoard(wk, true)
+    pushSubagentBoard(autoShowWk, true)
     return
   }
-  if (subagentBoardUpdateTimers.has(wk)) return
+  // One debounce for the ONE global board — any conversation's run event, any
+  // workspace, drains into the same push.
+  if (subagentBoardUpdateTimers.has(GLOBAL_BOARD_KEY)) return
   subagentBoardUpdateTimers.set(
-    wk,
+    GLOBAL_BOARD_KEY,
     setTimeout(() => {
-      subagentBoardUpdateTimers.delete(wk)
-      // The conversation that triggered this may have been deleted mid-drain; the
-      // board itself only needs the workspace key, which is stable.
-      pushSubagentBoard(wk, false)
+      subagentBoardUpdateTimers.delete(GLOBAL_BOARD_KEY)
+      // The conversation that triggered this may have been deleted mid-drain:
+      // the snapshot is global, so only the auto-show gate is lost.
+      pushSubagentBoard(autoShowWk, false)
     }, 300),
   )
 }
 
-function pushSubagentBoard(workspaceKey: string, forceShow: boolean): void {
-  const data = buildWorkspaceRunsSnapshot(workspaceKey)
-  const existing = subagentBoardForWorkspace(workspaceKey)
+function pushSubagentBoard(autoShowWorkspaceKey: string, forceShow: boolean): void {
+  const data = buildGlobalRunsSnapshot()
+  const existing = subagentBoardForWorkspace(GLOBAL_BOARD_KEY)
   // Diagnostic (operator bug: Running pills never showed in the manual Agent panel):
   // one line per push — rows/chats counts + binding state. Trace what leaves main.
   console.log(
-    `[agent-board] push key=${workspaceKey} rows=${data.rows.length} chats=${data.chats.length} bound=${existing ? String(existing.liveId).slice(0, 8) : 'none'}`,
+    `[agent-board] push (global) rows=${data.rows.length} chats=${data.chats.length} bound=${existing ? String(existing.liveId).slice(0, 8) : 'none'}`,
   )
   if (!existing) {
-    // First subagent run for the workspace (or an earlier empty-drain disposed it):
-    // create + show. Presence alone never self-opens the board.
-    if (data.rows.length === 0) return
-    const liveId = showSubagentBoard(workspaceKey, data)
+    // First run anywhere (or an earlier empty-drain disposed it): create + show.
+    // Presence alone never self-opens the board. The show only goes out when the
+    // run's own workspace is resolvable — the renderer gates `canvas:live-show`
+    // to the FOCUSED workspace, so a background workspace's first run must not
+    // steal the foreground panel; it will show the next time that workspace's
+    // own activity pushes or the operator opens the panel from the + picker.
+    if (data.rows.length === 0 || !autoShowWorkspaceKey) return
+    const liveId = showSubagentBoard(GLOBAL_BOARD_KEY, data)
     mainWindow?.webContents.send('canvas:live-show', {
       liveId,
       kind: 'subagent-runs',
       title: 'Agent',
       data,
-      workspaceKey,
+      workspaceKey: autoShowWorkspaceKey,
     })
     return
   }
-  updateSubagentBoard(workspaceKey, data)
+  updateSubagentBoard(GLOBAL_BOARD_KEY, data)
 }
 
 /** Renderer → main: the `+` picker's "Agent" entry — open (or rebind to) the
- *  workspace's Agent panel as a manual live board. Works with zero run history
- *  (empty state explains; presence still lists). A manual board is exempt from
- *  the all-finished auto-dispose. */
+ *  GLOBAL Agent panel as a manual live board (v4: one panel for every
+ *  workspace; the conversationId argument is retained for wire compatibility
+ *  but no longer scopes anything — no focused chat is required to open it).
+ *  Works with zero run history (empty state explains; presence still lists). A
+ *  manual board is exempt from the all-finished auto-dispose. */
 ipcMain.handle(
   'agentBoard:open',
   (
     _e,
     conversationId: string | null,
   ): { ok: true; liveId: string; title: string; data: SubagentBoardData } | { ok: false; error: string } => {
-    const id = typeof conversationId === 'string' ? conversationId.trim() : ''
-    const wk = id ? workspaceKeyForConversation(id) : null
-    if (!wk) return { ok: false, error: 'no_workspace' }
-    const data = buildWorkspaceRunsSnapshot(wk)
-    const existing = subagentBoardForWorkspace(wk)
+    void conversationId
+    const data = buildGlobalRunsSnapshot()
+    const existing = subagentBoardForWorkspace(GLOBAL_BOARD_KEY)
     if (existing) return { ok: true, liveId: existing.liveId, title: 'Agent', data }
-    const liveId = showSubagentBoard(wk, data, { manual: true })
+    const liveId = showSubagentBoard(GLOBAL_BOARD_KEY, data, { manual: true })
     return { ok: true, liveId, title: 'Agent', data }
   },
 )
@@ -3294,6 +3546,12 @@ async function ensureBrokerSessionForConversation(
   ) {
     return
   }
+  // ── session switch measurement ── clicking a chat that rebinds the broker
+  // runs a full Pi session swap (previous session file + prompt rebuild) —
+  // seconds on a slow machine, and this perf entry is what tells the operator
+  // THAT is what was loading (not a render or a turn).
+  const switchPerfT0 = performance.now()
+  const switchPerfTag = `${phase} → conv ${convId.slice(0, 8)}`
   // Freshly spawned overflow broker: its Pi init already loaded exactly this
   // conversation's session/policy/model binding (recorded at spawn time). A
   // switchSession here would re-invoke Pi's createRuntime factory — a second
@@ -3340,6 +3598,11 @@ async function ensureBrokerSessionForConversation(
   } finally {
     // Stats arriving after this point correspond to the settled binding.
     brokerSwitchInFlightSupervisors.delete(supervisor)
+    perfMark(
+      'chat.focusSession',
+      `${switchPerfTag} — Pi switchSession (child agent rebinds its session; renders stay responsive, first send here is pre-bound)`,
+      performance.now() - switchPerfT0,
+    )
   }
   if (supervisor === broker) {
     brokerFocusedConversationId = convId
@@ -3450,7 +3713,13 @@ async function prepareUserMessageWithImages(
   const norm = normalizeAttachments(attachments)
   if (norm.length === 0) return { text, promptText: text, images: [] }
 
+  const t0 = performance.now()
   const { images, delivered, skipped } = encodeImageAttachmentsForPi(norm)
+  perfMark(
+    'image.encodeAll',
+    `${images.length}/${norm.length} encoded${skipped.length ? `, ${skipped.length} skipped: ${skipped.map((s) => s.reason).join(',')}` : ''}`, // what's loading during a paste+Enter send
+    performance.now() - t0,
+  )
   for (const s of skipped) {
     console.warn('[sylo] skipped image attachment for Pi:', s.path, s.reason)
   }
@@ -3738,10 +4007,36 @@ async function startChatTurn(
   // win; queued/deferred turns read the chat's pref at THEIR send time, which
   // is exactly "inherit the toggle state at send time").
   const planMode = options?.planMode ?? (db.getPref(planModePrefKey(conversationId), false) as unknown) === true
-  const prepared = options?.prepared ?? (await prepareUserMessageWithImages(text, attachments))
+  // 2026-10-11 freeze report: image encoding is SYNCHRONOUS in this (main)
+  // process and takes seconds for large screenshots, and the user row used to
+  // be inserted only AFTER it — the operator pasted a picture, pressed Enter,
+  // and saw next to nothing in chat (or a frozen app) while the encode ran.
+  // Insert the user row FIRST so the bubble + attachment chips are in the DB
+  // (and the next refresh paints them) immediately; the delivery-metadata
+  // block the real row carries is patched in right after the encode below.
+  // The chat:send IPC is what the renderer awaits — the renderer's optimistic
+  // bubble already covers the first ~frame, this closes the remaining gap for
+  // queued/deferred/resumed paths that have no optimistic bubble.
+  const prepareInline = !options?.prepared
+  let insertedUserRow: ReturnType<typeof db.insertMessage> | null = null
   if (!options?.skipUserInsert) {
-    db.insertMessage(conversationId, 'user', prepared.text, 'complete')
+    insertedUserRow = db.insertMessage(conversationId, 'user', text, 'complete')
     maybeAutoTitleFromFirstUserMessage(conversationId, options?.titleText ?? text)
+  }
+  const prepT0 = performance.now()
+  const prepared = options?.prepared ?? (await prepareUserMessageWithImages(text, attachments))
+  const prepMs = performance.now() - prepT0
+  if (prepareInline && insertedUserRow && prepared.text !== text) {
+    // Patch in the delivery metadata the encode produced (final shape equals
+    // the old behavior's persisted row: attachment block + delivery summary).
+    db.updateMessageContent(insertedUserRow.id, prepared.text, 'complete')
+  }
+  if (prepMs > 50) {
+    perfMark(
+      'chat.sendPrepare',
+      `attachments prepare (sync in main) — encode of ${(attachments ?? []).length} attachment(s) blocked the app this long`,
+      prepMs,
+    )
   }
   {
     // Plan notice rides the established noticeAfterUser channel so the turn is
@@ -3790,7 +4085,13 @@ ${PLAN_MODE_NOTICE}` : PLAN_MODE_NOTICE
   // idle even though the user + assistant rows exist in the DB. Reopening the
   // chat re-reads the DB, which is why "leave and come back" used to fix it.
   emitChatRefresh(conversationId, 'messages')
+  const acquireT0 = performance.now()
   const assignedBroker = await acquireBrokerForTurn(conversationId)
+  const acquireMs = performance.now() - acquireT0
+  if (acquireMs > 50) {
+    const brokerInfo = assignedBroker ? (assignedBroker === broker ? 'primary' : 'overflow') : 'none-free'
+    perfMark('chat.sendBroker', `broker slot acquire (${brokerInfo}) — wait the send sat in queue`, acquireMs)
+  }
   if (!assignedBroker) {
     flushPendingTurnBuffers(pendingTurns.get(turnId)!)
     dropPendingTurn(turnId)
@@ -3801,7 +4102,12 @@ ${PLAN_MODE_NOTICE}` : PLAN_MODE_NOTICE
   }
   turnBrokerPool.assignTurn(turnId, assignedBroker)
   try {
+    const ensureT0 = performance.now()
     await ensureBrokerSessionForConversation(conversationId, { planMode })
+    const ensureMs = performance.now() - ensureT0
+    if (ensureMs > 50) {
+      perfMark('chat.sendEnsure', `session ensure pre-turn (rebound or skipped inside; see chat.focusSession entries)`, ensureMs)
+    }
   } catch (e) {
     flushPendingTurnBuffers(pendingTurns.get(turnId)!)
     dropPendingTurn(turnId)
@@ -4678,6 +4984,42 @@ function handleBrokerOutMessage(
     })
     return
   }
+  if (msg.type === 'sylo-image-gen:changed') {
+    // Broker (agent tool) mutated the per-workspace image library (§4.2,
+    // §8 step 7 change fan). Fan a lightweight "changed" signal — no data, the
+    // Images route refetches — to every window's renderer (docked + any route
+    // popout windows run the same renderer bundle and forward it into their
+    // skill-route iframe as a `libraryChanged` bridge event). Same
+    // eventual-consistency posture as the tasks fan: worst case is a refetch
+    // that reads the already-current store.
+    const payload = {
+      workspaceKey: String(msg.workspaceKey ?? '').trim(),
+      reason: String(msg.reason ?? ''),
+    }
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('imagegen:library-changed', payload)
+    }
+    return
+  }
+  if (msg.type === 'sylo-video-gen:changed') {
+    // CLONE of the imagegen consumer above (plan §5.5 — "clone the small fan,
+    // do NOT generalize"): the broker child mutated the per-workspace VIDEO
+    // library (§4.5 fan). Same eventual-consistency posture — a lightweight
+    // nudge, no data; the Videos route refetches. Deliberately a separate
+    // block + channel ('videogen:library-changed', imagegen-labeled prop
+    // naming stays untouched); both routes tolerate the other's nudge (a
+    // refetch is cheap). Payload mirrors the imagegen fan:
+    // { workspaceKey, reason } + the §5.5 optional source tag.
+    const payload = {
+      workspaceKey: String(msg.workspaceKey ?? '').trim(),
+      reason: String(msg.reason ?? ''),
+      source: 'videogen',
+    }
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('videogen:library-changed', payload)
+    }
+    return
+  }
     if (msg.type === 'sylo-tasks:open-on-canvas') {
     // Agent asked to surface `listId` on the live Canvas. Per-workspace model:
     // dispose only THIS workspace's previous board (other workspaces' boards
@@ -5357,6 +5699,19 @@ function buildBrokerSupervisorOptions(
       readSyloOptionalPackagesPref(),
       findSyloOptionalPackage('sylo-think-tank'),
     ),
+    imagegenConfigPath: imagegenConfigEnvPath(
+      app.getPath('userData'),
+      readSyloOptionalPackagesPref(),
+      findSyloOptionalPackage('sylo-image-gen'),
+    ),
+    // sylo-video-gen (plan §5.1, §8 step 7): host-owned config → broker env
+    // SYLO_VIDEOGEN_CONFIG when the package is enabled (imagegen parity; the
+    // §8.1 deferred env-injection residual, issue #34).
+    videogenConfigPath: videogenConfigEnvPath(
+      app.getPath('userData'),
+      readSyloOptionalPackagesPref(),
+      findSyloOptionalPackage('sylo-video-gen'),
+    ),
     imageModelId: eff.imageModelId || undefined,
     imageModelProvider: eff.imageModelProvider || undefined,
     ollamaBaseOrigin: resolveOllamaBaseOriginForPrefs(),
@@ -5887,6 +6242,24 @@ function registerIpc(): void {
     if (typeof id !== 'string' || typeof archived !== 'boolean') return
     db.setConversationArchived(id, archived)
   })
+  // Sidebar pin: right-click → Pin/Unpin. Pinned chats sort above unpinned ones in
+  // their workspace section and are skipped by the auto-archive sweep.
+  ipcMain.handle('conversations:setPinned', (_e, id: unknown, pinned: unknown) => {
+    if (typeof id !== 'string' || typeof pinned !== 'boolean') return
+    db.setConversationPinned(id, pinned)
+  })
+  // Sidebar pin drag-reorder: `ids` is one workspace section's pinned chats in
+  // their new order (pin_rank = index). Missing/unpinned ids are skipped main-side.
+  ipcMain.handle('conversations:reorderPinned', (_e, ids: unknown) => {
+    if (!Array.isArray(ids)) return { ok: false as const, error: 'bad_ids' }
+    try {
+      db.reorderPinnedConversations(ids as string[])
+      return { ok: true as const }
+    } catch (err) {
+      console.warn('[sylo] conversations:reorderPinned failed', err)
+      return { ok: false as const, error: 'persist_failed' }
+    }
+  })
   ipcMain.handle('conversations:list-archived', (_e, workspaceId: unknown) =>
     typeof workspaceId === 'string' ? db.listArchivedConversations(workspaceId) : db.listArchivedConversations(),
   )
@@ -6405,7 +6778,20 @@ function registerIpc(): void {
     }
     return restoreTurn(conversationId.trim(), assistantMessageId.trim())
   })
-  ipcMain.handle('messages:list', (_e, conversationId: string) => db.listMessages(conversationId))
+  ipcMain.handle('messages:list', (_e, conversationId: string) => {
+    const perfT0 = performance.now()
+    const rows = db.listMessages(conversationId)
+    // Attribute the chat-switch "freeze": sync SQLite read + the payload the
+    // renderer gets (structured clone serializes row content + tool JSON).
+    let payloadChars = 0
+    for (const r of rows) payloadChars += (r.content?.length ?? 0) + (r.tool_calls_json?.length ?? 0)
+    perfMark(
+      'chat.load',
+      `messages:list — ${rows.length} rows, ~${Math.round(payloadChars / 1024)}KB payload`,
+      performance.now() - perfT0,
+    )
+    return rows
+  })
   // ── @-references in the composer (task 06, Cursor parity) ────────────────
   // Main-side walk of the workspace cwd (renderer must not scan the disk).
   // Exclusions + caps mirror the checkpoint capture; hits are ordered
@@ -6877,10 +7263,21 @@ function registerIpc(): void {
       mkdirSync(dir, { recursive: true })
       const clean = (rawTabs as unknown[])
         .filter(
-          (t): t is { kind: 'terminal' | 'browser'; title?: unknown; terminalCwd?: unknown; browserUrl?: unknown; scrollback?: unknown } =>
+          (t): t is {
+            kind: 'terminal' | 'browser' | 'skill-route'
+            title?: unknown
+            terminalCwd?: unknown
+            browserUrl?: unknown
+            scrollback?: unknown
+            skillFolderName?: unknown
+            routeId?: unknown
+            fixturePath?: unknown
+          } =>
             Boolean(t) &&
             typeof t === 'object' &&
-            ((t as { kind?: unknown }).kind === 'terminal' || (t as { kind?: unknown }).kind === 'browser'),
+            ((t as { kind?: unknown }).kind === 'terminal' ||
+              (t as { kind?: unknown }).kind === 'browser' ||
+              (t as { kind?: unknown }).kind === 'skill-route'),
         )
         .slice(0, 24)
         .map((t) => ({
@@ -6890,6 +7287,12 @@ function registerIpc(): void {
           browserUrl: typeof t.browserUrl === 'string' ? t.browserUrl.slice(0, 2000) : undefined,
           scrollback:
             typeof t.scrollback === 'string' ? t.scrollback.slice(-200_000) : undefined,
+          // skill-route rows: persisted dashboard identity (renderer verifies
+          // against the live route list on restore; stale rows are skipped).
+          skillFolderName:
+            typeof t.skillFolderName === 'string' ? t.skillFolderName.slice(0, 80) : undefined,
+          routeId: typeof t.routeId === 'string' ? t.routeId.slice(0, 80) : undefined,
+          fixturePath: typeof t.fixturePath === 'string' ? t.fixturePath.slice(0, 2000) : undefined,
         }))
             const stored = JSON.stringify(
         Array.isArray(payload)
@@ -6908,7 +7311,12 @@ function registerIpc(): void {
       const parsed: unknown = JSON.parse(
         readFileSync(join(poolTabsDir(), `${sanitizeWsKey(wsKey)}.json`), 'utf8'),
       )
-      return Array.isArray(parsed) ? parsed : []
+      // Stored shapes: v2 object envelope ({ version: 2, activeId?, tabs })
+      // and legacy v1 plain arrays. Mirror the save gate — pass through any
+      // parsed object (arrays are typeof 'object' too); only primitives/null
+      // fall back to []. Gating on Array.isArray here discarded every v2
+      // store, dead-coding the renderer's `savedRaw?.tabs` restore path.
+      return (parsed && typeof parsed === 'object') ? parsed : []
     } catch {
       return []
     }
@@ -7015,23 +7423,10 @@ function registerIpc(): void {
     writeSkillDataJson(app.getPath('userData'), skillKey, key, value, SKILL_DATA_QUOTA_BYTES),
   )
 
-  setPlanTodosListener(() => {
-    mainWindow?.webContents.send('plan:changed')
-  })
-  ipcMain.handle('plan:todos', (_e, conversationId: unknown) => {
-    const id = typeof conversationId === 'string' ? conversationId.trim() : ''
-    if (!id) return { conversationId: '', todos: [], status: 'active' as const }
-    return readPlanTodos(id)
-  })
   ipcMain.handle('plan:clearForNewChat', (_e, workspaceId: unknown) => {
     const wid = typeof workspaceId === 'string' ? workspaceId.trim() : ''
     if (wid) clearPlanForNewChat(wid)
     return { ok: true as const }
-  })
-  ipcMain.handle('plan:hide', (_e, conversationId: unknown) => {
-    const id = typeof conversationId === 'string' ? conversationId.trim() : ''
-    if (!id) return { ok: false as const, reason: 'no_plan' as const }
-    return hidePlanTodos(id)
   })
 
   ipcMain.handle('tasks:list', (_e, conversationId: unknown) => {
@@ -7320,6 +7715,19 @@ function registerIpc(): void {
     ),
   )
 
+  // ── Developer → Testing: perf probes (chat-switch + image-send freeze report,
+  // 2026-10-11). Raw [perf] lines plus two synthetic, read-only probes.
+  ipcMain.handle('perf:recent', (_e, limit: unknown) => perfRecent(typeof limit === 'number' ? limit : 100))
+  ipcMain.handle('perf:probeConversationLoad', (_e, limit: unknown) =>
+    probeConversationLoad(typeof limit === 'number' ? limit : undefined),
+  )
+  ipcMain.handle('perf:probeImageEncode', (_e, width: unknown, height: unknown) =>
+    probeImageEncode(
+      typeof width === 'number' ? width : undefined,
+      typeof height === 'number' ? height : undefined,
+    ),
+  )
+
   ipcMain.handle('webaccess:listRuns', (_e, limit: unknown) => {
     const n = typeof limit === 'number' && Number.isFinite(limit) ? Math.min(500, Math.max(1, limit)) : 100
     return webAccessStore.listWebAccessRuns(n)
@@ -7483,6 +7891,181 @@ function registerIpc(): void {
     const r = deleteTtsRouteClip(app.getPath('userData'), path)
     if (!r.ok) return { ok: false as const, error: r.error }
     return { ok: true as const }
+  })
+
+  // ── sylo-image-gen (plan §5.6, §8 step 5) — Images sidebar route ops ──
+  // All handlers funnel into main/imagegen-host.ts, which composes the same
+  // packages/sylo-image-gen/shared/* modules the agent tools use (doctor
+  // parity, §3 notes 1/3). The renderer injects the active workspace's
+  // resolved cwd into every op (workspaceCwd), mirroring the tasks ops.
+  ipcMain.handle('imagegen:configGet', () => {
+    ensureImagegenConfigSchema(hostAgentDir())
+    return { ok: true as const, config: readImagegenConfig(app.getPath('userData')) }
+  })
+  ipcMain.handle('imagegen:configSave', (_e, values: unknown) => {
+    if (!values || typeof values !== 'object' || Array.isArray(values)) {
+      return { ok: false as const, error: 'bad_values' }
+    }
+    const wrote = writeImagegenConfig(app.getPath('userData'), values as Record<string, unknown>)
+    if (!wrote.ok) return { ok: false as const, error: wrote.error }
+    ensureImagegenConfigSchema(hostAgentDir())
+    return {
+      ok: true as const,
+      restartNote: 'Restart the conversation/broker for preset-default changes to apply to the agent tools.',
+    }
+  })
+  ipcMain.handle('imagegen:status', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    const cwd = typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined
+    return await imagegenStatus({
+      workspaceCwd: cwd,
+      with_models: p.with_models === true,
+      userDataPath: app.getPath('userData'),
+    })
+  })
+  ipcMain.handle('imagegen:generate', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    return await imagegenGenerate({
+      workspaceCwd: typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined,
+      userDataPath: app.getPath('userData'),
+      request: (p.request && typeof p.request === 'object' ? p.request : {}) as Record<string, unknown>,
+    })
+  })
+  ipcMain.handle('imagegen:jobGet', (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    return imagegenJobGet({ job_id: p.job_id })
+  })
+  ipcMain.handle('imagegen:queueList', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    return await imagegenQueueList({
+      workspaceCwd: typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined,
+      userDataPath: app.getPath('userData'),
+    })
+  })
+  ipcMain.handle('imagegen:libraryList', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    return await imagegenLibraryList({ ...p, workspaceCwd: typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined })
+  })
+  ipcMain.handle('imagegen:imageGet', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    return await imagegenImageGet({ image_id: p.image_id, workspaceCwd: typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined })
+  })
+  ipcMain.handle('imagegen:imageUpdate', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    return await imagegenImageUpdate({ ...p, workspaceCwd: typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined })
+  })
+  ipcMain.handle('imagegen:imageDelete', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    return await imagegenImageDelete({ image_id: p.image_id, workspaceCwd: typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined })
+  })
+  ipcMain.handle('imagegen:revealFile', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    const resolved = await imagegenRevealFile({
+      image_id: p.image_id,
+      workspaceCwd: typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined,
+    })
+    shell.showItemInFolder(resolved.path)
+    return { ok: true as const, path: resolved.path }
+  })
+
+  // ── sylo-video-gen (plan §5.2, §8 step 7) — Videos sidebar route ops ──
+  // CLONE of the imagegen block above over main/videogen-host.ts, which
+  // composes the packages/sylo-video-gen/shared/* modules the agent tools use
+  // (doctor parity, §3.3). Video semantics ONLY where the plan names them:
+  // durable jobs.json ledger ops (§4.3) + the read-only /history replay
+  // (`jobsList`/`jobsReplay` — no in-memory job map as the source of truth),
+  // and reveal that can target the clip OR the in-graph poster. Channel names
+  // per §5.2's exact IPC surface; preload `window.sylo.videogen` mirrors them.
+  ipcMain.handle('videogen:configGet', () => {
+    ensureVideogenConfigSchema(hostAgentDir())
+    return { ok: true as const, config: readVideogenConfig(app.getPath('userData')) }
+  })
+  ipcMain.handle('videogen:configSave', (_e, values: unknown) => {
+    if (!values || typeof values !== 'object' || Array.isArray(values)) {
+      return { ok: false as const, error: 'bad_values' }
+    }
+    const wrote = writeVideogenConfig(app.getPath('userData'), values as Record<string, unknown>)
+    if (!wrote.ok) return { ok: false as const, error: wrote.error }
+    ensureVideogenConfigSchema(hostAgentDir())
+    return {
+      ok: true as const,
+      restartNote: 'Restart the conversation/broker for preset-default changes to apply to the agent tools.',
+    }
+  })
+  ipcMain.handle('videogen:status', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    const cwd = typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined
+    return await videogenStatus({
+      workspaceCwd: cwd,
+      with_models: p.with_models === true,
+      userDataPath: app.getPath('userData'),
+    })
+  })
+  ipcMain.handle('videogen:generate', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    return await videogenGenerate({
+      workspaceCwd: typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined,
+      userDataPath: app.getPath('userData'),
+      request: (p.request && typeof p.request === 'object' ? p.request : {}) as Record<string, unknown>,
+    })
+  })
+  ipcMain.handle('videogen:jobGet', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    return await videogenJobGet({
+      job_id: p.job_id,
+      workspaceCwd: typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined,
+    })
+  })
+  ipcMain.handle('videogen:queueList', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    return await videogenQueueList({
+      workspaceCwd: typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined,
+      userDataPath: app.getPath('userData'),
+    })
+  })
+  ipcMain.handle('videogen:jobsList', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    return await videogenJobsList({
+      workspaceCwd: typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined,
+      status: p.status,
+      limit: typeof p.limit === 'number' ? p.limit : undefined,
+      offset: typeof p.offset === 'number' ? p.offset : undefined,
+    })
+  })
+  ipcMain.handle('videogen:jobsReplay', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    // §4.3 replay — READ-ONLY against ComfyUI (/history + /queue + /view GETs
+    // only; never resubmits; skips plainly when ComfyUI is unreachable).
+    return await videogenJobsReplay({
+      workspaceCwd: typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined,
+      userDataPath: app.getPath('userData'),
+    })
+  })
+  ipcMain.handle('videogen:libraryList', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    return await videogenLibraryList({ ...p, workspaceCwd: typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined })
+  })
+  ipcMain.handle('videogen:videoGet', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    return await videogenVideoGet({ video_id: p.video_id, workspaceCwd: typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined })
+  })
+  ipcMain.handle('videogen:videoUpdate', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    return await videogenVideoUpdate({ ...p, workspaceCwd: typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined })
+  })
+  ipcMain.handle('videogen:videoDelete', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    return await videogenVideoDelete({ video_id: p.video_id, workspaceCwd: typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined })
+  })
+  ipcMain.handle('videogen:revealFile', async (_e, payload: unknown) => {
+    const p = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+    const resolved = await videogenRevealFile({
+      video_id: p.video_id,
+      kind: p.kind,
+      workspaceCwd: typeof p.workspaceCwd === 'string' ? p.workspaceCwd : undefined,
+    })
+    shell.showItemInFolder(resolved.path)
+    return { ok: true as const, path: resolved.path }
   })
 
   // Personal bundle (app-level user package) — resolved at runtime from the
@@ -10030,10 +10613,13 @@ app.whenReady().then(() => {
     )
   }
   const userData = app.getPath('userData')
-  archiveStaleConversations(userData, hostAgentDir())
+  const retentionDays = resolveConversationRetentionDays()
+  archiveStaleConversations(userData, hostAgentDir(), retentionDays)
   pruneCheckpoints()
-  subagentTaskStore.pruneStaleHostSessions(Date.now() - CONVERSATION_RETENTION_MS)
-  pruneStaleWebAccessRuns(Date.now() - CONVERSATION_RETENTION_MS)
+  // The two housekeeping prunes share the retention window; they are NOT gated
+  // by the auto-archive switch (internal bookkeeping, not chats).
+  subagentTaskStore.pruneStaleHostSessions(Date.now() - retentionDays * MS_PER_DAY)
+  pruneStaleWebAccessRuns(Date.now() - retentionDays * MS_PER_DAY)
   pruneOrphanChatAttachments(userData)
   pruneStaleTtsRouteClips(userData)
   // Canvas sketch mirror: the freehand drawing does not survive restarts — drop
@@ -10045,6 +10631,9 @@ app.whenReady().then(() => {
   }
   pruneStalePdfCacheDir()
   initSubagentTaskHostSession()
+  // Last-resort sweep for subagent rows whose child died without run_end (keeps the
+  // runs board + subagentsRunning() honest even when no other finalize path fires).
+  startSubagentOrphanReconcile()
   initScheduledPromptsService({
     fire: fireScheduledPromptFromHost,
     getMainWindow: () => mainWindow ?? null,
@@ -10105,6 +10694,22 @@ app.whenReady().then(() => {
   void maybeAutoMigrateFieldBrainDb()
 
   void restartCompanionServer()
+
+  // §4.3 durable render-ledger REPLAY (the §8.5 residual, issue #34): a video
+  // render longer than a Sylo relaunch leaves queued/running rows in
+  // <workspace>/.sylo/videos/jobs.json — re-poll ComfyUI /history for each
+  // (READ-ONLY: /history + /queue + /view GETs, never resubmits; skips
+  // plainly when ComfyUI is unreachable) and recover finished outputs into
+  // the library. Fire-and-forget; on-demand twin is `videogen:jobsReplay`.
+  try {
+    for (const ws of db.listWorkspaces()) {
+      const piCwd = ws.pi_cwd?.trim()
+      if (!piCwd || !videogenWorkspaceHasLedger(piCwd)) continue
+      void videogenJobsReplay({ workspaceCwd: piCwd, userDataPath: app.getPath('userData') }).catch(() => undefined)
+    }
+  } catch {
+    /* workspace enumeration unavailable (early boot) — replay rides the on-demand op */
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

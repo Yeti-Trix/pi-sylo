@@ -78,6 +78,28 @@ describe('rowsFromAgentTaskRows', () => {
     assert.equal(rows[0]?.model, null)
     assert.deepEqual(rows[0]?.files, [])
     assert.equal(rows[0]?.title, 'truncated task title')
+    // The trace is always an array — the expanded Agent panel row replays it.
+    assert.deepEqual(rows[0]?.trace, [])
+  })
+
+  test('working trace rides the row as a bounded tail; missing trace is an empty array', () => {
+    const entries = Array.from({ length: 85 }, (_, i) => ({
+      seq: i + 1,
+      k: i % 2 === 0 ? 'tool' : 'text',
+      name: 'read',
+      preview: `entry-${i + 1}`,
+    }))
+    const rows = rowsFromAgentTaskRows([
+      row({ id: 'r5', spec_json: JSON.stringify({ task: 't', trace: entries }) }),
+      row({ id: 'r6', spec_json: JSON.stringify({ task: 't' }) }),
+      row({ id: 'r7', spec_json: '{oops' }),
+    ])
+    // Capped at the last 80 (matches the DB writer's cap on this side too).
+    assert.equal(rows[0]?.trace.length, 80)
+    assert.equal(rows[0]?.trace[0]?.seq, 6)
+    assert.equal(rows[0]?.trace.at(-1)?.seq, 85)
+    assert.deepEqual(rows[1]?.trace, [])
+    assert.deepEqual(rows[2]?.trace, [])
   })
 
   test('live-first ordering: running before finished, finished newest first', () => {

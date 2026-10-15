@@ -162,6 +162,35 @@ export const SYLO_OPTIONAL_PACKAGES: readonly SyloOptionalPackage[] = [
     skillNames: ['tasks'],
     requiresSyloUi: true,
   },
+  {
+    id: 'sylo-image-gen',
+    title: 'Image studio',
+    description:
+      'Local-first image generation through **ComfyUI** (agent tool sylo_image_gen_generate) with a ' +
+      'per-workspace **image library** (tags, favorites, search) shared by chat and the sidebar **Images** ' +
+      'route. Draft→final presets (fast Z-Image/Qwen drafts, high-quality finals), provenance metadata, ' +
+      'cost/time ledger. ComfyUI is an external app you install separately — the package talks to it over ' +
+      'HTTP and needs **no Python of its own**. Tool sylo_image_gen_doctor guides setup in chat.',
+    extensionRelPath: 'packages/sylo-image-gen/extensions/index.ts',
+    skillNames: ['image-gen'],
+    requiresSyloUi: true,
+  },
+  {
+    id: 'sylo-video-gen',
+    title: 'Video studio',
+    description:
+      'Local-first video generation through **ComfyUI** (agent tool sylo_video_gen_generate) with a ' +
+      'per-workspace **video library** (tags, favorites, search) shared by chat and the sidebar ' +
+      '**Videos** route. Three v1 modes as preset ComfyUI graphs — shot clips (t2v/i2v, draft ' +
+      'Wan-2.2 ti2v-5B → final Wan-2.2 A14B), living-photo loops (first==last-frame conditioning, ' +
+      'song backdrops), and whole-clip restyle (Wan-2.1 VACE) — with a durable render ledger that ' +
+      'survives restarts and a GPU-time budget. ComfyUI is an external app you install separately — ' +
+      'the package talks to it over HTTP and needs **no Python of its own**. Tool ' +
+      'sylo_video_gen_doctor guides setup in chat.',
+    extensionRelPath: 'packages/sylo-video-gen/extensions/index.ts',
+    skillNames: ['video-gen'],
+    requiresSyloUi: true,
+  },
 ] as const
 
 const OPTIONAL_PACKAGE_IDS = new Set(SYLO_OPTIONAL_PACKAGES.map((p) => p.id))

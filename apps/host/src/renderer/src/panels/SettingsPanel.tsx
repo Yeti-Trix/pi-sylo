@@ -12,6 +12,16 @@ import {
   SYLO_MAX_CONCURRENT_TURNS_PREF,
 } from '../../../shared/concurrent-turns'
 import { normalizeOllamaOriginUi } from './ollama-ui'
+import {
+  DEFAULT_RETENTION_DAYS,
+  MAX_RETENTION_DAYS,
+  MIN_RETENTION_DAYS,
+  SYLO_RETENTION_AUTO_ARCHIVE_PREF,
+  SYLO_RETENTION_DAYS_PREF,
+  clampRetentionDays,
+  normalizeAutoArchiveEnabled,
+  normalizeRetentionDays,
+} from '../../../shared/sylo-chat-retention-settings'
 import { PathRow } from './PathRow'
 import { Badge } from './Badge'
 import { ToastHost, toast } from './toast'
@@ -214,6 +224,27 @@ export function SettingsPanel({
     setMaxConcurrentTurns(diagnostics.maxConcurrentTurns)
     setMaxConcurrentDraft(String(diagnostics.maxConcurrentTurns))
   }, [diagnostics.concurrentTurns, diagnostics.maxConcurrentTurns])
+
+  // --- General: inactive-chat retention sweep --------------------------------
+  const [autoArchive, setAutoArchive] = useState(true)
+  const [retentionDays, setRetentionDays] = useState(DEFAULT_RETENTION_DAYS)
+  /** Free-text draft for the number input — persisted only when it parses. */
+  const [retentionDraft, setRetentionDraft] = useState(String(DEFAULT_RETENTION_DAYS))
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const storedFlag = (await window.sylo.prefs.get(SYLO_RETENTION_AUTO_ARCHIVE_PREF, true)) as unknown
+        setAutoArchive(normalizeAutoArchiveEnabled(storedFlag) ?? true)
+        const storedDays = (await window.sylo.prefs.get(SYLO_RETENTION_DAYS_PREF, DEFAULT_RETENTION_DAYS)) as unknown
+        const days = normalizeRetentionDays(storedDays) ?? DEFAULT_RETENTION_DAYS
+        setRetentionDays(days)
+        setRetentionDraft(String(days))
+      } catch {
+        /* prefs bridge may be unavailable on older builds */
+      }
+    })()
+  }, [])
 
   return (
     <div className="flex min-h-0 flex-1 w-full">
@@ -503,6 +534,60 @@ export function SettingsPanel({
                 </details>
               </>
             : null}
+          </section>
+
+          <section className={card}>
+            <h2 className={cardTitle}>Inactive chats</h2>
+            <label className="flex cursor-pointer items-start gap-2 text-[0.88rem]">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={autoArchive}
+                onChange={(e) => {
+                  setAutoArchive(e.target.checked)
+                  void window.sylo.prefs
+                    .set(SYLO_RETENTION_AUTO_ARCHIVE_PREF, e.target.checked)
+                    .then(onChanged)
+                }}
+              />
+              <span>Automatically archive inactive chats at startup</span>
+            </label>
+            <p className={leadText}>
+              Chats with no activity for the set number of days are archived: the conversation is kept in
+              full — restore it from the sidebar&apos;s <strong>Archived</strong> section. Empty chats
+              (zero messages) are deleted outright. <strong>Pinned</strong> chats (right-click a chat
+              → Pin) are never archived or deleted by this sweep.
+            </p>
+            {autoArchive ? (
+              <label className="mt-3 flex flex-col gap-1">
+                <span className={fieldLabel}>Days before archiving</span>
+                <input
+                  className={cn(input, 'max-w-[10rem]')}
+                  type="number"
+                  min={MIN_RETENTION_DAYS}
+                  max={MAX_RETENTION_DAYS}
+                  step={1}
+                  value={retentionDraft}
+                  onChange={(e) => {
+                    const draft = e.target.value
+                    setRetentionDraft(draft)
+                    const parsed = Number.parseInt(draft, 10)
+                    if (Number.isFinite(parsed)) {
+                      const clamped = clampRetentionDays(parsed)
+                      setRetentionDays(clamped)
+                      void window.sylo.prefs
+                        .set(SYLO_RETENTION_DAYS_PREF, clamped)
+                        .then(onChanged)
+                    }
+                  }}
+                  onBlur={() => setRetentionDraft(String(retentionDays))}
+                />
+                <span className={caption}>
+                  Days of inactivity before a chat is archived (default {DEFAULT_RETENTION_DAYS}). The
+                  sweep runs each time Sylo starts, so changes apply on the next launch.
+                </span>
+              </label>
+            ) : null}
           </section>
         </div>
 

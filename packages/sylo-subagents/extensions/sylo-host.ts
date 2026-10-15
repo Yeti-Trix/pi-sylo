@@ -2,6 +2,24 @@ import { randomUUID } from 'node:crypto'
 
 export type SyloSubagentRunMode = 'single' | 'parallel' | 'chain'
 
+/**
+ * One entry of a run's working trace (think/text/tool), emitted by the child.
+ * Immutable except a pending tool's ms/err/tail, patched by tool_execution_end.
+ */
+export type SyloSubagentTraceEntry =
+  | { seq: number; k: 'think'; text: string }
+  | { seq: number; k: 'text'; text: string }
+  | {
+      seq: number
+      k: 'tool'
+      name: string
+      preview: string
+      ms?: number
+      err?: boolean
+      /** Failed-call result tail when the tool returned an error. */
+      tail?: string
+    }
+
 export type SyloSubagentHostEvent =
   | {
       type: 'subagent_run_start'
@@ -75,6 +93,8 @@ export type SyloSubagentHostEvent =
       model?: string
       /** Workspace files this run has touched so far (deduped, capped at source). */
       files?: string[]
+      /** Full working trace so far — only present when it changed since the last update. */
+      trace?: SyloSubagentTraceEntry[]
     }
   | {
       type: 'subagent_run_end'
@@ -86,13 +106,15 @@ export type SyloSubagentHostEvent =
       error?: string
       /** Workspace files this run touched, first-touch order (deduped, capped at source). */
       files?: string[]
+      /** Final working trace, so the pill replays the full run after it ends. */
+      trace?: SyloSubagentTraceEntry[]
       usage?: {
         input: number
         output: number
         cost: number
         turns: number
       }
-    }
+        }
 
 export function newSubagentRunId(): string {
   return randomUUID()

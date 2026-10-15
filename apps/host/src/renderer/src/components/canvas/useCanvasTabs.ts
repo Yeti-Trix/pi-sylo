@@ -6,7 +6,9 @@ import {
   type CanvasTab,
   type CanvasView,
   type DiffTabPayload,
+  type SkillRouteTabPayload,
   type WidgetTabPayload,
+  tabKind,
 } from './canvasTypes'
 
 /**
@@ -114,6 +116,17 @@ export type UseCanvasTabs = {
    *  resource like terminals/boards. Falls back to the `w:` bucket when no
    *  chat is focused. Returns the tab id. */
   openWidgetTab: (payload: WidgetTabPayload) => string
+  /** Open (or re-activate) a docked skill-route tab (e.g. the Images
+   *  dashboard). WORKSPACE-POOLED like browser/terminal tabs — the route is
+   *  a workspace resource (workspace-scoped library/data), visible from
+   *  every conversation — but dedupes by route key
+   *  (`skillFolderName:routeId`, same as the nav pin key): re-docking the
+   *  same route re-activates its tab instead of piling up copies, because a
+   *  second copy would be the SAME surface with no independent state of its
+   *  own (browsers repeat only because each tab owns a distinct URL/pty).
+   *  Persists across restarts — see the restore effect below. Returns the
+   *  tab id. */
+  openSkillRouteTab: (payload: SkillRouteTabPayload, origin?: string) => string
   /** Open (or re-activate) a read-only diff-review tab (task 07). Dedupes by
    *  assistant message id; scope bucket = focused conversation (same
    *  reasoning as widgets). Returns the tab id. */
@@ -169,10 +182,12 @@ export function useCanvasTabs({
 
   const nextTabId = useCallback((): string => `canvas-tab-${++tabSeq.current}`, [])
 
-  // ── workspace pool persistence: restore saved terminal/browser tabs ──────
+  // ── workspace pool persistence: restore saved terminal/browser/route tabs ─
   // Runs once per workspace id (guard ref): reads the main-process JSON store
   // and recreates the pool. Restored terminals get their pty via
-  // `onTerminalRestored`; browsers reopen their saved URL via `browserUrl`.
+  // `onTerminalRestored`; browsers reopen their saved URL via `browserUrl`;
+  // skill-route tabs are verified against the live route list (skipped
+  // silently when the route is gone) before being recreated.
   const restoredPoolWsRef = useRef('')
   useEffect(() => {
     if (!workspaceId || restoredPoolWsRef.current === workspaceId) return
@@ -183,11 +198,29 @@ export function useCanvasTabs({
       const savedList = Array.isArray(savedRaw) ? savedRaw : savedRaw?.tabs ?? []
       const savedActiveId = Array.isArray(savedRaw) ? undefined : savedRaw?.activeId
       type SavedTab = {
-        kind: 'terminal' | 'browser'
+        kind: 'terminal' | 'browser' | 'skill-route'
         title?: string
         terminalCwd?: string
         browserUrl?: string
         scrollback?: string
+        // skill-route rows (see openSkillRouteTab docs): persisted row fields;
+        // verified against the live route list before the tab is recreated.
+        skillFolderName?: string
+        routeId?: string
+        fixturePath?: string
+      }
+      let liveRoutes: Record<string, { title: string; fixturePath: string }> | null = null
+      try {
+        const rows = (await window.sylo.skillRoutes?.list(workspaceId)) as
+          | Array<{ skillFolderName: string; routeId: string; title: string; fixturePath: string }>
+          | undefined
+        if (rows && Array.isArray(rows)) {
+          liveRoutes = Object.fromEntries(
+            rows.map((r) => [`${r.skillFolderName}:${r.routeId}`, { title: r.title, fixturePath: r.fixturePath }]),
+          )
+        }
+      } catch {
+        liveRoutes = null
       }
       const saved = (savedList ?? []) as SavedTab[]
       if (!Array.isArray(saved) || saved.length === 0) return
@@ -195,7 +228,31 @@ export function useCanvasTabs({
       const existing = tabsRef.current[bucket] ?? []
       const additions: CanvasTab[] = []
       for (const s of saved) {
-        if (!s || (s.kind !== 'terminal' && s.kind !== 'browser')) continue
+        if (!s || (s.kind !== 'terminal' && s.kind !== 'browser' && s.kind !== 'skill-route')) continue
+        if (s.kind === 'skill-route') {
+          // Verify the saved route still exists (skill uninstalled/renamed).
+          // Skip silently if gone — same leniency as pinned-nav resolution.
+          // Prefer the LIVE row's title/fixturePath (fresh disk truth over the
+          // last-open snapshot), falling back to the persisted values.
+          if (typeof s.skillFolderName !== 'string' || typeof s.routeId !== 'string') continue
+          const live = liveRoutes?.[`${s.skillFolderName}:${s.routeId}`] // mirrors skillRouteRowKey ({folder}:{routeId})
+          if (!live) continue
+          const routePayload: SkillRouteTabPayload = {
+            skillFolderName: s.skillFolderName,
+            routeId: s.routeId,
+            title: live.title || s.title || APP_TAB_KIND_LABEL['skill-route'],
+            fixturePath: live.fixturePath || s.fixturePath || '',
+          }
+          const id = nextTabId()
+          additions.push({
+            id,
+            kind: 'skill-route',
+            title: routePayload.title,
+            skillRoute: routePayload,
+            view: { mode: 'snapshot', payload: { toolCallId: id, kind: 'markdown', content: '' } },
+          })
+          continue
+        }
         const id = nextTabId()
         additions.push({
           id,
@@ -756,6 +813,51 @@ export function useCanvasTabs({
     [writeTabs, writeActive, activate, nextTabId, onOpenPanel],
   )
 
+  const openSkillRouteTab = useCallback(
+    (payload: SkillRouteTabPayload, origin?: string) => {
+      // Route tabs pool per WORKSPACE like browser/terminal tabs (they are
+      // workspace resources: workspace-scoped library/data). No workspace
+      // gate — docking came from an operator action in this workspace's UI,
+      // not a possibly-stale agent event (openDiffTab parity).
+      const wsBucket = `w:${wsIdRef.current}`
+      const scope = scopeKeyOf(convIdRef.current, wsIdRef.current)
+      // Dedupe by route key (same as the sidebar nav pin key
+      // `{skillFolder}:{routeId}`): re-docking the same route re-activates
+      // its tab instead of duplicating it — a second tab would be the same
+      // surface with no independent state of its own.
+      const routeKey = `${payload.skillFolderName}:${payload.routeId}`
+      const merged = [
+        ...(tabsRef.current[scope] ?? []),
+        ...(wsBucket !== scope ? tabsRef.current[wsBucket] ?? [] : []),
+      ]
+      const existing = merged.find(
+        (t) =>
+          tabKind(t) === 'skill-route' &&
+          `${t.skillRoute?.skillFolderName ?? ''}:${t.skillRoute?.routeId ?? ''}` === routeKey,
+      )
+      if (existing) {
+        activate(existing.id, scope, wsIdRef.current)
+        onOpenPanel()
+        return existing.id
+      }
+      const id = nextTabId()
+      const tab: CanvasTab = {
+        id,
+        kind: 'skill-route',
+        title: payload.title || APP_TAB_KIND_LABEL['skill-route'],
+        origin: origin?.trim() || undefined,
+        skillRoute: payload,
+        view: { mode: 'snapshot', payload: { toolCallId: id, kind: 'markdown', content: '' } },
+      }
+      writeTabs({ ...tabsRef.current, [wsBucket]: [...(tabsRef.current[wsBucket] ?? []), tab] })
+      // Surface the new tab for the scope being VIEWED (openAppTab parity).
+      writeActive({ ...activeRef.current, [scope]: id })
+      onOpenPanel()
+      return id
+    },
+    [writeTabs, writeActive, activate, nextTabId, onOpenPanel],
+  )
+
   const scope = scopeKeyOf(conversationId, workspaceId)
   const wsBucket = `w:${workspaceId}`
   const scopeTabs = tabsByScope[scope] ?? []
@@ -776,5 +878,5 @@ export function useCanvasTabs({
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null
   const view: CanvasView | null = activeTab ? activeTab.view : null
 
-  return { tabs, activeTabId, view, setActiveTab, closeTab, updateActiveSnapshot, openAppTab, openAgentBoardTab, openWidgetTab, openDiffTab }
+  return { tabs, activeTabId, view, setActiveTab, closeTab, updateActiveSnapshot, openAppTab, openAgentBoardTab, openWidgetTab, openDiffTab, openSkillRouteTab }
 }

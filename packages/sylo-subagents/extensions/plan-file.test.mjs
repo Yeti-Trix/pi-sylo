@@ -17,6 +17,7 @@ import {
   isWorkerAgentName,
   markGoalsBuilt,
   markPlanReviewed,
+  planBodyFromPlannerResult,
   readPlanMarkdown,
   removeCurrentPlan,
   reopenFailedGoals,
@@ -379,5 +380,67 @@ describe('conversation-scoped plan file', () => {
     assert.equal(readPlanMarkdown(cwd, 'conv-2'), null)
     assert.equal(retractForeignCurrentPlan(cwd, 'conv-2'), true)
     assert.equal(existsSync(currentPlanAbs(cwd)), false)
+  })
+})
+
+describe('planBodyFromPlannerResult', () => {
+  const PLAN = '# Overall outcome\nShip it.\n\n## [ ] Build the skill\nWhy this exists.\n\n### Approach\nSteps.\n'
+
+  test('a ```-fenced plan is unwrapped, and its preamble + epilogue + embedded frontmatter stripped', () => {
+    // Actual planner wraps the plan in a markdown fence (embedding its own
+    // `topic:` frontmatter) and brackets it with a preamble/epilogue. None of
+    // that belongs in the saved plan file.
+    const raw = [
+      'Here is the plan you asked for.',
+      '',
+      '```markdown',
+      '---',
+      'topic: image gen',
+      '---',
+      '',
+      PLAN.trim(),
+      '```',
+      '',
+      'Plan saved to `.sylo/plans/guessed.md`. Later turns should read that file instead of re-planning.',
+    ].join('\n')
+    const body = planBodyFromPlannerResult(raw)
+    assert.match(body, /^# Overall outcome/)
+    assert.equal(body.includes('topic:'), false, 'embedded frontmatter is gone')
+    assert.equal(body.includes('```'), false, 'no fence survives')
+    assert.equal(body.includes('Here is the plan'), false, 'preamble is gone')
+    assert.equal(body.includes('Plan saved to'), false, 'epilogue is gone')
+    assert.equal(parsePlanTodos(body).length, 1, 'the goal still parses')
+  })
+
+  test('an unwrapped preamble is cut to the plan\'s first heading', () => {
+    const body = planBodyFromPlannerResult('Sure — here it is:\n\n' + PLAN)
+    assert.equal(body, PLAN.trim())
+  })
+
+  test('a clean standard body comes back intact', () => {
+    assert.equal(planBodyFromPlannerResult(PLAN), PLAN.trim())
+    assert.equal(planBodyFromPlannerResult(''), '')
+    assert.equal(planBodyFromPlannerResult(undefined), '')
+  })
+
+  test('a fenced code sample in the preamble never becomes the plan body', () => {
+    // The fence holds heading-like lines, but the real plan goals follow OUTSIDE
+    // the fence — so the fence is a snippet, not the wrap, and the heading rule
+    // drops it with the rest of the preamble.
+    const raw = [
+      'Quick context:',
+      '',
+      '```markdown',
+      '# fake',
+      '## [ ] not a real goal',
+      '```',
+      '',
+      PLAN.trim(),
+      'Saved to `.sylo/plans/x.md`.',
+    ].join('\n')
+    const body = planBodyFromPlannerResult(raw)
+    assert.match(body, /^# Overall outcome/)
+    assert.equal(body.includes('```'), false, 'the snippet is gone with the preamble')
+    assert.equal(planBodyFromPlannerResult(body).includes('not a real goal'), false)
   })
 })

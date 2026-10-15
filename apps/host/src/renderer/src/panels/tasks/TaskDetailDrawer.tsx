@@ -31,6 +31,7 @@ import {
   taskThinkingText,
 } from './task-helpers'
 import type { AgentTaskRow } from './task-types'
+import { TracePill } from './TracePill'
 
 export function TaskDetailDrawer({
   task,
@@ -78,9 +79,12 @@ export function TaskDetailDrawer({
     )
   }
 
-  const spec = parseTaskSpec(task.spec_json)
+    const spec = parseTaskSpec(task.spec_json)
   const result = parseResultJson(task.result_json)
   const preview = livePreviewText(task)
+  // Replay pills for everything the child did (bounded tail, deduped by seq —
+  // run_update events reship the array; the row's spec is the last full copy).
+  const trace = spec.trace ?? []
   const resultText =
     typeof result?.resultText === 'string' ? result.resultText
     : typeof result?.error === 'string' ? result.error
@@ -139,10 +143,29 @@ export function TaskDetailDrawer({
           </div>
         : null}
 
+                        {trace.length > 0 ?
+          <div className="mb-4">
+            <p className={cn(mutedText, 'mb-2 text-[0.78rem] font-medium uppercase tracking-[0.04em]')}>
+              Working trace
+            </p>
+            <div className="flex flex-col gap-1">
+              {trace.map((entry) => (
+                <TracePill key={entry.seq} entry={entry} />
+              ))}
+            </div>
+          </div>
+        : spec.lastToolName ?
+          <p className={cn(mutedText, 'mb-3 text-[0.78rem]')}>
+            <code className="font-mono text-[0.8rem] text-text-primary">{spec.lastToolName}</code>
+            {spec.lastToolPreview ?
+              <span> — {spec.lastToolPreview}</span>
+            : null}
+          </p>
+        : null}
+
         {thinking ?
           <details
             className={cn(chatSegmentRootClass('thinking', {}), 'mb-3')}
-            open={thinkingOverride ?? task.status === 'running'}
             onToggle={(e) => setThinkingOverride(detailsOpenFromToggleEvent(e))}
           >
             <summary className={chatSegmentSummary}>
@@ -168,20 +191,11 @@ export function TaskDetailDrawer({
           </details>
         : null}
 
-        {spec.lastToolName ?
-          <p className={cn(mutedText, 'mb-3 text-[0.78rem]')}>
-            <code className="font-mono text-[0.8rem] text-text-primary">{spec.lastToolName}</code>
-            {spec.lastToolPreview ?
-              <span> — {spec.lastToolPreview}</span>
-            : null}
-          </p>
-        : null}
-
         {output ?
           <div className={cn(chatMsgBody, 'mb-4')}>
             <ChatMarkdown text={output} />
           </div>
-        : task.status === 'running' && !thinking && !spec.lastToolName ?
+                : task.status === 'running' && !thinking && trace.length === 0 ?
           <p className={cn(mutedText, 'm-0 text-[0.82rem]')}>Waiting for subagent output…</p>
         : null}
 

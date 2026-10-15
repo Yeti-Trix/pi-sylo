@@ -163,7 +163,19 @@ describe('parseReviewVerdict', () => {
     assert.equal(parseReviewVerdict('## Summary\nLooks good.\n\nVERDICT: PASS'), 'pass')
     assert.equal(parseReviewVerdict('## Critical\nBroken.\n\nVERDICT: FAIL'), 'fail')
     assert.equal(parseReviewVerdict('**VERDICT:** PASS'), 'pass')
+    assert.equal(parseReviewVerdict('**VERDICT: PASS**'), 'pass')
     assert.equal(parseReviewVerdict('verdict: pass'), 'pass')
+  })
+
+  test('markdown-wrapped sign-off lines still register (2026-10-11: backticked PASS lost a full review)', () => {
+    // Reviewers wrap the verdict in inline code or bold despite the contract. The
+    // old regex accepted only `>` + `*` wrappers, so `` `VERDICT: PASS` `` scanned as
+    // `none` and the section stayed open after a complete, correct review.
+    assert.equal(parseReviewVerdict('`VERDICT: PASS`'), 'pass')
+    assert.equal(parseReviewVerdict('> VERDICT: FAIL'), 'fail')
+    assert.equal(parseReviewVerdict('**VERDICT**: PASS'), 'pass')
+    assert.equal(parseReviewVerdict('VERDICT : `FAIL`'), 'fail')
+    assert.equal(parseReviewVerdict('`**VERDICT: PASS**`'), 'pass')
   })
 
   test('the last verdict wins', () => {

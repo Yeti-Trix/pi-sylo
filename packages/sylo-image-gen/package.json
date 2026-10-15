@@ -1,0 +1,49 @@
+{
+  "name": "sylo-image-gen",
+  "version": "0.1.0",
+  "description": "Image generation for Sylo — ComfyUI backend (all-local), workspace image library, agent tools, Images sidebar route",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "extensions",
+    "scripts",
+    "shared",
+    "skills",
+    "README.md"
+  ],
+  "scripts": {
+    "build:ui": "vite build --config ui/vite.config.ts && node scripts/postbuild-ui.mjs",
+    "test:workflows": "esbuild shared/comfyui/workflows.test.mjs --bundle --platform=node --format=esm --outfile=out/comfy-workflows.test.mjs --packages=external && node --test out/comfy-workflows.test.mjs",
+    "test:client": "esbuild shared/comfyui/client.test.mjs --bundle --platform=node --format=esm --outfile=out/comfy-client.test.mjs --packages=external && node --test out/comfy-client.test.mjs",
+    "test:store": "esbuild shared/library-store.test.mjs --bundle --platform=node --format=esm --outfile=out/library-store.test.mjs --packages=external && node --test out/library-store.test.mjs",
+    "test:preview": "esbuild extensions/tools/preview-image.test.mjs --bundle --platform=node --format=esm --outfile=out/preview-image.test.mjs --packages=external && node --test out/preview-image.test.mjs"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ],
+    "skills": [
+      "./skills/image-gen"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2"
+  },
+  "dependencies": {
+    "typebox": "^1.1.24"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "esbuild": "^0.25.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.4.3"
+  }
+}

@@ -16,13 +16,16 @@ still `## [ ]`: nobody has built them, so a review of the plan as a whole would 
 on work that was never attempted.
 
 Sylo — not you — records the outcome in the plan file. Do not edit or delete it.
-Your verdict is what closes a goal, so the last line of your reply must be exactly
-one of:
+Your verdict is what closes a goal, so the very last line of your reply must be one
+of these two lines written as PLAIN TEXT — no markdown formatting of any kind
+around or inside it: no bold, no italics, no backticks, no code fence, no heading,
+and nothing after that line. A fenced or bolded verdict does not close the goal:
 
-```
 VERDICT: PASS
 VERDICT: FAIL
-```
+
+Both of these are WRONG and leave the section open despite a perfect review:
+`"VERDICT: PASS"` or `"**VERDICT: PASS**"` — never format the sign-off.
 
 `PASS` means the work meets the **Done when** criteria and you found nothing under
 `## Critical`. Anything critical, unverifiable, or unfinished is `FAIL`. Without that

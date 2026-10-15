@@ -45,6 +45,14 @@ contextBridge.exposeInMainWorld('sylo', {
     /** Archive (retention v2): archive/unarchive a chat (archive hides it from the sidebar; nothing is deleted). */
     setArchived: (id: string, archived: boolean) =>
       ipcRenderer.invoke('conversations:setArchived', id, archived) as Promise<void>,
+    /** Sidebar pin: pin/unpin a chat (pinned chats sort above unpinned ones + skip auto-archive). */
+    setPinned: (id: string, pinned: boolean) =>
+      ipcRenderer.invoke('conversations:setPinned', id, pinned) as Promise<void>,
+    /** Sidebar pin drag-reorder: one workspace section's pinned ids in their new order. */
+    reorderPinned: (ids: string[]) =>
+      ipcRenderer.invoke('conversations:reorderPinned', ids) as Promise<
+        { ok: true } | { ok: false; error: string }
+      >,
     /** Archive (retention v2): archived chats (most recently archived first). */
     listArchived: (workspaceId?: string) =>
       ipcRenderer.invoke('conversations:list-archived', workspaceId) as Promise<
@@ -318,6 +326,43 @@ contextBridge.exposeInMainWorld('sylo', {
   },
   messages: {
     list: (conversationId: string) => ipcRenderer.invoke('messages:list', conversationId),
+  },
+  /** Perf instrumentation (Developer → Testing probes + freeze diagnostics). */
+  perf: {
+    recent: (limit?: number) =>
+      ipcRenderer.invoke('perf:recent', limit) as Promise<
+        Array<{ at: number; scope: string; detail: string; ms?: number }>
+      >,
+    probeConversationLoad: (limit?: number) =>
+      ipcRenderer.invoke('perf:probeConversationLoad', limit) as Promise<
+        | {
+            ok: true
+            rows: Array<{
+              conversationId: string
+              title: string
+              rows: number
+              payloadKb: number
+              dbMs: number
+              biggestRowKb: number
+            }>
+            totalMs: number
+          }
+        | { ok: false; error: string }
+      >,
+    probeImageEncode: (width?: number, height?: number) =>
+      ipcRenderer.invoke('perf:probeImageEncode', width, height) as Promise<
+        | {
+            ok: true
+            syntheticImage: { width: number; height: number; sourceKb: number }
+            readDecodeMs: number
+            resizeJpegMs: number
+            base64Ms: number
+            totalMs: number
+            encodedKb: number
+            reencoded: boolean
+          }
+        | { ok: false; error: string }
+      >,
   },
   /** Manual open of the per-workspace Agent panel (the `+` picker entry).
    *  Returns the live subscription to bind a canvas tab to. */
@@ -1022,16 +1067,32 @@ contextBridge.exposeInMainWorld('sylo', {
       ipcRenderer.invoke('canvas:pick-file') as Promise<
         { ok: true } | { ok: false; error: string }
       >,
-    /** Renderer → main: persist this workspace's terminal/browser pool tabs
-     *  (tiny JSON in app data) so they reopen after a restart. */
+    /** Renderer → main: persist this workspace's terminal/browser/skill-route
+     *  pool tabs (tiny JSON in app data) so they reopen after a restart. */
     savePoolTabs: (
       workspaceId: string,
-      tabs: { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string }[],
+      tabs: (
+        | { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string }
+        | { kind: 'skill-route'; title?: string; skillFolderName: string; routeId: string; fixturePath: string }
+      )[],
     ) => ipcRenderer.invoke('canvas:save-pool-tabs', workspaceId, tabs) as Promise<boolean>,
-    /** Renderer → main: load the saved pool tabs for a workspace ([] when none). */
+    /** Renderer → main: load the saved pool tabs for a workspace ([] when
+     *  none). v1 stores return a plain array; v2 stores return
+     *  { version: 2, activeId?, tabs } (mirrors renderer/global.d.ts). */
         loadPoolTabs: (workspaceId: string) =>
       ipcRenderer.invoke('canvas:load-pool-tabs', workspaceId) as Promise<
-        { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string }[]
+        | {
+            version: 2
+            activeId?: string
+            tabs: (
+              | { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string; scrollback?: string }
+              | { kind: 'skill-route'; title?: string; skillFolderName: string; routeId: string; fixturePath: string }
+            )[]
+          }
+        | (
+            | { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string }
+            | { kind: 'skill-route'; title?: string; skillFolderName: string; routeId: string; fixturePath: string }
+          )[]
       >,
         // ── Live (subscribed) canvas — sibling to the snapshot surface above ──
     /** Main → renderer: open a live subscription on the docked canvas.
@@ -1457,6 +1518,200 @@ contextBridge.exposeInMainWorld('sylo', {
         { ok: true } | { ok: false; error: string }
       >,
   },
+  /** sylo-image-gen Images route (plan §5.6) — payloads carry workspaceCwd like the tasks ops. */
+  imagegen: {
+    configGet: () =>
+      ipcRenderer.invoke('imagegen:configGet') as Promise<
+        | { ok: true; config: Record<string, unknown> }
+        | { ok: false; error: string }
+      >,
+    configSave: (values: Record<string, unknown>) =>
+      ipcRenderer.invoke('imagegen:configSave', values) as Promise<
+        | { ok: true; restartNote?: string }
+        | { ok: false; error: string }
+      >,
+    status: (payload: { workspaceCwd?: string; with_models?: boolean }) =>
+      ipcRenderer.invoke('imagegen:status', payload) as Promise<
+        | {
+            ok: true
+            config: Record<string, unknown>
+            health: Record<string, unknown>
+            models?: Record<string, unknown>
+            workspace_root: string | null
+            library_root: string | null
+            library_stats: Record<string, unknown> | null
+          }
+        | { ok: false; error: string }
+      >,
+    generate: (payload: { workspaceCwd?: string; request: Record<string, unknown> }) =>
+      ipcRenderer.invoke('imagegen:generate', payload) as Promise<
+        | { ok: true; job: Record<string, unknown> }
+        | { ok: false; error: string }
+      >,
+    jobGet: (payload: { job_id: string }) =>
+      ipcRenderer.invoke('imagegen:jobGet', payload) as Promise<
+        | { ok: true; job: Record<string, unknown> }
+        | { ok: false; error: string }
+      >,
+    queueList: (payload: { workspaceCwd?: string }) =>
+      ipcRenderer.invoke('imagegen:queueList', payload) as Promise<
+        | { ok: true; health: Record<string, unknown>; jobs: Record<string, unknown>[] }
+        | { ok: false; error: string }
+      >,
+    libraryList: (payload: Record<string, unknown>) =>
+      ipcRenderer.invoke('imagegen:libraryList', payload) as Promise<
+        | {
+            ok: true
+            library_root: string | null
+            items: Record<string, unknown>[]
+            total: number
+            stats: Record<string, unknown>
+            warning?: string
+          }
+        | { ok: false; error: string }
+      >,
+    imageGet: (payload: { workspaceCwd?: string; image_id: string }) =>
+      ipcRenderer.invoke('imagegen:imageGet', payload) as Promise<
+        | { ok: true; record: Record<string, unknown>; path: string }
+        | { ok: false; error: string }
+      >,
+    imageUpdate: (payload: {
+      workspaceCwd?: string
+      image_id: string
+      add_tags?: string[]
+      remove_tags?: string[]
+      favorite?: boolean
+    }) =>
+      ipcRenderer.invoke('imagegen:imageUpdate', payload) as Promise<
+        | { ok: true; record: Record<string, unknown> | null }
+        | { ok: false; error: string }
+      >,
+    imageDelete: (payload: { workspaceCwd?: string; image_id: string }) =>
+      ipcRenderer.invoke('imagegen:imageDelete', payload) as Promise<
+        | { ok: true; deleted: string[] }
+        | { ok: false; error: string }
+      >,
+    revealFile: (payload: { workspaceCwd?: string; image_id: string }) =>
+      ipcRenderer.invoke('imagegen:revealFile', payload) as Promise<
+        | { ok: true; path: string }
+        | { ok: false; error: string }
+      >,
+    /** §8 step 7 change fan: agent-side library mutations (schedules.onChanged
+     *  shape — closure + unsubscribe). Fires `imagegen:library-changed`. */
+    onLibraryChanged: (cb: (payload: { workspaceKey: string; reason: string }) => void) => {
+      const ch = (_e: unknown, payload: { workspaceKey: string; reason: string }) => cb(payload)
+      ipcRenderer.on('imagegen:library-changed', ch)
+      return () => ipcRenderer.removeListener('imagegen:library-changed', ch)
+    },
+  },
+  /** sylo-video-gen Videos route (plan §5.3, §8 step 7) — payload shapes mirror sylo-image-gen's imagegen block above; video specifics: durable ledger job ops (§4.3 jobsList/jobsReplay) + video_id payloads (videoGet/videoUpdate/videoDelete/revealFile; revealFile takes kind 'clip'|'poster'). */
+  videogen: {
+    configGet: () =>
+      ipcRenderer.invoke('videogen:configGet') as Promise<
+        | { ok: true; config: Record<string, unknown> }
+        | { ok: false; error: string }
+      >,
+    configSave: (values: Record<string, unknown>) =>
+      ipcRenderer.invoke('videogen:configSave', values) as Promise<
+        | { ok: true; restartNote?: string }
+        | { ok: false; error: string }
+      >,
+    status: (payload: { workspaceCwd?: string; with_models?: boolean }) =>
+      ipcRenderer.invoke('videogen:status', payload) as Promise<
+        | {
+            ok: true
+            config: Record<string, unknown>
+            health: Record<string, unknown>
+            models?: Record<string, unknown>
+            workspace_root: string | null
+            library_root: string | null
+            library_stats: Record<string, unknown> | null
+            jobs: Record<string, unknown> | null
+          }
+        | { ok: false; error: string }
+      >,
+    generate: (payload: { workspaceCwd?: string; request: Record<string, unknown> }) =>
+      ipcRenderer.invoke('videogen:generate', payload) as Promise<
+        | { ok: true; job: Record<string, unknown>; notes: string[] }
+        | { ok: false; error: string }
+      >,
+    jobGet: (payload: { workspaceCwd?: string; job_id: string }) =>
+      ipcRenderer.invoke('videogen:jobGet', payload) as Promise<
+        | { ok: true; job: Record<string, unknown> | null }
+        | { ok: false; error: string }
+      >,
+    queueList: (payload: { workspaceCwd?: string }) =>
+      ipcRenderer.invoke('videogen:queueList', payload) as Promise<
+        | { ok: true; health: Record<string, unknown>; jobs: Record<string, unknown>[] }
+        | { ok: false; error: string }
+      >,
+    jobsList: (payload: { workspaceCwd?: string; status?: string; limit?: number; offset?: number }) =>
+      ipcRenderer.invoke('videogen:jobsList', payload) as Promise<
+        | { ok: true; jobs: Record<string, unknown>[]; total: number }
+        | { ok: false; error: string }
+      >,
+    /** §4.3 replay — read-only ComfyUI /history re-poll for queued/running
+     *  ledger rows; never resubmits; skips plainly when ComfyUI is down. */
+    jobsReplay: (payload: { workspaceCwd?: string }) =>
+      ipcRenderer.invoke('videogen:jobsReplay', payload) as Promise<
+        | {
+            ok: true
+            health: Record<string, unknown>
+            workspace_root: string | null
+            skipped: boolean
+            note: string
+            entries: Record<string, unknown>[]
+          }
+        | { ok: false; error: string }
+      >,
+    libraryList: (payload: Record<string, unknown>) =>
+      ipcRenderer.invoke('videogen:libraryList', payload) as Promise<
+        | {
+            ok: true
+            library_root: string | null
+            items: Record<string, unknown>[]
+            total: number
+            stats: Record<string, unknown>
+            warning?: string
+          }
+        | { ok: false; error: string }
+      >,
+    videoGet: (payload: { workspaceCwd?: string; video_id: string }) =>
+      ipcRenderer.invoke('videogen:videoGet', payload) as Promise<
+        | { ok: true; record: Record<string, unknown>; path: string; poster_path?: string }
+        | { ok: false; error: string }
+        | null
+      >,
+    videoUpdate: (payload: {
+      workspaceCwd?: string
+      video_id: string
+      add_tags?: string[]
+      remove_tags?: string[]
+      favorite?: boolean
+    }) =>
+      ipcRenderer.invoke('videogen:videoUpdate', payload) as Promise<
+        | { ok: true; record: Record<string, unknown> | null }
+        | { ok: false; error: string }
+      >,
+    videoDelete: (payload: { workspaceCwd?: string; video_id: string }) =>
+      ipcRenderer.invoke('videogen:videoDelete', payload) as Promise<
+        | { ok: true; deleted: string[] }
+        | { ok: false; error: string }
+      >,
+    revealFile: (payload: { workspaceCwd?: string; video_id: string; kind?: 'clip' | 'poster' }) =>
+      ipcRenderer.invoke('videogen:revealFile', payload) as Promise<
+        | { ok: true; path: string }
+        | { ok: false; error: string }
+      >,
+    /** §8 step 7 change fan (CLONE of the imagegen fan above — no shared
+     *  generalization, plan §5.5). Fires `videogen:library-changed`; the
+     *  payload carries the optional §5.5 `source` tag for route-side filtering. */
+    onLibraryChanged: (cb: (payload: { workspaceKey: string; reason: string; source?: string }) => void) => {
+      const ch = (_e: unknown, payload: { workspaceKey: string; reason: string; source?: string }) => cb(payload)
+      ipcRenderer.on('videogen:library-changed', ch)
+      return () => ipcRenderer.removeListener('videogen:library-changed', ch)
+    },
+  },
   evals: {
     loadDashboard: () =>
       ipcRenderer.invoke('evals:loadDashboard') as Promise<
@@ -1500,30 +1755,8 @@ contextBridge.exposeInMainWorld('sylo', {
       >,
   },
   plan: {
-    todos: (conversationId: string) =>
-      ipcRenderer.invoke('plan:todos', conversationId) as Promise<{
-        conversationId: string
-        goal?: string
-        todos: {
-          id: string
-          text: string
-          done: boolean
-          state: 'open' | 'built' | 'passed'
-        }[]
-        status: 'active' | 'reviewed'
-      }>,
-    onChanged: (cb: () => void) => {
-      const ch = () => cb()
-      ipcRenderer.on('plan:changed', ch)
-      return () => ipcRenderer.removeListener('plan:changed', ch)
-    },
     clearForNewChat: (workspaceId: string) =>
       ipcRenderer.invoke('plan:clearForNewChat', workspaceId) as Promise<{ ok: true }>,
-    hide: (conversationId: string) =>
-      ipcRenderer.invoke('plan:hide', conversationId) as Promise<
-        | { ok: true }
-        | { ok: false; reason: 'subagents_running' | 'no_plan' }
-      >,
   },
   tasks: {
     list: (conversationId: string) => ipcRenderer.invoke('tasks:list', conversationId),

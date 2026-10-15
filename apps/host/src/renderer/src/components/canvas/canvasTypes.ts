@@ -43,7 +43,15 @@ export type CanvasView =
  *  browser, side chat). `kind` defaults to 'canvas'; non-canvas kinds ignore
  *  `view` (it holds an empty placeholder payload) and render their own body.
  *  `title` names app panes (canvas tabs label from their view). */
-export type AppTabKind = 'canvas' | 'terminal' | 'browser' | 'side-chat' | 'widget' | 'diff' | 'agent'
+export type AppTabKind =
+  | 'canvas'
+  | 'terminal'
+  | 'browser'
+  | 'side-chat'
+  | 'widget'
+  | 'diff'
+  | 'agent'
+  | 'skill-route'
 
 /** One-shot agent payload opened as a widget tab (skill-surface iframe).
  *  Sent by the host when an agent calls `show_widget`; replaces the old
@@ -56,6 +64,22 @@ export type WidgetTabPayload = {
   data?: unknown
 }
 
+/** Docked skill-route tab payload (e.g. the image-gen Images dashboard).
+ *  First-class kind + dedicated payload — NOT a discriminant inside
+ *  WidgetTabPayload — because a route tab needs entirely different sandbox
+ *  args than an agent `show_widget` (variant="route", real bridge RPC,
+ *  fixturePath instead of html/path, host workspace context, no view-only
+ *  log strip), persists differently (row fields instead of html), and
+ *  entangling WidgetPane's one-shot widget checks (both-html-set fallbacks,
+ *  sendToAgent log strip) with persistent routes would invite regressions
+ *  on the existing widget path. WidgetPane keeps both bodies side by side. */
+export type SkillRouteTabPayload = {
+  skillFolderName: string
+  routeId: string
+  title: string
+  fixturePath: string
+}
+
 export const APP_TAB_KIND_LABEL: Record<AppTabKind, string> = {
   canvas: 'Canvas',
   terminal: 'Terminal',
@@ -64,6 +88,7 @@ export const APP_TAB_KIND_LABEL: Record<AppTabKind, string> = {
   widget: 'Widget',
   diff: 'Diff',
   agent: 'Agent',
+  'skill-route': 'Skill route',
 }
 
 export type CanvasTab = {
@@ -77,10 +102,15 @@ export type CanvasTab = {
   terminalCwd?: string
   browserUrl?: string
   /** Widget tab body (skill-surface payload for an agent `show_widget`).
-   *  Ephemeral by design: pool persistence saves only terminal/browser
-   *  kinds, so a widget payload does not survive a restart (the agent can
-   *  re-show it). */
+   *  Ephemeral by design: pool persistence saves only terminal/browser and
+   *  skill-route kinds, so a widget payload does not survive a restart (the
+   *  agent can re-show it). */
   widget?: WidgetTabPayload
+  /** Docked skill-route tab body (persistent dashboard, e.g. Images).
+   *  Unlike `widget`, this IS pool-persistent — same lifecycle as browser
+   *  tabs (persisted row fields, verified against the live route list on
+   *  restore). */
+  skillRoute?: SkillRouteTabPayload
   /** Diff-review tab body (task 07): read-only per-turn file diffs. Same
    *  ephemerality as widgets — re-openable from the change card. */
   diff?: DiffTabPayload
@@ -110,6 +140,7 @@ export const APP_TAB_KIND_GLYPH: Record<AppTabKind, string> = {
   widget: '▣',
   diff: '±',
   agent: 'Ⓐ',
+  'skill-route': '◱',
 }
 
 /** Short label for a tab: app-pane title → payload title → file name → kind fallback. */

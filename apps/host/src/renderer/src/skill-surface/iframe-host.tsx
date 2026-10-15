@@ -40,6 +40,16 @@ export type SkillSurfaceSandboxProps = {
   iframeClassName?: string
   /** Route-only: push workspace changes into the iframe (LogicForge, etc.). */
   hostPiCwd?: string
+  /** Route-only: latest imagegen library fan (§8 step 7) — identity change
+   *  pushes a `libraryChanged` bridge event so the Images route refetches when
+   *  the AGENT mutates the library. Other routes ignore the event. */
+  libraryChangedFan?: { workspaceKey: string; reason: string } | null
+  /** Route-only: videogen twin of `libraryChangedFan` (plan §5.5, §8 step 7 —
+   *  CLONE discipline: a SIBLING prop + push, not a generalization). Pushes
+   *  the SAME `libraryChanged` bridge event tagged `source: 'videogen'` so the
+   *  Videos route refetches when the agent mutates the video library; both
+   *  routes tolerate the other's nudge (a refetch is cheap). */
+  videogenLibraryChangedFan?: { workspaceKey: string; reason: string } | null
 }
 
 /**
@@ -58,6 +68,8 @@ export function SkillSurfaceSandbox({
   compactChrome = false,
   iframeClassName,
   hostPiCwd = '',
+  libraryChangedFan = null,
+  videogenLibraryChangedFan = null,
 }: SkillSurfaceSandboxProps): React.ReactElement {
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const nonceRef = useRef<string>(newBridgeNonce())
@@ -304,6 +316,47 @@ ${fragment}
       '*',
     )
   }, [hostPiCwd, status, variant])
+
+  // §8 step 7 change fan: broker-child image-library mutations → main
+  // (`sylo-image-gen:changed` consumer in main/index.ts) → `imagegen:library-
+  // changed` ipc → renderer state → this push. The route refetches on receipt
+  // (§4.2 self-refetch posture — the event carries no data, only the nudge).
+  // §5.5: the payload now carries the optional `source` tag — 'imagegen' here.
+  useEffect(() => {
+    if (variant !== 'route' || status !== 'ready') return
+    if (!libraryChangedFan) return
+    const win = iframeRef.current?.contentWindow
+    if (!win) return
+    win.postMessage(
+      skillBridgeEvent(nonceRef.current, 'libraryChanged', {
+        piCwd: '',
+        workspaceKey: libraryChangedFan.workspaceKey,
+        reason: libraryChangedFan.reason,
+        source: 'imagegen',
+      }),
+      '*',
+    )
+  }, [libraryChangedFan, status, variant])
+
+  // §5.5 videogen fan twin (CLONE, not a generalization — a sibling prop + the
+  // SAME `libraryChanged` bridge event, tagged `source: 'videogen'` so the
+  // Videos route can filter): broker child → main `sylo-video-gen:changed`
+  // consumer → `videogen:library-changed` ipc → renderer state → this push.
+  useEffect(() => {
+    if (variant !== 'route' || status !== 'ready') return
+    if (!videogenLibraryChangedFan) return
+    const win = iframeRef.current?.contentWindow
+    if (!win) return
+    win.postMessage(
+      skillBridgeEvent(nonceRef.current, 'libraryChanged', {
+        piCwd: '',
+        workspaceKey: videogenLibraryChangedFan.workspaceKey,
+        reason: videogenLibraryChangedFan.reason,
+        source: 'videogen',
+      }),
+      '*',
+    )
+  }, [videogenLibraryChangedFan, status, variant])
 
   return (
     <div className={cn(variant === 'route' && 'flex min-h-0 flex-1 flex-col')}>

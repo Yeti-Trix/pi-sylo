@@ -1,0 +1,51 @@
+{
+  "name": "sylo-video-gen",
+  "version": "0.1.0",
+  "description": "Video generation for Sylo — ComfyUI backend (all-local), workspace video library, agent tools, Videos sidebar route",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "extensions",
+    "scripts",
+    "shared",
+    "skills",
+    "README.md"
+  ],
+  "scripts": {
+    "build:ui": "vite build --config ui/vite.config.ts && node scripts/postbuild-ui.mjs",
+    "test:catalog": "esbuild shared/catalog.test.mjs --bundle --platform=node --format=esm --outfile=out/catalog.test.mjs --packages=external && node --test out/catalog.test.mjs",
+    "test:client": "esbuild shared/comfyui/client.test.mjs --bundle --platform=node --format=esm --outfile=out/comfy-client.test.mjs --packages=external && node --test out/comfy-client.test.mjs",
+    "test:workflows": "esbuild shared/comfyui/workflows.test.mjs --bundle --platform=node --format=esm --outfile=out/comfy-workflows.test.mjs --packages=external && node --test out/comfy-workflows.test.mjs",
+    "test:store": "esbuild shared/video-library-store.test.mjs --bundle --platform=node --format=esm --outfile=out/video-library-store.test.mjs --packages=external && node --test out/video-library-store.test.mjs",
+    "test:jobs": "esbuild shared/video-jobs-store.test.mjs --bundle --platform=node --format=esm --outfile=out/video-jobs-store.test.mjs --packages=external && node --test out/video-jobs-store.test.mjs",
+    "test:tools": "esbuild extensions/tools.test.mjs --bundle --platform=node --format=esm --outfile=out/videogen-tools.test.mjs --packages=external && esbuild ../sylo-image-gen/shared/library-store.ts --bundle --platform=node --format=esm --outfile=out/imagegen-library-store.for-tests.mjs --packages=external && node --test out/videogen-tools.test.mjs"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ],
+    "skills": [
+      "./skills/video-gen"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2"
+  },
+  "dependencies": {
+    "typebox": "^1.1.24"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "esbuild": "^0.25.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.4.3"
+  }
+}

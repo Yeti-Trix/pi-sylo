@@ -18,10 +18,10 @@ import { resolvePiSpawn } from './pi-cli.ts'
 import { resolveSubagentToolPolicy, toolCliArgs } from './pi-tool-policy.ts'
 import { subagentModelCliArgs } from './subagent-model.ts'
 import { killSubagentTree } from './subagent-kill.ts'
-import { cancelSubagentRun, consumePauseRequest, consumeRunCancelled, consumeRunPaused, findActiveRunByAgent, listActiveRunSummaries, registerSubagentRun, unregisterSubagentRun } from './subagent-run-registry.ts'
+import { activeRunsInGroup, cancelSubagentRun, consumePauseRequest, consumeRunCancelled, consumeRunPaused, findActiveRunByAgent, listActiveRunSummaries, registerSubagentRun, unregisterSubagentRun } from './subagent-run-registry.ts'
 import { resolveSubagentStallMs, resolveSubagentTimeoutMs } from './subagent-timeout.ts'
 import { registerRunsListTool } from './sylo-runs-list.ts'
-import { newSubagentRunId, notifySyloSubagent, type SyloSubagentRunMode } from './sylo-host.ts'
+import { newSubagentRunId, notifySyloSubagent, type SyloSubagentRunMode, type SyloSubagentTraceEntry } from './sylo-host.ts'
 
 export { cancelAllSubagentRuns, cancelSubagentRun, pauseSubagentRun, requestSubagentPause, type PauseOutcome } from './subagent-run-registry.ts'
 
@@ -351,9 +351,54 @@ function deliverSubagentEvent(event: SubagentCompletedEvent): void {
   g.done++
   g.events.push(event)
   if (g.done >= g.total && g.total > 0) {
-    groupNotifyAll.delete(event.groupRunId!)
-    for (const e of g.events) notifySyloSubagent(e)
+    flushGroupHeldEvents(event.groupRunId!)
+    return
   }
+  // Still holding — re-arm the escape: the timeout window is measured from the LAST
+  // held arrival, so a slowly-draining healthy group never trips it.
+  armGroupEscape(event.groupRunId!)
+}
+
+// ── notify:"all" escape hatch — a stuck group must never hold completions forever.
+// A group stays held until done >= total; if a sibling dies in a way that never emits
+// a completion (broker child crashed mid-run, finalize threw before emit), the held
+// events would sit indefinitely and the dispatching chat would learn nothing. Ten
+// minutes after the LAST held arrival with no live sibling left in the run registry,
+// flush whatever was held. Healthy groups always flush well before this: every live
+// sibling re-arms the timer, and a normal completion flushes through the done>=total
+// path above.
+const GROUP_NOTIFY_ESCAPE_MS = 10 * 60_000
+const groupEscapeTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function clearGroupEscape(groupRunId: string): void {
+  const t = groupEscapeTimers.get(groupRunId)
+  if (t) clearTimeout(t)
+  groupEscapeTimers.delete(groupRunId)
+}
+
+function armGroupEscape(groupRunId: string): void {
+  clearGroupEscape(groupRunId)
+  const t = setTimeout(() => {
+    groupEscapeTimers.delete(groupRunId)
+    if (!groupNotifyAll.has(groupRunId)) return
+    if (activeRunsInGroup(groupRunId).length > 0) {
+      // A sibling is still streaming — it can still report; keep waiting.
+      armGroupEscape(groupRunId)
+      return
+    }
+    flushGroupHeldEvents(groupRunId)
+  }, GROUP_NOTIFY_ESCAPE_MS)
+  t.unref()
+  groupEscapeTimers.set(groupRunId, t)
+}
+
+/** Flush one notify:"all" group's held completion events (escape or normal completion). */
+function flushGroupHeldEvents(groupRunId: string): void {
+  const g = groupNotifyAll.get(groupRunId)
+  if (!g) return
+  clearGroupEscape(groupRunId)
+  groupNotifyAll.delete(groupRunId)
+  for (const e of g.events) notifySyloSubagent(e)
 }
 
 /** Route ONE background completion. With notify:"all", buffer until the group's count
@@ -618,7 +663,7 @@ async function runSingleAgent(
     runId,
   }
 
-    // Tails of the message currently streaming, before it lands in `currentResult.messages`.
+        // Tails of the message currently streaming, before it lands in `currentResult.messages`.
   let liveText = ''
   let liveThinking = ''
   // Kept after the reasoning channel closes so the box can collapse instead of vanish.
@@ -627,6 +672,50 @@ async function runSingleAgent(
   let liveToolPreview: string | undefined
   let updateTimer: ReturnType<typeof setTimeout> | undefined
   let updateQueued = false
+
+  /**
+   * Working trace — the bounded think/text/tool sequence this run emitted, replayed
+   * as pills in the expanded subagent pill (parity with the main chat's working
+   * stream). Text/think snapshots flush the moment a tool starts, so each tool pill
+   * is preceded by what the child said and thought leading into it. Entries are
+   * immutable except a pending tool's ms/err, patched by tool_execution_end.
+   */
+  const TRACE_CAP = 80
+  const TRACE_SNAP_CHARS = 320
+  const trace: SyloSubagentTraceEntry[] = []
+  let traceSeq = 0
+  let traceRev = 0 // bumped only when the array content changes — updates ship the array once per rev
+  let lastFlushedThink = ''
+  let lastFlushedText = ''
+  let pendingTool: { entry: SyloSubagentTraceEntry; startedAt: number } | null = null
+
+  const pushTrace = (
+    entry: Omit<Extract<SyloSubagentTraceEntry, { k: 'tool' }>, 'seq'> |
+      Omit<Extract<SyloSubagentTraceEntry, { k: 'think' }>, 'seq'> |
+      Omit<Extract<SyloSubagentTraceEntry, { k: 'text' }>, 'seq'>,
+  ): SyloSubagentTraceEntry => {
+    const withSeq = { ...entry, seq: ++traceSeq } as SyloSubagentTraceEntry
+    trace.push(withSeq)
+    if (trace.length > TRACE_CAP) trace.splice(0, trace.length - TRACE_CAP)
+    traceRev++
+    return withSeq
+  }
+
+  /** Reasoning completed before the current tool — deduped against the last flush. */
+  const flushThink = (): void => {
+    const text = (liveThinking.trim() || completedThinking.trim()).slice(-TRACE_SNAP_CHARS)
+    if (!text || text === lastFlushedThink) return
+    lastFlushedThink = text
+    pushTrace({ k: 'think', text })
+  }
+
+  /** Assistant text streamed into the current message before this tool — once per message. */
+  const flushText = (): void => {
+    const text = liveText.trim().slice(-TRACE_SNAP_CHARS)
+    if (!text || text === lastFlushedText) return
+    lastFlushedText = text
+    pushTrace({ k: 'text', text })
+  }
 
   /**
    * Workspace files this run touches (write/edit-like tools) — first-touch order,
@@ -657,6 +746,7 @@ async function runSingleAgent(
   const previewText = () => liveText.trim() || getFinalOutput(currentResult.messages)
   const previewThinking = () => liveThinking.trim() || completedThinking
 
+      let traceRevSent = 0
     const emitUpdate = () => {
     notifySyloSubagent({
       type: 'subagent_run_update',
@@ -669,7 +759,11 @@ async function runSingleAgent(
       toolPreview: liveToolPreview ?? '',
       model: currentResult.model,
       files: touchedFiles.length > 0 ? touchedFiles.slice() : undefined,
+      // Only on the updates where the trace changed — pure preview churn (the usual
+      // 750ms text delta) carries ~0 extra bytes instead of the whole array.
+      ...(traceRev !== traceRevSent ? { trace: trace.slice() } : {}),
     })
+    traceRevSent = traceRev
     if (onUpdate) {
       onUpdate({
         content: [{ type: 'text', text: previewText() || '(running...)' }],
@@ -732,15 +826,24 @@ async function runSingleAgent(
      * Post-exit parse + end notifications + (background) run_completed — shared by the
      * blocking path and by the detached tail that continues after the tool resolved.
      */
-        const finalize = async (exitCode: number): Promise<SingleResult> => {
+                const finalize = async (exitCode: number): Promise<SingleResult> => {
       try {
         currentResult.exitCode = exitCode
+        // Close any pending trace tool entry (a killed child never sent end) so the
+        // finished run's trace is complete in the row.
+        if (pendingTool) {
+          const toolEntry = pendingTool.entry as Extract<SyloSubagentTraceEntry, { k: 'tool' }>
+          toolEntry.ms = Date.now() - pendingTool.startedAt
+          pendingTool = null
+          traceRev++
+        }
+        const finalTrace = trace.slice()
         if (consumeRunPaused(runId)) {
           // Operator pause (runs board ⏸): the child is killed mid-turn, but the run
           // parks as `paused` — NOT cancelled, and no run_completed/chat result card:
           // pause is not a result. The partial preview is the resume point.
           currentResult.stopReason = 'paused'
-          notifySyloSubagent({
+                    notifySyloSubagent({
             type: 'subagent_run_end',
             runId,
             status: 'paused',
@@ -748,6 +851,7 @@ async function runSingleAgent(
             thinking: previewThinking() || undefined,
             model: currentResult.model,
             files: touchedFiles.length > 0 ? touchedFiles.slice() : undefined,
+            trace: finalTrace,
             usage: {
               input: currentResult.usage.input,
               output: currentResult.usage.output,
@@ -759,11 +863,12 @@ async function runSingleAgent(
           return currentResult
         }
         if (wasAborted || consumeRunCancelled(runId)) {
-          notifySyloSubagent({
+                    notifySyloSubagent({
             type: 'subagent_run_end',
             runId,
             status: 'cancelled',
             error: SUBAGENT_ABORTED_MESSAGE,
+            trace: finalTrace,
           })
           throw new Error(SUBAGENT_ABORTED_MESSAGE)
         }
@@ -778,8 +883,9 @@ async function runSingleAgent(
           resultText,
           thinking: previewThinking() || undefined,
           model: currentResult.model,
-          error: failed ? getResultOutput(currentResult) : undefined,
+                    error: failed ? getResultOutput(currentResult) : undefined,
           files: touchedFiles.length > 0 ? touchedFiles.slice() : undefined,
+          trace: finalTrace,
           usage: {
             input: currentResult.usage.input,
             output: currentResult.usage.output,
@@ -877,12 +983,14 @@ async function runSingleAgent(
         )
       }, 5_000)
 
-      type ChildEvent = {
+            type ChildEvent = {
         type?: string
         message?: Message
         assistantMessageEvent?: { type?: string; delta?: string }
         toolName?: string
         args?: unknown
+        isError?: boolean
+        resultSummary?: unknown
       }
 
       const processLine = (line: string) => {
@@ -907,7 +1015,7 @@ async function runSingleAgent(
           return
         }
 
-        if (event.type === 'tool_execution_update') {
+                if (event.type === 'tool_execution_update') {
           // Parked-run heartbeat (await_user_input) or a long tool — keeps the stall
           // guard from killing a healthy quiet child.
           if (typeof event.toolName === 'string' && event.toolName) liveToolName = event.toolName
@@ -916,9 +1024,34 @@ async function runSingleAgent(
           return
         }
 
-                if (event.type === 'tool_execution_start') {
+        if (event.type === 'tool_execution_end') {
+          // Duration + outcome for the trace pill. Calls are sequential in the child,
+          // so the pending entry (from tool_execution_start) is the one ending.
+          if (pendingTool) {
+            const toolEntry = pendingTool.entry as Extract<SyloSubagentTraceEntry, { k: 'tool' }>
+            toolEntry.ms = Date.now() - pendingTool.startedAt
+            if (event.isError === true) {
+              toolEntry.err = true
+              const flat = JSON.stringify(event.resultSummary ?? '')
+              toolEntry.tail = flat.length > 200 ? `${flat.slice(0, 200)}…` : flat
+            }
+            pendingTool = null
+            traceRev++
+          }
+          bumpActivity()
+          scheduleUpdate()
+          return
+        }
+
+                                if (event.type === 'tool_execution_start') {
           liveToolName = typeof event.toolName === 'string' ? event.toolName : undefined
           liveToolPreview = summarizeToolArgs(event.args)
+          // Working trace: flush what the child said + thought leading into this call,
+          // then record the call itself. tool_execution_end patches this entry's ms/err.
+          flushThink()
+          flushText()
+          const entry = pushTrace({ k: 'tool', name: liveToolName ?? 'tool', preview: liveToolPreview ?? '' })
+          pendingTool = { entry: entry as Extract<SyloSubagentTraceEntry, { k: 'tool' }>, startedAt: Date.now() }
           noteFileTouch(liveToolName, event.args)
           bumpActivity()
           scheduleUpdate()
@@ -1816,6 +1949,7 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
           // count after the dispatch pass (pre-spawn refusals never emit a completion).
           if (params.notify === 'all') {
             groupNotifyAll.set(groupRunId, { total: params.tasks.length, done: 0, events: [] })
+            armGroupEscape(groupRunId)
           }
           const startedList: Array<{ agent: string; runId: string; taskLine: string }> = []
           const failedNowList: Array<{ agent: string; reason: string }> = []
@@ -1858,8 +1992,7 @@ export default function syloSubagentsExtension(pi: ExtensionAPI): void {
           if (notifyState) {
             notifyState.total = startedList.length
             if (notifyState.done >= notifyState.total && notifyState.total > 0) {
-              groupNotifyAll.delete(groupRunId)
-              for (const e of notifyState.events) notifySyloSubagent(e)
+              flushGroupHeldEvents(groupRunId)
             }
           }
           return {

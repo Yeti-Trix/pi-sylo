@@ -1,17 +1,13 @@
 /**
- * Live planner goals for the chat UI. Each `##` section in the workspace plan
- * file is a goal; the worker ticks the heading. This module watches the file
- * and pushes snapshots.
+ * Host-side plan-file scoping. Each `##` section in the workspace plan file is
+ * a goal; worker subagents tick the headings directly. This module only keeps
+ * the per-turn plumbing the orchestrator needs (scope a chat's plan, drop
+ * leftovers on new chat) — the operator-facing goals bar that used to live
+ * above the composer was removed, so there is no snapshot/watch/notify layer.
  */
-import { existsSync, watch, type FSWatcher } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync } from 'node:fs'
 
-import {
-  snapshotPlanMarkdown,
-  parsePlanHidden,
-  type PlanStatus,
-  type PlanTodo,
-} from '../../../../packages/sylo-subagents/extensions/plan-checklist.ts'
+import { snapshotPlanMarkdown } from '../../../../packages/sylo-subagents/extensions/plan-checklist.ts'
 import {
   conversationPlanRel,
   hideFinishedPlan,
@@ -19,33 +15,10 @@ import {
   removeCurrentPlan,
   restorePlan,
   retractForeignCurrentPlan,
-  rewritePlanMeta,
 } from '../../../../packages/sylo-subagents/extensions/plan-file.ts'
 import type { PlanScope } from '../shared/orchestrator-resume.js'
 import { getConversation, getWorkspace } from './database.js'
-import { countRunningAgentTasks } from './subagent-tasks-db.js'
-
-export type PlanTodosSnapshot = {
-  conversationId: string
-  goal?: string
-  todos: PlanTodo[]
-  status: PlanStatus
-}
-
-type PlanTodosListener = (event: { kind: 'changed' }) => void
-
-let listener: PlanTodosListener | undefined
-let watcher: FSWatcher | undefined
-let watchedDir: string | undefined
-let watchDebounce: ReturnType<typeof setTimeout> | undefined
-
-export function setPlanTodosListener(fn: PlanTodosListener | undefined): void {
-  listener = fn
-}
-
-function emitChanged(): void {
-  listener?.({ kind: 'changed' })
-}
+import { countRunningAgentTasks, SUBAGENT_RUN_QUIET_MS } from './subagent-tasks-db.js'
 
 function cwdForConversation(conversationId: string): string | null {
   const conv = getConversation(conversationId)
@@ -66,86 +39,19 @@ function cwdForWorkspace(workspaceId: string): string | null {
  */
 function subagentsRunning(): boolean {
   try {
-    return countRunningAgentTasks() > 0
+    // Zombie-aware: a still-`running` row the orphan reconcile has not flipped yet
+    // must not block plan cleanup forever — only rows seen alive within the run-quiet
+    // window count (every broker event bumps the row's updated_at, so quiet = dead-ish).
+    return countRunningAgentTasks(undefined, SUBAGENT_RUN_QUIET_MS) > 0
   } catch {
     return true
   }
-}
-
-function ensureWatch(cwd: string): void {
-  const dir = join(cwd, '.sylo', 'plans')
-  if (watchedDir === dir && watcher) return
-  watcher?.close()
-  watcher = undefined
-  watchedDir = undefined
-  if (!existsSync(dir)) return
-  watchedDir = dir
-  watcher = watch(dir, () => {
-    if (watchDebounce) clearTimeout(watchDebounce)
-    watchDebounce = setTimeout(() => emitChanged(), 250)
-  })
-}
-
-export function readPlanTodos(conversationId: string): PlanTodosSnapshot {
-  const empty: PlanTodosSnapshot = { conversationId, todos: [], status: 'active' }
-  if (!conversationId.trim()) return empty
-  const cwd = cwdForConversation(conversationId)
-  if (!cwd) return empty
-  ensureWatch(cwd)
-  const raw = readPlanMarkdown(cwd, conversationId)
-  if (!raw) return empty
-  const snap = snapshotPlanMarkdown(raw)
-  if (snap.conversationId && snap.conversationId !== conversationId) return empty
-  // Still on disk so "continue" can bring it back — just not on the bar right now.
-  if (snap.hidden) return empty
-  return {
-    conversationId,
-    goal: snap.goal,
-    todos: snap.todos,
-    status: snap.status,
-  }
-}
-
-export function notifyPlanTodosChanged(): void {
-  emitChanged()
-}
-
-export type PlanHideResult =
-  | { ok: true }
-  | { ok: false; reason: 'subagents_running' | 'no_plan' }
-
-/**
- * The operator clicked the X on the goals bar: take this chat's plan off the bar
- * while it is still active — the same frontmatter-only patch as
- * `hideFinishedPlan`, minus the finished check. The file stays on disk so a
- * later "continue" brings it back (`restorePlan`), ticks and all.
- *
- * Blocked while a subagent run is active (same guard as `clearPlanForNewChat`):
- * a mid-run hide starves `resolveRunGoals`, so the orchestrator loses its goal
- * dispatch and the worker improvises. The UI may surface the reason as a
- * tooltip.
- */
-export function hidePlanTodos(conversationId: string): PlanHideResult {
-  if (!conversationId.trim()) return { ok: false, reason: 'no_plan' }
-  const cwd = cwdForConversation(conversationId)
-  if (!cwd) return { ok: false, reason: 'no_plan' }
-  const raw = readPlanMarkdown(cwd, conversationId)
-  if (!raw) return { ok: false, reason: 'no_plan' }
-  if (subagentsRunning()) return { ok: false, reason: 'subagents_running' }
-  // Already off the bar — a doubled click should not read as “blocked”.
-  if (parsePlanHidden(raw)) return { ok: true }
-  if (!rewritePlanMeta(cwd, conversationId, { hidden: true })) {
-    return { ok: false, reason: 'no_plan' }
-  }
-  emitChanged()
-  return { ok: true }
 }
 
 /** New chat: drop a leftover workspace current.md. Other chats' scoped files stay. */
 export function clearPlanForNewChat(workspaceId: string): void {
   const cwd = cwdForWorkspace(workspaceId)
   if (cwd && !subagentsRunning()) removeCurrentPlan(cwd)
-  emitChanged()
 }
 
 const NO_PLAN: PlanScope = { planRel: null, done: 0, total: 0 }
@@ -154,7 +60,8 @@ const NO_PLAN: PlanScope = { planRel: null, done: 0, total: 0 }
  * Runs at the start of every operator turn in this chat:
  *  - drops a leftover `current.md` owned by another conversation,
  *  - hides this chat's plan if it is finished (reviewed / all ticked), so the
- *    previous run's goals leave the bar exactly when the operator sends again,
+ *    previous run's goals stop shaping `PlanScope` after the operator
+ *    sends again,
  *  - or puts a hidden plan back when the operator asks to continue,
  *  - reports remaining progress so the orchestrator works the next section.
  */
@@ -171,9 +78,7 @@ export function isolatePlanForConversation(
     else hideFinishedPlan(cwd, conversationId)
   }
   const raw = readPlanMarkdown(cwd, conversationId)
-  emitChanged()
   if (!raw) return NO_PLAN
-  ensureWatch(cwd)
   const snap = snapshotPlanMarkdown(raw)
   return {
     planRel: conversationPlanRel(conversationId),

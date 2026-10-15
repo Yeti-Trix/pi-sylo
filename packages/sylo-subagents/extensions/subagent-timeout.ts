@@ -35,7 +35,8 @@ function clampTimeoutMs(ms: number): number {
 }
 
 /**
- * Hard ceiling. Agent frontmatter `timeout_seconds` still wins (scout stays at 300).
+ * Hard ceiling. Agent frontmatter `timeout_seconds` still wins (scout runs at 600 —
+ * browse-heavy research reliably outruns 300; bumped 2026-10-11, keep in sync with agents/scout.md).
  * Otherwise this is a 2h runaway cap — working children are kept alive by the stall timer.
  */
 export function resolveSubagentTimeoutMs(opts: {

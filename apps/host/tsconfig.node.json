@@ -17,6 +17,10 @@
     "../../packages/sylo-tasks/shared/**/*",
     "../../packages/sylo-tasks/extensions/**/*",
     "../../packages/sylo-subagents/extensions/**/*",
-    "../../packages/sylo-think-tank/extensions/**/*"
+    "../../packages/sylo-think-tank/extensions/**/*",
+    "../../packages/sylo-image-gen/shared/**/*",
+    "../../packages/sylo-image-gen/extensions/**/*",
+    "../../packages/sylo-video-gen/shared/**/*",
+    "../../packages/sylo-video-gen/extensions/**/*"
   ]
 }

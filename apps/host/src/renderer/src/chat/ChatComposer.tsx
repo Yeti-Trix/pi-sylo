@@ -927,20 +927,44 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
       const file = firstClipboardImageFile(e.clipboardData)
       if (!file) return
       e.preventDefault()
+      // Pending placeholder FIRST (mirrors the drop placeholders below):
+      // big clipboard images take a moment to persist before a real chip can
+      // exist — without this, paste visibly does nothing, then a chip just
+      // pops in late (operator 2026-10-11: “delay when pasting… like it’s
+      // analyzing them before showing them”). The chip shows instantly as
+      // “reading…” and upgrades in place.
+      const phId = newQueueId()
+      const phName = file.name?.trim() || 'pasted image.png'
+      setChatAttachments((prev) => [...prev, { id: phId, path: '', name: phName, pending: true }])
+      const settlePasteChip = (resolved: { path: string; name: string } | null) => {
+        setChatAttachments((prev) => {
+          const idx = prev.findIndex((x) => x.id === phId)
+          if (idx === -1) return prev
+          if (!resolved || !resolved.path.trim()) {
+            return prev.filter((x) => x.id !== phId)
+          }
+          // Dedupe by path against the other staged chips.
+          const seen = new Set(
+            prev
+              .filter((x) => x.id !== phId && !x.pending && x.path)
+              .map((x) => x.path.toLowerCase()),
+          )
+          if (seen.has(resolved.path.toLowerCase())) {
+            return prev.filter((x) => x.id !== phId)
+          }
+          const next = [...prev]
+          next[idx] = { id: phId, path: resolved.path, name: resolved.name }
+          return next
+        })
+      }
       try {
         const { path, name } = await resolveImageAttachmentFromFile(file, {
           pathFromWebFile: (f) => window.sylo.files.pathFromWebFile(f),
           writePastedImage: (data, mimeType) => window.sylo.chat.writePastedImage(data, mimeType),
         })
-        if (!path.trim()) return
-        setChatAttachments((prev) => {
-          const seen = new Set(prev.filter((a) => !a.pending).map((a) => a.path.toLowerCase()))
-          const key = path.toLowerCase()
-          if (seen.has(key)) return prev
-          return [...prev, { id: newQueueId(), path, name }]
-        })
+        settlePasteChip(path.trim() ? { path, name } : null)
       } catch {
-        /* invalid or empty image payload */
+        settlePasteChip(null)
       }
     },
     [safeMode, activeId],

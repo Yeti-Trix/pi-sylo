@@ -22,14 +22,19 @@ export const SYLO_SKILL_BRIDGE_REPLY_KIND = 'sylo-skill-bridge-reply' as const
 /** Host → route iframe push (no reqId; not RPC). */
 export const SYLO_SKILL_BRIDGE_EVENT_KIND = 'sylo-skill-bridge-event' as const
 
-export type SkillBridgeHostEvent = 'workspaceChanged'
+export type SkillBridgeHostEvent = 'workspaceChanged' | 'libraryChanged'
 
 export type SkillBridgeEventToChild = {
   v: typeof SYLO_WIDGET_BRIDGE_V
   kind: typeof SYLO_SKILL_BRIDGE_EVENT_KIND
   nonce: string
   event: SkillBridgeHostEvent
-  payload: { piCwd: string }
+  /** workspaceChanged → route's workspace. libraryChanged (imagegen fan, §8
+   *  step 7; videogen twin §5.5) → optional workspaceKey/reason context + the
+   *  §5.5 optional `source` tag so a route can filter; both routes tolerate
+   *  the other's nudge (a refetch is cheap) and never trust the payload beyond
+   *  a nudge. */
+  payload: { piCwd: string; workspaceKey?: string; reason?: string; source?: 'imagegen' | 'videogen' }
 }
 
 export type SkillRouteBridgeOp =
@@ -93,6 +98,32 @@ export type SkillRouteBridgeOp =
   | 'ttsGenerate'
   | 'ttsSaveAudio'
   | 'ttsDeleteRouteClip'
+  /** sylo-image-gen Images route (plan §5.6) — additive block. */
+  | 'imageGenStatus'
+  | 'imageGenConfigGet'
+  | 'imageGenConfigSave'
+  | 'imageGenGenerate'
+  | 'imageGenJobGet'
+  | 'imageGenQueueList'
+  | 'imageGenLibraryList'
+  | 'imageGenImageGet'
+  | 'imageGenImageUpdate'
+  | 'imageGenImageDelete'
+  | 'imageGenRevealFile'
+  | 'videoGenStatus'
+  | 'videoGenConfigGet'
+  | 'videoGenConfigSave'
+  | 'videoGenGenerate'
+  | 'videoGenJobGet'
+  | 'videoGenQueueList'
+  | 'videoGenJobsList'
+  | 'videoGenJobsReplay'
+  | 'videoGenDoctor'
+  | 'videoGenLibraryList'
+  | 'videoGenVideoGet'
+  | 'videoGenVideoUpdate'
+  | 'videoGenVideoDelete'
+  | 'videoGenRevealFile'
     | 'thinkTankConfigGet'
   | 'thinkTankConfigSave'
   | 'thinkTankSessionGet'
@@ -215,6 +246,33 @@ const ROUTE_OPS: ReadonlySet<string> = new Set([
   'ttsGenerate',
   'ttsSaveAudio',
   'ttsDeleteRouteClip',
+  // sylo-image-gen Images route (plan §5.6) — additive block.
+  'imageGenStatus',
+  'imageGenConfigGet',
+  'imageGenConfigSave',
+  'imageGenGenerate',
+  'imageGenJobGet',
+  'imageGenQueueList',
+  'imageGenLibraryList',
+  'imageGenImageGet',
+  'imageGenImageUpdate',
+  'imageGenImageDelete',
+  'imageGenRevealFile',
+  // sylo-video-gen Videos route (plan §5, §8 step 7) — additive block (videoGenVideoGet/Update/Delete; job ops are DURABLE-LEDGER reads; videoGenDoctor = status with the doctor probe).
+  'videoGenStatus',
+  'videoGenConfigGet',
+  'videoGenConfigSave',
+  'videoGenGenerate',
+  'videoGenJobGet',
+  'videoGenQueueList',
+  'videoGenJobsList',
+  'videoGenJobsReplay',
+  'videoGenDoctor',
+  'videoGenLibraryList',
+  'videoGenVideoGet',
+  'videoGenVideoUpdate',
+  'videoGenVideoDelete',
+  'videoGenRevealFile',
     'thinkTankConfigGet',
   'thinkTankConfigSave',
   'thinkTankSessionGet',

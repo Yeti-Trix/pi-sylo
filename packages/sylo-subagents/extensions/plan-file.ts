@@ -123,6 +123,49 @@ function currentPlanOwner(cwd: string): string | undefined {
 }
 
 /**
+ * Clean a finished planner's raw final message down to the plan body.
+ *
+ * The planner's entire final message is what the host saves into the plan
+ * file, and models routinely bracket the plan with a conversational preamble
+ * ("Here's the plan…"), a closing summary, and a ```-fence — sometimes with
+ * its own `topic:` frontmatter. None of that belongs on disk: a preamble
+ * confuses grep-based recovery of the file, and a second frontmatter block can
+ * be mistaken for metadata of the file itself. In order:
+ *   1. a ```-fenced block holding the `## [` goals IS the plan — unwrap it, but
+ *      only when no goal heading follows the fence (a plan after the fence wins);
+ *   2. drop a leading (fenced or bare) frontmatter block that is not ours;
+ *   3. drop everything before the plan's first NON-FENCED heading line
+ *      (`# title` / `## [ ]`) — preamble fences are not plan content;
+ *   4. drop a trailing "Plan saved to …" or "Saved to …" epilogue line.
+ */
+export function planBodyFromPlannerResult(resultText: string | undefined): string {
+  if (!resultText?.trim()) return ''
+  let body = resultText
+  const fence = /```[^\n]*\r?\n([\s\S]*?)```/u.exec(body)
+  if (fence) {
+    const inside = fence[1] ?? ''
+    const tail = body.slice(fence.index + fence[0].length)
+    if (/(^|\r?\n)##\s*\[/u.test(inside) && !/(^|\r?\n)#{1,2}\s/u.test(tail)) body = inside
+  }
+  body = planBodyWithoutFrontmatter(body)
+  const lines = body.split(/\r?\n/)
+  let inFence = false
+  let start = 0
+  for (; start < lines.length; start += 1) {
+    const l = lines[start]!
+    if (/^\s*```/u.test(l)) inFence = !inFence
+    else if (!inFence && /^#{1,2}\s/u.test(l)) break
+  }
+  if (start > 0 && start < lines.length) body = lines.slice(start).join('\n')
+  return body
+    .replace(
+      /(?:\r?\n)+[-\s*]*\**(?:Plan (?:saved|written)[^\n]*|Saved (?:to|at)[^\n]*)$/iu,
+      '',
+    )
+    .trim()
+}
+
+/**
  * Write this conversation's plan. Does not write a workspace-global current.md.
  * Returns the workspace-relative path, or null when conversationId is missing.
  */

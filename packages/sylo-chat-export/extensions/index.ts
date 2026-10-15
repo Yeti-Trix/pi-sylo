@@ -16,7 +16,7 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { SessionManager } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 
 interface ExportResult {
   path: string
@@ -228,6 +228,15 @@ export default function piSyloChatExportExtension(pi: ExtensionAPI): void {
           }
         }
         let outPath: string | undefined = params.out_path as string | undefined
+        if (outPath) {
+          // A relative out_path used to resolve against the host PROCESS cwd,
+          // not ctx.cwd (the chat's cwd) — so the file landed in the wrong
+          // place or failed ENOENT when its parent dir did not exist there.
+          // Resolve against the chat cwd and create the parent, like the
+          // default journal/ paths below do.
+          if (!isAbsolute(outPath)) outPath = join(ctx.cwd, outPath)
+          mkdirSync(dirname(outPath), { recursive: true })
+        }
         if (!outPath) {
           const stamp = stampFromHeader(sm)
           outPath = join(journalDir, `.chat-export-${stamp}.md`)
@@ -237,7 +246,7 @@ export default function piSyloChatExportExtension(pi: ExtensionAPI): void {
 
       // Build manifest.
       const lines: string[] = []
-      lines.push(`Exported ${results.length} session(s) to ${journalDir}`)
+      lines.push(`Exported ${results.length} session(s)`)
       lines.push('')
       for (const r of results) {
         lines.push(`### ${r.path}`)

@@ -7,6 +7,7 @@ import {
   isWorkerAgentName,
   markGoalsBuilt,
   markPlanReviewed,
+  planBodyFromPlannerResult,
   reopenFailedGoals,
   resolveRunGoals,
   tickReviewedGoals,
@@ -14,7 +15,6 @@ import {
 } from '../../../../packages/sylo-subagents/extensions/plan-file.ts'
 import type { AgentTaskRow, SyloSubagentHostEvent } from '../shared/subagent-tasks-types.js'
 import { getConversation, getWorkspace } from './database.js'
-import { notifyPlanTodosChanged } from './plan-todos-host.js'
 import * as store from './subagent-tasks-db.js'
 
 let currentHostSessionId: string | undefined
@@ -47,8 +47,11 @@ function conversationWorkspaceCwd(conversationId: string): string | null {
 }
 
 function planBodyFromResult(resultText: string | undefined): string {
-  if (!resultText) return ''
-  return resultText.replace(/\n\nPlan saved to `[^`]+`\. Later turns should read that file instead of re-planning\.\s*$/u, '').trim()
+  // The planner's raw final message usually brackets the plan with a preamble,
+  // a closing summary, and/or a ```markdown fence whose own frontmatter
+  // (`.topic`) would otherwise land in the saved plan file. See
+  // planBodyFromPlannerResult for the strip order.
+  return planBodyFromPlannerResult(resultText)
 }
 
 /** Goal heading this run was dispatched against, when the orchestrator named one. */
@@ -120,7 +123,7 @@ export function handleSubagentHostEvent(conversationId: string, event: SyloSubag
         goal: event.goal,
       })
       break
-    case 'subagent_run_update':
+        case 'subagent_run_update':
       store.updateAgentTaskProgress(event.runId, {
         partialText: event.partialText,
         partialThinking: event.partialThinking,
@@ -129,6 +132,7 @@ export function handleSubagentHostEvent(conversationId: string, event: SyloSubag
         toolPreview: event.toolPreview,
         model: event.model,
         files: Array.isArray(event.files) ? event.files : undefined,
+        trace: Array.isArray(event.trace) ? event.trace : undefined,
       })
       break
     case 'subagent_run_awaiting_input':
@@ -150,11 +154,13 @@ export function handleSubagentHostEvent(conversationId: string, event: SyloSubag
           usage: event.usage,
           model: event.model,
           files: Array.isArray(event.files) ? event.files : undefined,
+          trace: Array.isArray(event.trace) ? event.trace : undefined,
         })
       } else {
         store.finalizeAgentTask(event.runId, {
           status: event.status,
           resultSummary: event.resultText?.slice(0, 2000) ?? event.error?.slice(0, 2000),
+          trace: Array.isArray(event.trace) ? event.trace : undefined,
           resultJson: {
             resultText: event.resultText,
             thinking: event.thinking,
@@ -165,8 +171,7 @@ export function handleSubagentHostEvent(conversationId: string, event: SyloSubag
           tokensUsed: event.usage ? event.usage.input + event.usage.output : undefined,
           files: Array.isArray(event.files) ? event.files : undefined,
         })
-        syncWorkspacePlanFile(conversationId, event)
-        notifyPlanTodosChanged()
+                syncWorkspacePlanFile(conversationId, event)
       }
       break
   }

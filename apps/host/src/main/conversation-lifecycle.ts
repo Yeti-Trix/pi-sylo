@@ -7,9 +7,18 @@ import { deleteTtsAudioForConversation } from './tts-audio.js'
 import { deleteOwnedChatAttachmentsForConversation } from './chat-owned-attachments.js'
 import { clearScheduledPromptLastConversationId } from './scheduled-prompts-db.js'
 import { closeWorkspaceScheduleDb } from './workspace-db.js'
+import {
+  DEFAULT_RETENTION_DAYS,
+  MS_PER_DAY,
+  SYLO_RETENTION_AUTO_ARCHIVE_PREF,
+  SYLO_RETENTION_DAYS_PREF,
+  clampRetentionDays,
+  normalizeAutoArchiveEnabled,
+  normalizeRetentionDays,
+} from '../shared/sylo-chat-retention-settings.js'
 
-export const CONVERSATION_RETENTION_DAYS = 30
-export const CONVERSATION_RETENTION_MS = CONVERSATION_RETENTION_DAYS * 24 * 60 * 60 * 1000
+export const CONVERSATION_RETENTION_DAYS = DEFAULT_RETENTION_DAYS
+export const CONVERSATION_RETENTION_MS = CONVERSATION_RETENTION_DAYS * MS_PER_DAY
 
 function sessionFolderSegmentForWorkspace(workspaceId: string): string {
   const wid = workspaceId.trim() || db.defaultWorkspaceId()
@@ -94,6 +103,17 @@ export function deleteWorkspaceFully(
   return db.deleteWorkspaceRow(wid)
 }
 
+/** Retention window in days the sweep should use right now: the stored pref, clamped; default 30. */
+export function resolveConversationRetentionDays(): number {
+  return normalizeRetentionDays(db.getPref(SYLO_RETENTION_DAYS_PREF, DEFAULT_RETENTION_DAYS)) ??
+    DEFAULT_RETENTION_DAYS
+}
+
+/** Whether the startup retention sweep runs at all: the stored pref, defaulting to on. */
+export function isAutoArchiveSweepEnabled(): boolean {
+  return normalizeAutoArchiveEnabled(db.getPref(SYLO_RETENTION_AUTO_ARCHIVE_PREF, true)) ?? true
+}
+
 /**
  * Retention sweep (runs at startup): chats with no activity in the retention
  * window are ARCHIVED, not deleted — the transcript, messages, attachments
@@ -101,9 +121,21 @@ export function deleteWorkspaceFully(
  * (Cursor-style archive, retrievable via the sidebar's Archived section).
  * Empty chats (zero messages) are still hard-deleted: there is nothing in
  * them to lose. Clears the active-chat pref if the active chat was archived.
+ *
+ * The window length and the on/off switch both come from Settings → General →
+ * Inactive chats prefs (see `sylo-chat-retention-settings.ts`); `retentionDays`
+ * lets the caller reuse an already-resolved window (startup prunes share it).
+ * When the switch is off, nothing is archived or deleted and an empty result
+ * is returned.
  */
-export function archiveStaleConversations(userDataPath: string, agentDir: string): { archivedIds: string[]; deletedIds: string[] } {
-  const cutoff = Date.now() - CONVERSATION_RETENTION_MS
+export function archiveStaleConversations(
+  userDataPath: string,
+  agentDir: string,
+  retentionDays?: number,
+): { archivedIds: string[]; deletedIds: string[] } {
+  if (!isAutoArchiveSweepEnabled()) return { archivedIds: [], deletedIds: [] }
+  const days = clampRetentionDays(retentionDays ?? resolveConversationRetentionDays())
+  const cutoff = Date.now() - days * MS_PER_DAY
   const stale = db.listConversationsUpdatedBefore(cutoff)
   const archivedIds: string[] = []
   const deletedIds: string[] = []

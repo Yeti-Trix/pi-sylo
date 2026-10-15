@@ -152,7 +152,7 @@ function createCompanionHandler(opts: {
   staticRoot: string
   sseClients: Set<SseClient>
   userDataPath: string
-  personalAppRoots?: Record<string, () => string>
+  personalAppRoots?: () => Record<string, () => string>
 }): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   const { staticRoot, sseClients, userDataPath, personalAppRoots } = opts
   return async (req, res) => {
@@ -649,7 +649,6 @@ function createCompanionHandler(opts: {
     }
 
     if (url.pathname === '/personal-app' || url.pathname.startsWith('/personal-app/')) {
-      const roots = personalAppRoots ?? {}
       const rest =
         url.pathname === '/personal-app' || url.pathname === '/personal-app/'
           ? ''
@@ -657,6 +656,12 @@ function createCompanionHandler(opts: {
       // Per-plugin mount: /personal-app/<id>/... (multi-plugin contract).
       // Legacy unscoped /personal-app/... serves the first-registered root.
       const pluginMatch = /^([^/]+)(\/.*)?$/.exec(rest)
+      // Read the roots LIVE per request: plugins (sylo-health …) register their
+      // static root via an async dynamic import that can land AFTER the server
+      // started. A boot-time snapshot missed late registrations and every
+      // /personal-app/* request then 404'd `personal_app_not_built` — plugin
+      // tabs (Nutrition/Workout/Vitals) showed blank all session.
+      const roots = personalAppRoots?.() ?? {}
       let rootFn: (() => string) | null = null
       let suffix = '/'
       if (pluginMatch && roots[pluginMatch[1]!]) {
@@ -704,7 +709,7 @@ export function startCompanionServer(opts: {
   prefs: CompanionPrefs
   tls: CompanionTlsMaterial
   userDataPath: string
-  personalAppRoots?: Record<string, () => string>
+  personalAppRoots?: () => Record<string, () => string>
 }): CompanionServerHandle {
   const sseClients = new Set<SseClient>()
 

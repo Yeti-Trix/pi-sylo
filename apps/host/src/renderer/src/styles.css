@@ -196,7 +196,15 @@ body {
     border: 1px solid var(--border);
     padding: 6px 8px;
     vertical-align: top;
-    word-break: break-word;
+    /* `word-break: break-word` let Chromium collapse a column's min-content
+       width to ~one character (message bubbles inherit overflow-wrap:anywhere,
+       which does the same), so narrow label columns ("Rank", "Atlanta, GA")
+       stacked one letter per line while the prose columns soaked up the width.
+       A cell-level overflow-wrap declaration wins that inheritance race without
+       the min-content collapse: columns never shrink below their longest word,
+       and unbreakable tokens (long URL / path chip) still emergency-break. */
+    word-break: normal;
+    overflow-wrap: break-word;
   }
 
   .chat-md th {

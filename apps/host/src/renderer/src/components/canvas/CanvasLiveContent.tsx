@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { cn } from '../../lib/cn'
 import { mutedText } from '../../panels/ui-classes'
 import { ChatMarkdown } from '../../ChatMarkdown'
+import { TracePill } from '../../panels/tasks/TracePill'
 import type { CanvasLiveSubscription } from './canvasTypes'
 import type {
   ChatPresenceRow as WorkspaceChatPresenceRow,
@@ -472,7 +473,7 @@ const RUN_STATUS_LABEL: Record<SubagentRunBoardRow['status'], string> = {
   succeeded: 'finished',
   failed: 'failed',
   cancelled: 'stopped',
-  orphaned: 'lost (broker restart)',
+  orphaned: 'lost — died without reporting',
 }
 const RUN_STATUS_CLASS: Record<SubagentRunBoardRow['status'], string> = {
   running: 'text-accent',
@@ -528,6 +529,16 @@ function PresenceChatRow({
   }
   return (
     <div className="flex items-start gap-2 rounded-md border border-border bg-bg-tertiary/30 px-2.5 py-1.5">
+      {chat.workspaceName ?
+        // Global board: which workspace this streaming chat belongs to (the board
+        // is all-workspaces now; two chats across workspaces often share a title).
+        <span
+          className="mt-0.5 max-w-[30%] shrink-0 truncate rounded bg-bg-tertiary px-1.5 py-0.5 text-[0.68rem] leading-none text-text-secondary"
+          title={`Workspace: ${chat.workspaceName}`}
+        >
+          {chat.workspaceName}
+        </span>
+      : null}
       <span
         className={cn(
           'mt-[0.32rem] inline-block size-2 shrink-0 rounded-full',
@@ -582,10 +593,12 @@ function PresenceChatRow({
   )
 }
 
-/** Workspace Subagents runs board — ACTIVE things only (operator: the panel is for
- *  what is working right now): chats with a live turn + each live/parked subagent run
- *  as a compact pill with ⏸ pause / ▶ resume / ⏹ stop controls. Finished runs live in
- *  chat (result cards) and in the Tasks view — not here. */
+/** Global Agents runs board (v4, operator: show ALL agents/subagents no matter which
+ *  workspace is open) — ACTIVE things first: chats with a live turn (any workspace) +
+ *  each live/parked subagent run as a compact pill with ⏸ pause / ▶ resume / ⏹ stop
+ *  controls; then a COLLAPSED-BY-DEFAULT <details> of recently finished/lost runs
+ *  (full results live in chat cards + the Tasks view; expanding a lost row replays its
+ *  working trace for diagnosis). */
 function SubagentRunsBoard({
   sub,
   onOpenChat,
@@ -609,21 +622,31 @@ function SubagentRunsBoard({
   const running = rows.filter((r) => r.status === 'running')
   const awaiting = rows.filter((r) => r.status === 'awaiting_input')
   const pausedRows = rows.filter((r) => r.status === 'paused')
+  const isFinished = (r: SubagentRunBoardRow): boolean =>
+    r.status === 'succeeded' || r.status === 'failed' || r.status === 'cancelled' || r.status === 'orphaned'
+  const finishedAll = rows.filter(isFinished)
+  // Bounded recall of recently finished/lost runs. The board's working sections
+  // are running/awaiting/paused only; when the last active run dies (or every
+  // run finishes) those sections vanish and a manual Agent tab used to go
+  // BLANK with no explanation (operator 2026-10-11: video-gen's run finalized
+  // `orphaned` and the panel froze at black). Show the newest few finished rows
+  // instead — the full result still lives in its chat card.
+  const finished = finishedAll.slice(0, 8)
 
   if (rows.length === 0 && activeChats.length === 0) {
     return (
       <div className="flex flex-col gap-2 p-3">
         <p className={cn(mutedText, 'm-0 text-[0.85rem] leading-[1.5]')}>
-          No subagent runs for this workspace yet.
+          No subagent runs yet.
         </p>
         <p className={cn(mutedText, 'm-0 text-[0.8rem] leading-[1.5]')}>
           The agent dispatches personas with the <code className="rounded bg-bg-tertiary px-1 font-mono text-[0.78rem]">subagent</code> tool
           (background is the default — completions arrive as messages), or with an
-          {' @mention '}of a persona name. This panel lists active subagent runs across the
-          workspace (⏸ pause / ▶ resume / ⏹ stop from each pill) plus chats whose agent is
-          streaming right now (⏹ aborts that chat's turn) — idle chats and finished runs stay
-          out of the way: the chat list on the left and result cards in chat cover those. Reopen
-          this panel any time from the + picker above; every chat in the workspace shares it.
+          {' @mention '}of a persona name. This panel is GLOBAL: it lists active subagent runs
+          from EVERY workspace (⏸ pause / ▶ resume / ⏹ stop from each pill) plus chats whose
+          agent is streaming right now (⏹ aborts that chat's turn). Finished runs stay collapsed
+          below (open them when you need the trail); result cards stay in chat. Reopen this
+          panel any time from the + picker above.
         </p>
       </div>
     )
@@ -657,14 +680,34 @@ function SubagentRunsBoard({
           </div>
         ),
       )}
+      {finishedAll.length === 0 ? null : (
+        // Uncontrolled <details>: the operator's open/closed state is DOM state, so
+        // the 300ms live-update re-renders never snap it (a controlled `open` prop
+        // would reset it on every board push). Collapsed by default, operator
+        // request 2026-10-12 — active things first, finished things on demand.
+        <details className="group flex flex-col gap-2">
+          <summary className="m-0 cursor-pointer select-none text-[0.72rem] font-semibold tracking-wide text-text-secondary uppercase hover:text-text-primary">
+            Finished — full result in chat · {finishedAll.length}
+            {finishedAll.length > finished.length ? ` (newest ${finished.length})` : null}
+            <span className="ml-1.5 inline-block transition-transform group-open:rotate-90">▸</span>
+          </summary>
+          <div className="flex flex-col gap-2">
+            {finished.map((row) => (
+              <SubagentRunRow key={row.taskId} row={row} onOpenChat={onOpenChat} />
+            ))}
+          </div>
+        </details>
+      )}
     </div>
   )
 }
 
 /** Compact, expandable run pill with operator controls. Collapsed: status dot +
  *  persona + one-line task + clock + ⏸/▶/⏹. Expanded: stats (status/mode/step/model/
- *  tokens/owning chat), files, question, pause/resume point, and “open in chat →”
- *  (the run's live/finished card lives in chat — the board never renders a drawer). */
+ *  tokens/owning chat), the run's working trace (the same bounded think/text/tool
+ *  pill feed the chat pill replays — operator: “show the working trace … in the
+ *  agents panel”), files, question, pause/resume point, and “open in chat →”
+ *  (the run's card in chat stays available; the board now shows the trail itself). */
 function SubagentRunRow({
   row,
   onOpenChat,
@@ -822,6 +865,21 @@ function SubagentRunRow({
               </button>
             : null}
           </div>
+          {row.question && awaiting ?
+            <p className="m-0 text-[0.8rem] leading-[1.45] text-warning">❓ {row.question}</p>
+          : null}
+          {row.trace.length > 0 ?
+            <div className="flex min-w-0 flex-col">
+              <p className={cn(mutedText, 'm-0 mb-1 text-[0.72rem] font-medium uppercase tracking-[0.04em]')}>
+                Working trace{live ? ' — live' : ''}
+              </p>
+              <div className="flex max-h-48 flex-col gap-1 overflow-y-auto overscroll-y-contain pr-1">
+                {row.trace.map((entry) => (
+                  <TracePill key={entry.seq} entry={entry} />
+                ))}
+              </div>
+            </div>
+          : null}
           {paused && row.resultSummary ?
             <p className="m-0 text-[0.74rem] leading-[1.45] text-text-secondary">⏸ {row.resultSummary}</p>
           : null}
@@ -830,10 +888,7 @@ function SubagentRunRow({
               {row.files.slice(0, 3).join(' · ')}{row.files.length > 3 ? ` · +${row.files.length - 3}` : ''}
             </p>
           : null}
-          {row.question && awaiting ?
-            <p className="m-0 text-[0.8rem] leading-[1.45] text-warning">❓ {row.question}</p>
-          : null}
-          {tail && row.toolName ?
+          {tail && row.toolName && row.trace.length === 0 ?
             <p className={cn(mutedText, 'm-0 truncate font-mono text-[0.74rem]')} title={row.toolPreview ?? ''}>
               ⚙ {row.toolName} — {row.toolPreview ?? ''}
             </p>

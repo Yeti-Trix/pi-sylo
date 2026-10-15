@@ -9,6 +9,27 @@ export type SubagentTaskStatus =
 
 export type SubagentRunMode = 'single' | 'parallel' | 'chain'
 
+/**
+ * One entry of a run's working trace — the interleaved think/text/tool sequence the
+ * child emitted while working. Persisted in the task's spec so an expanded pill can
+ * replay it as pills (parity with the main chat's working stream).
+ * `seq` is globally monotonic per run; entries other than a tool's pending ms/err
+ * patch are immutable once emitted, so the consumer can merge/skip by seq.
+ */
+export type SubagentTraceEntry =
+  | { seq: number; k: 'think'; text: string }
+  | { seq: number; k: 'text'; text: string }
+  | {
+      seq: number
+      k: 'tool'
+      name: string
+      preview: string
+      ms?: number
+      err?: boolean
+      /** Failed-call result tail when the tool returned an error. */
+      tail?: string
+    }
+
 export type SyloSubagentHostEvent =
   | {
       type: 'subagent_run_start'
@@ -40,7 +61,7 @@ export type SyloSubagentHostEvent =
       context_digest?: string
       model?: string
     }
-  | {
+    | {
       type: 'subagent_run_update'
       runId: string
       partialText?: string
@@ -52,6 +73,12 @@ export type SyloSubagentHostEvent =
       model?: string
       /** Workspace files this run has touched so far (deduped, capped at source). */
       files?: string[]
+      /**
+       * Full working trace so far — included on an update only when it changed
+       * since the previous update (the child coalesces streams at ~750ms; this
+       * keeps the usual delta cheap).
+       */
+      trace?: SubagentTraceEntry[]
     }
   | {
       /** Non-terminal: the operator paused this run; Start re-dispatches it in place. */
@@ -62,9 +89,11 @@ export type SyloSubagentHostEvent =
       thinking?: string
       model?: string
       error?: string
-      /** Workspace files this run touched, in first-touch order (deduped, capped at source). */
+            /** Workspace files this run touched, in first-touch order (deduped, capped at source). */
       files?: string[]
-      usage?: {
+      /** Final working trace, so the pill replays the full run after it ends. */
+      trace?: SubagentTraceEntry[]
+            usage?: {
         input: number
         output: number
         cost: number
@@ -146,6 +175,8 @@ export type AgentTaskSpec = {
   context_digest?: string
   /** Workspace files this run has touched (updated on run_update/run_end). */
   files?: string[]
+  /** Working trace — think/text/tool entries in child-emitted order (bounded tail). */
+  trace?: SubagentTraceEntry[]
 }
 
 /**
@@ -163,6 +194,10 @@ export type ChatPresenceRow = {
   model: string | null
   /** DB updated_at (last activity) for the conversation. */
   workspaceId?: string
+  /** Human workspace name — set on the GLOBAL Agent board, whose presence spans
+   *  every workspace; the panel shows it as a tag to disambiguate two chats with
+   *  the same title (or two "Untitled chat"s) from different workspaces. */
+  workspaceName?: string
   updatedAt: number
 }
 
@@ -203,14 +238,24 @@ export type SubagentRunBoardRow = {
   files: string[]
   /** First 2k chars of the finished run's report/error (DB result_summary). */
   resultSummary: string | null
+  /** Bounded working-trace tail (last ≤80 think/text/tool entries) — replayed as
+   *  pills when the row expands, matching the chat pill's trace feed. */
+  trace: SubagentTraceEntry[]
 }
 
-/** Live workspace snapshot carried by the `subagent-runs` canvas board and the `sylo_runs_list` tool (host RPC). */
+/** Live snapshot carried by the `subagent-runs` canvas board and the `sylo_runs_list`
+ *  tool (host RPC). Two scoping regimes:
+ *  - agent RPC (workspace-scoped contract): `workspaceKey` = pi_cwd; chats/rows cover
+ *    that workspace only (chats = sidebar-visible ones, all listed).
+ *  - canvas Agent panel (v4, GLOBAL): `workspaceKey` = `'__global__'` — rows/chats
+ *    span EVERY workspace; chats are active-turn only (idle chats are noise here),
+ *    and `workspaceName` is set for cross-workspace disambiguation. */
 export type SubagentBoardData = {
   workspaceKey: string
   generatedAt: number
-  /** Presence for each (non-archived) chat in the workspace. */
+  /** Presence rows — RPC: every non-archived chat of the workspace; global Agent
+   *  panel: active-turn chats across ALL workspaces (workspaceName tagged). */
   chats: ChatPresenceRow[]
-  /** Subagent runs across ALL chats of the workspace, live-first sorted. */
+  /** Subagent runs, live-first sorted. RPC: workspace's chats; global: all workspaces. */
   rows: SubagentRunBoardRow[]
 }

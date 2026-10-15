@@ -177,6 +177,10 @@ declare global {
             image_model_id: string | null
             image_model_provider: string | null
             thinking_level: string | null
+            /** Sidebar pin state (null = not pinned); pinned chats sort above unpinned ones + skip auto-archive. */
+            pinned_at: number | null
+            /** Manual drag order among pinned chats (lower = higher); only meaningful when pinned_at is set. */
+            pin_rank: number | null
           }[]
         >
         create: (
@@ -213,6 +217,10 @@ declare global {
         >
         /** Archive (retention v2): archive/unarchive a chat (archive hides it from the sidebar; nothing is deleted). */
         setArchived: (id: string, archived: boolean) => Promise<void>
+        /** Sidebar pin: pin/unpin a chat (pinned chats sort above unpinned ones + skip auto-archive). */
+        setPinned: (id: string, pinned: boolean) => Promise<void>
+        /** Sidebar pin drag-reorder: one workspace section's pinned ids in their new order. */
+        reorderPinned: (ids: string[]) => Promise<{ ok: true } | { ok: false; error: string }>
         /** Archive (retention v2): archived chats (most recently archived first). */
         listArchived: (workspaceId?: string) => Promise<
           { id: string; title: string; updated_at: number; archived_at: number | null; workspace_id: string | null }[]
@@ -535,6 +543,45 @@ declare global {
             status: string
             created_at: number
           }[]
+        >
+      }
+      /** Perf instrumentation (Developer → Testing probes + freeze diagnostics). */
+      perf: {
+        recent: (
+          limit?: number,
+        ) => Promise<Array<{ at: number; scope: string; detail: string; ms?: number }>>
+        probeConversationLoad: (
+          limit?: number,
+        ) => Promise<
+          | {
+              ok: true
+              rows: Array<{
+                conversationId: string
+                title: string
+                rows: number
+                payloadKb: number
+                dbMs: number
+                biggestRowKb: number
+              }>
+              totalMs: number
+            }
+          | { ok: false; error: string }
+        >
+        probeImageEncode: (
+          width?: number,
+          height?: number,
+        ) => Promise<
+          | {
+              ok: true
+              syntheticImage: { width: number; height: number; sourceKb: number }
+              readDecodeMs: number
+              resizeJpegMs: number
+              base64Ms: number
+              totalMs: number
+              encodedKb: number
+              reencoded: boolean
+            }
+          | { ok: false; error: string }
         >
       }
       /** Manual open of the per-workspace Agent panel (the `+` picker). */
@@ -1232,16 +1279,22 @@ declare global {
         /** Native open dialog; the picked file routes through canvas:show into
          *  the active conversation's tab scope. */
         pickFile: () => Promise<{ ok: true } | { ok: false; error: string }>
-        /** Persist this workspace's terminal/browser pool tabs (tiny JSON in
-         *  app data) so they reopen after a restart. */
+        /** Persist this workspace's terminal/browser/skill-route pool tabs
+         *  (tiny JSON in app data) so they reopen after a restart. */
         savePoolTabs: (
           workspaceId: string,
           payload:
-            | { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string; scrollback?: string }[]
+            | (
+                | { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string; scrollback?: string }
+                | { kind: 'skill-route'; title?: string; skillFolderName: string; routeId: string; fixturePath: string }
+              )[]
             | {
                 version: 2
                 activeId?: string
-                tabs: { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string; scrollback?: string }[]
+                tabs: (
+                  | { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string; scrollback?: string }
+                  | { kind: 'skill-route'; title?: string; skillFolderName: string; routeId: string; fixturePath: string }
+                )[]
               }
         ) => Promise<boolean>
         /** Load the saved pool tabs for a workspace. v1 stores return a
@@ -1250,9 +1303,15 @@ declare global {
           | {
               version: 2
               activeId?: string
-              tabs: { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string; scrollback?: string }[]
+              tabs: (
+                | { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string; scrollback?: string }
+                | { kind: 'skill-route'; title?: string; skillFolderName: string; routeId: string; fixturePath: string }
+              )[]
             }
-          | { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string }[]
+          | (
+              | { kind: 'terminal' | 'browser'; title?: string; terminalCwd?: string; browserUrl?: string }
+              | { kind: 'skill-route'; title?: string; skillFolderName: string; routeId: string; fixturePath: string }
+            )[]
         >
         // ── Agent checkpoints (per-turn undo; storage in app data only) ──
         checkpoints: {
@@ -1783,6 +1842,148 @@ declare global {
         >
         deleteRouteClip: (wavPath: string) => Promise<{ ok: true } | { ok: false; error: string }>
       }
+      /** sylo-image-gen Images route (plan §5.6) — payloads carry workspaceCwd like the tasks ops. */
+      imagegen: {
+        configGet: () =>
+          Promise<{ ok: true; config: Record<string, unknown> } | { ok: false; error: string }>
+        configSave: (values: Record<string, unknown>) =>
+          Promise<{ ok: true; restartNote?: string } | { ok: false; error: string }>
+        status: (payload: { workspaceCwd?: string; with_models?: boolean }) =>
+          Promise<
+            | {
+                ok: true
+                config: Record<string, unknown>
+                health: Record<string, unknown>
+                models?: Record<string, unknown>
+                workspace_root: string | null
+                library_root: string | null
+                library_stats: Record<string, unknown> | null
+              }
+            | { ok: false; error: string }
+          >
+        generate: (payload: { workspaceCwd?: string; request: Record<string, unknown> }) =>
+          Promise<{ ok: true; job: Record<string, unknown> } | { ok: false; error: string }>
+        jobGet: (payload: { job_id: string }) =>
+          Promise<{ ok: true; job: Record<string, unknown> } | { ok: false; error: string }>
+        queueList: (payload: { workspaceCwd?: string }) =>
+          Promise<
+            | { ok: true; health: Record<string, unknown>; jobs: Record<string, unknown>[] }
+            | { ok: false; error: string }
+          >
+        libraryList: (payload: Record<string, unknown>) =>
+          Promise<
+            | {
+                ok: true
+                library_root: string | null
+                items: Record<string, unknown>[]
+                total: number
+                stats: Record<string, unknown>
+                warning?: string
+              }
+            | { ok: false; error: string }
+          >
+        imageGet: (payload: { workspaceCwd?: string; image_id: string }) =>
+          Promise<
+            | { ok: true; record: Record<string, unknown>; path: string }
+            | { ok: false; error: string }
+          >
+        imageUpdate: (payload: {
+          workspaceCwd?: string
+          image_id: string
+          add_tags?: string[]
+          remove_tags?: string[]
+          favorite?: boolean
+        }) =>
+          Promise<
+            | { ok: true; record: Record<string, unknown> | null }
+            | { ok: false; error: string }
+          >
+        imageDelete: (payload: { workspaceCwd?: string; image_id: string }) =>
+          Promise<{ ok: true; deleted: string[] } | { ok: false; error: string }>
+        revealFile: (payload: { workspaceCwd?: string; image_id: string }) =>
+          Promise<{ ok: true; path: string } | { ok: false; error: string }>
+        /** §8 step 7 change fan — agent-side library mutations (returns unsubscribe). */
+        onLibraryChanged: (cb: (payload: { workspaceKey: string; reason: string }) => void) => () => void
+      }
+      /** sylo-video-gen Videos route (plan §5.3, §8 step 7) — payload shapes mirror the
+       *  imagegen block above; video specifics: durable ledger jobsList/jobsReplay (§4.3),
+       *  video_id payloads, revealFile kind 'clip' | 'poster', source-tagged change fan. */
+      videogen: {
+        configGet: () => Promise<{ ok: true; config: Record<string, unknown> } | { ok: false; error: string }>
+        configSave: (values: Record<string, unknown>) =>
+          Promise<{ ok: true; restartNote?: string } | { ok: false; error: string }>
+        status: (payload: { workspaceCwd?: string; with_models?: boolean }) =>
+          Promise<
+            | {
+                ok: true
+                config: Record<string, unknown>
+                health: Record<string, unknown>
+                models?: Record<string, unknown>
+                workspace_root: string | null
+                library_root: string | null
+                library_stats: Record<string, unknown> | null
+                jobs: Record<string, unknown> | null
+              }
+            | { ok: false; error: string }
+          >
+        generate: (payload: { workspaceCwd?: string; request: Record<string, unknown> }) =>
+          Promise<{ ok: true; job: Record<string, unknown>; notes: string[] } | { ok: false; error: string }>
+        jobGet: (payload: { workspaceCwd?: string; job_id: string }) =>
+          Promise<{ ok: true; job: Record<string, unknown> | null } | { ok: false; error: string }>
+        queueList: (payload: { workspaceCwd?: string }) =>
+          Promise<
+            | { ok: true; health: Record<string, unknown>; jobs: Record<string, unknown>[] }
+            | { ok: false; error: string }
+          >
+        jobsList: (payload: { workspaceCwd?: string; status?: string; limit?: number; offset?: number }) =>
+          Promise<{ ok: true; jobs: Record<string, unknown>[]; total: number } | { ok: false; error: string }>
+        /** §4.3 replay — read-only ComfyUI /history re-poll for pending ledger rows. */
+        jobsReplay: (payload: { workspaceCwd?: string }) =>
+          Promise<
+            | {
+                ok: true
+                health: Record<string, unknown>
+                workspace_root: string | null
+                skipped: boolean
+                note: string
+                entries: Record<string, unknown>[]
+              }
+            | { ok: false; error: string }
+          >
+        libraryList: (payload: Record<string, unknown>) =>
+          Promise<
+            | {
+                ok: true
+                library_root: string | null
+                items: Record<string, unknown>[]
+                total: number
+                stats: Record<string, unknown>
+                warning?: string
+              }
+            | { ok: false; error: string }
+          >
+        videoGet: (payload: { workspaceCwd?: string; video_id: string }) =>
+          Promise<
+            | { ok: true; record: Record<string, unknown>; path: string; poster_path?: string }
+            | { ok: false; error: string }
+            | null
+          >
+        videoUpdate: (payload: {
+          workspaceCwd?: string
+          video_id: string
+          add_tags?: string[]
+          remove_tags?: string[]
+          favorite?: boolean
+        }) => Promise<{ ok: true; record: Record<string, unknown> | null } | { ok: false; error: string }>
+        videoDelete: (payload: { workspaceCwd?: string; video_id: string }) =>
+          Promise<{ ok: true; deleted: string[] } | { ok: false; error: string }>
+        revealFile: (payload: { workspaceCwd?: string; video_id: string; kind?: 'clip' | 'poster' }) =>
+          Promise<{ ok: true; path: string } | { ok: false; error: string }>
+        /** §8 step 7 change fan (CLONE, §5.5) — returns unsubscribe; source-tagged for route filtering. */
+        onLibraryChanged: (
+          cb: (payload: { workspaceKey: string; reason: string; source?: string }) => void,
+        ) => () => void
+      }
       evals: {
         loadDashboard: () => Promise<
           | {
@@ -1824,23 +2025,7 @@ declare global {
         >
       }
       plan: {
-        todos: (conversationId: string) => Promise<{
-          conversationId: string
-          goal?: string
-          todos: {
-            id: string
-            text: string
-            done: boolean
-            state: 'open' | 'built' | 'passed'
-          }[]
-          status: 'active' | 'reviewed'
-        }>
-        onChanged: (cb: () => void) => () => void
         clearForNewChat: (workspaceId: string) => Promise<{ ok: true }>
-        hide: (conversationId: string) => Promise<
-          | { ok: true }
-          | { ok: false; reason: 'subagents_running' | 'no_plan' }
-        >
       }
       tasks: {
         list: (conversationId: string) => Promise<

@@ -11,6 +11,9 @@ You must NOT make any changes. Only read, analyze, and plan. Sylo saves your
 output to `<workspace>/.sylo/plans/<this conversation id>.md` so a later worker
 or a resumed turn in *this* chat can read it after a crash. Do not write that
 file yourself. Do not read or continue another conversation's plan file.
+Sylo writes that file verbatim from your final message — so send NO preamble,
+NO closing summary, and NO code fence around the plan, and never state or
+guess the save path in your output.
 
 The file is a **sectioned plan**, not a flat checklist. Each `##` heading is one
 goal. Under that heading write the work in enough detail that a worker can

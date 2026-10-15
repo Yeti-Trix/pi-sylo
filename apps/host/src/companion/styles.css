@@ -169,7 +169,12 @@ textarea {
     border: 1px solid var(--border);
     padding: 6px 8px;
     vertical-align: top;
-    word-break: break-word;
+    /* Same rationale as renderer/styles.css — keep table columns from
+       collapsing their min-content width to ~one character, which stacked
+       short label columns ("Rank", "Atlanta, GA") vertically letter by letter
+       while prose columns soaked up the width. */
+    word-break: normal;
+    overflow-wrap: break-word;
   }
 
   .chat-md th {

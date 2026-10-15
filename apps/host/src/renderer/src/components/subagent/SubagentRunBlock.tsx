@@ -99,10 +99,21 @@ export function SubagentRunBlock({
     [],
   )
 
-  const selectedTask = batch.tasks.find((t) => t.id === selectedId) ?? null
+  // Expanded pill shows a trace IMMEDIATELY (operator report 2026-10-11: clicking
+  // the running “Subagent · planner” pill rendered an empty box): when no specific
+  // run row is selected, fall back to the batch's focus task — the live run while
+  // working, or the step that best explains a finished batch (failure > last step).
+  // Without this, a single-run batch (the forced @planner / @orchestrator
+  // dispatch shape) had NO rows to click (rows only render for parallel>1/chain>1),
+  // so expanding showed nothing, and parallel/chain batches needed a second click.
+  const effectiveSelectedId =
+    selectedId != null && batch.tasks.some((t) => t.id === selectedId) ?
+      selectedId
+    : pickFocusTask(batch.tasks, null)
+  const selectedTask = batch.tasks.find((t) => t.id === effectiveSelectedId) ?? null
   const chainTasks = batch.mode === 'chain' && batch.tasks.length > 1 ? batch.tasks : null
   const status = batchStatusLabel(batch)
-  const title = batchTitle(batch, selectedId)
+  const title = batchTitle(batch, effectiveSelectedId)
 
   const cls = useMemo(
     () =>
@@ -160,10 +171,10 @@ export function SubagentRunBlock({
         {batch.mode === 'parallel' && batch.tasks.length > 1 ?
           <div className="mb-3 flex flex-col gap-1.5">
             {batch.tasks.map((task) => (
-              <TaskRow
+                            <TaskRow
                 key={task.id}
                 task={task}
-                selected={task.id === selectedId}
+                selected={task.id === effectiveSelectedId}
                 compact
                 onSelect={() => selectTask(task.id)}
               />
@@ -172,8 +183,8 @@ export function SubagentRunBlock({
         : null}
 
         {chainTasks ?
-          <div className="mb-3">
-            <ChainStepper tasks={chainTasks} selectedId={selectedId} onSelect={selectTask} />
+                    <div className="mb-3">
+            <ChainStepper tasks={chainTasks} selectedId={effectiveSelectedId} onSelect={selectTask} />
           </div>
         : null}
 

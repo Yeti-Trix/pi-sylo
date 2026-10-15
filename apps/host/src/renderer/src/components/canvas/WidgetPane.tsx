@@ -2,8 +2,8 @@ import React, { useEffect, useState } from 'react'
 import { mutedText, toolLogPre } from '../../panels/ui-classes'
 import { cn } from '../../lib/cn'
 import { SkillSurfaceSandbox } from '../../skill-surface/iframe-host'
-import type { WidgetBridgeMessageFromChild } from '../../skill-surface/bridge'
-import type { WidgetTabPayload } from './canvasTypes'
+import type { SkillRouteBridgeOp, WidgetBridgeMessageFromChild } from '../../skill-surface/bridge'
+import type { SkillRouteTabPayload, WidgetTabPayload } from './canvasTypes'
 
 /**
  * Body of a canvas 'widget' app-pane tab: renders one agent `show_widget`
@@ -11,17 +11,48 @@ import type { WidgetTabPayload } from './canvasTypes'
  * use) with a small view-only bridge log strip. Replaces the old chat-column
  * widget host — agent-driven rich UI belongs on the canvas, not in chat.
  *
- * Mount model: like browser panes, widget panes stay mounted (hidden) across
- * tab switches so iframe state (e.g. typed form data) survives; the element
- * dies when the tab is closed.
+ * Also carries the branch for canvas 'skill-route' tabs (persistent
+ * docked dashboards, e.g. the image-gen Images route). The branch lives in
+ * THIS file so the docked route body sits beside the plain-widget body it
+ * mirrors (route args are exactly the full-area route mount in App.tsx) — a
+ * separate RoutePane file would only duplicate this mount while the payload
+ * flows through the same mounting block.
+ *
+ * Mount model: like browser panes, widget/route panes stay mounted (hidden)
+ * across tab switches so iframe state survives; the element dies when the tab
+ * is closed.
  */
 
 type Props = {
   widget?: WidgetTabPayload
+  /** Docked skill-route tab payload. When set, renders the route-variant
+   *  sandbox branch instead of the one-shot widget branch. */
+  skillRoute?: SkillRouteTabPayload
+  /** Route-only: the REAL skill-route bridge for this tab's own route row
+   *  (App pins `handleSkillRouteBridge` to the tab payload) — no view-only
+   *  log strip, mirroring the full-area/pop-out route mounts. */
+  skillRouteBridge?: (op: SkillRouteBridgeOp, payload: unknown) => Promise<unknown>
+  /** Route-only workspace context: pushed to the iframe on workspace change. */
+  skillRouteHostPiCwd?: string
+  /** Route-only: imagegen library change fan (identity-based push). */
+  skillRouteLibraryFan?: { workspaceKey: string; reason: string } | null
+  /** Route-only: videogen twin of `skillRouteLibraryFan` (plan §5.5, §8 step
+   *  7 — CLONE discipline: a sibling prop threaded into the sandbox's
+   *  `videogenLibraryChangedFan` push, not a generalization of the imagegen
+   *  fan). */
+  skillRouteVideoLibraryFan?: { workspaceKey: string; reason: string } | null
   className?: string
 }
 
-export function WidgetPane({ widget, className }: Props): React.ReactElement {
+export function WidgetPane({
+  widget,
+  skillRoute,
+  skillRouteBridge,
+  skillRouteHostPiCwd,
+  skillRouteLibraryFan,
+  skillRouteVideoLibraryFan,
+  className,
+}: Props): React.ReactElement {
   const [log, setLog] = useState<string[]>([])
   // Reset the log when the tab gains a different payload (same-call re-show
   // keeps the tab id but fresh data → fresh log).
@@ -29,6 +60,35 @@ export function WidgetPane({ widget, className }: Props): React.ReactElement {
   useEffect(() => {
     setLog([])
   }, [toolCallId])
+
+  // ── skill-route tabs ──────────────────────────────────────────────────────
+  // Mirrors App.tsx's full-area route mount one-to-one (variant="route",
+  // widgetData={}, compactChrome, noop reject/error); the only deltas are
+  // per-tab threading of the real bridge handler + ws context, and
+  // `iframeClassName="min-h-0"` neutralizing the route iframe's
+  // `min-h-[calc(100dvh-10.5rem)]` (full-area assumption) — a docked pane
+  // sizes from `flex-1` within the canvas column instead.
+  if (skillRoute !== undefined) {
+    return (
+      <div className={cn('flex min-h-0 min-w-0 flex-1 flex-col', className)}>
+        <SkillSurfaceSandbox
+          key={`${skillRoute.skillFolderName}:${skillRoute.routeId}`}
+          variant="route"
+          fixturePath={skillRoute.fixturePath}
+          title={skillRoute.title}
+          widgetData={{}}
+          compactChrome
+          hostPiCwd={skillRouteHostPiCwd}
+          libraryChangedFan={skillRouteLibraryFan ?? null}
+          videogenLibraryChangedFan={skillRouteVideoLibraryFan ?? null}
+          onSkillBridgeRpc={skillRouteBridge}
+          onBridgeReject={() => {}}
+          onError={() => {}}
+          iframeClassName="min-h-0"
+        />
+      </div>
+    )
+  }
 
   if (!widget) {
     // Reachable only when a widget tab exists without a payload (should not

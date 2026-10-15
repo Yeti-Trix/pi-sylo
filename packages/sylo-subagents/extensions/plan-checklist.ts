@@ -187,12 +187,18 @@ export type ReviewVerdict = 'pass' | 'fail' | 'none'
  * own "return explicit PASS/FAIL" wording in their prose, so scanning for the bare
  * words would read a template echo as a verdict. Anything else is `none`, which
  * leaves the goal open.
+ *
+ * The sign-off is read LITERALLY but tolerates the markdown wrappers models keep
+ * reaching for around it (blockquote, bold, inline code) — a 2026-10-11 fully-passed
+ * review ended with `` `VERDICT: PASS` `` and the old regex (only `>` + `*` aware)
+ * missed it, leaving a finished section unreviewed. The contract still requires the
+ * plain form (agents/reviewer.md); this is the safety net, not license to format.
  */
 export function parseReviewVerdict(resultText: string | undefined): ReviewVerdict {
   if (!resultText) return 'none'
   let verdict: ReviewVerdict = 'none'
   for (const line of resultText.split(/\r?\n/)) {
-    const m = /^\s*>?\s*\**\s*VERDICT\s*\**\s*:\s*\**\s*(PASS|FAIL)\b/i.exec(line)
+    const m = /^\s*>?\s*[`*]*\s*VERDICT[\s`*]*:[\s`*]*(PASS|FAIL)\b/i.exec(line)
     if (m) verdict = m[1]!.toLowerCase() === 'pass' ? 'pass' : 'fail'
   }
   return verdict

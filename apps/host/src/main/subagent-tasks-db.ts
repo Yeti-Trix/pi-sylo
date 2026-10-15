@@ -204,6 +204,51 @@ export function orphanRunningTasksForHostSession(
   return rows
 }
 
+/**
+ * How quiet a `running` row may get before it is treated as not-alive. Every broker
+ * lifecycle event (run_start insert, run_update ~every 750ms while streaming, run_end)
+ * bumps `updated_at`, so a running row goes quiet ONLY when no event for the run is
+ * arriving any more — i.e. the child died or its teardown never reached the host. The
+ * window sits above the broker-side stall watchdog (5 min cloud / 10 min local + a 10s
+ * finalize grace) so the watchdog's informative `failed` verdict always lands first;
+ * this value is the input to the host's last-resort orphan-reconcile sweep and to the
+ * zombie-aware running-count used by plan guards.
+ */
+export const SUBAGENT_RUN_QUIET_MS = 15 * 60_000
+
+/** Rows still marked `running` whose last update is older than `staleMs` — the
+ *  orphan-reconcile sweep's candidates. */
+export function listStaleRunningAgentTasks(staleMs: number, now = Date.now()): AgentTaskRow[] {
+  return getDb()
+    .prepare(
+      `SELECT * FROM agent_tasks
+       WHERE status = 'running' AND updated_at <= ?
+       ORDER BY started_at ASC`,
+    )
+    .all(now - Math.max(0, staleMs)) as AgentTaskRow[]
+}
+
+/** Finalize ONE stuck row as orphaned (child died without `run_end`) and return its
+ *  pre-update snapshot for the wake card — null when it was already terminal. */
+export function orphanAgentTaskById(
+  runId: string,
+  reason: string,
+  now = Date.now(),
+): AgentTaskRow | null {
+  const row = getDb()
+    .prepare(`SELECT * FROM agent_tasks WHERE id = ? AND status = 'running'`)
+    .get(runId) as AgentTaskRow | undefined
+  if (!row) return null
+  getDb()
+    .prepare(
+      `UPDATE agent_tasks
+       SET status = 'orphaned', status_reason = ?, ended_at = ?, updated_at = ?
+       WHERE id = ? AND status = 'running'`,
+    )
+    .run(reason, now, now, runId)
+  return row
+}
+
 export function insertAgentTaskStart(input: {
   id: string
   hostSessionId: string
@@ -348,7 +393,7 @@ export function resetAgentTaskToRunning(
  */
 export function markAgentTaskPaused(
   id: string,
-  info: { statusReason?: string; resultText?: string; usage?: { input: number; output: number; cost: number; turns: number }; model?: string; files?: string[] },
+  info: { statusReason?: string; resultText?: string; usage?: { input: number; output: number; cost: number; turns: number }; model?: string; files?: string[]; trace?: AgentTaskSpec['trace'] },
   now = Date.now(),
 ): void {
   const existing = getAgentTask(id)
@@ -360,6 +405,7 @@ export function markAgentTaskPaused(
     spec = { task: existing.title, mode: existing.mode, agent: existing.agent_name, groupRunId: existing.group_run_id ?? id }
   }
   spec.lastThinkingLive = false
+  if (Array.isArray(info.trace)) spec.trace = info.trace.slice(-80)
   if (info.model?.trim()) spec.model = info.model.trim()
   if (Array.isArray(info.files) && info.files.length > 0) {
     const seen = new Set(spec.files ?? [])
@@ -427,6 +473,8 @@ export function updateAgentTaskProgress(
     toolPreview?: string
     model?: string
     files?: string[]
+    /** Bounded think/text/tool trace from the child — replaces the stored array. */
+    trace?: AgentTaskSpec['trace']
   },
   now = Date.now(),
 ): void {
@@ -449,6 +497,11 @@ export function updateAgentTaskProgress(
   if (patch.toolName !== undefined) spec.lastToolName = patch.toolName
   if (patch.toolPreview !== undefined) spec.lastToolPreview = patch.toolPreview
   if (patch.model?.trim()) spec.model = patch.model.trim()
+  if (Array.isArray(patch.trace)) {
+    // Replace (not merge): the child owns the array and its ordering; it already
+    // applies the cap + dedupe. Host-side sanity cap only.
+    spec.trace = patch.trace.slice(-80)
+  }
   if (Array.isArray(patch.files) && patch.files.length > 0) {
     // Union with what was already recorded (progress updates arrive repeatedly);
     // first-touch order wins so the board lists the files it worked on in order.
@@ -478,6 +531,8 @@ export function finalizeAgentTask(
     resultJson?: Record<string, unknown>
     tokensUsed?: number
     files?: string[]
+    /** Final bounded trace from the child — replaces the stored array. */
+    trace?: AgentTaskSpec['trace']
   },
   now = Date.now(),
 ): void {
@@ -495,7 +550,11 @@ export function finalizeAgentTask(
         groupRunId: existing.group_run_id ?? id,
       }
     }
-    spec.lastThinkingLive = false
+        spec.lastThinkingLive = false
+    if (Array.isArray(input.trace)) {
+      // Replace (not merge): child owns ordering + cap; host applies a sanity cap only.
+      spec.trace = input.trace.slice(-80)
+    }
     const thinking = input.resultJson?.thinking
     if (typeof thinking === 'string' && thinking.trim()) spec.lastPartialThinking = thinking.trim()
     const model = input.resultJson?.model
@@ -572,6 +631,43 @@ export function listAgentTasksForConversationIds(conversationIds: readonly strin
   return out
 }
 
+/**
+ * Every agent_tasks row for a WORKSPACE (cwd-keyed), regardless of which chat owns
+ * it or how many non-archived chats the workspace has — the Agent panel snapshot
+ * used to ask by the newest 30 conversation ids, so a workspace with more chats
+ * than the cap silently dropped older chats' runs from the panel (pi-sylo-dev
+ * passed the 37-chat mark 2026-10-11). The caller slices/limits after sorting.
+ */
+export function listAgentTasksForWorkspaceCwd(piCwd: string): AgentTaskRow[] {
+  const key = piCwd.trim()
+  if (!key) return []
+  return getDb()
+    .prepare(
+      `SELECT t.id, t.host_session_id, t.conversation_id, t.parent_task_id, t.group_run_id, t.depth,
+              t.title, t.spec_json, t.status, t.status_reason, t.mode, t.agent_name, t.step_index,
+              t.started_at, t.ended_at, t.result_summary, t.result_json, t.tokens_used, t.created_at, t.updated_at
+       FROM agent_tasks t
+       JOIN conversations c ON c.id = t.conversation_id
+       JOIN workspaces w ON w.id = c.workspace_id
+       WHERE w.pi_cwd = ?
+       ORDER BY t.created_at DESC`,
+    )
+    .all(key) as AgentTaskRow[]
+}
+
+/**
+ * Every agent_tasks row, ALL workspaces — feeds the global Agent panel
+ * (operator 2026-10-12: the dashboard must show every agent/subagent no matter
+ * which workspace is open). Newest-created first; the caller re-sorts live-first
+ * and caps the board slice. No joins — the caller builds the conversation-title
+ * map separately.
+ */
+export function listAllAgentTasks(): AgentTaskRow[] {
+  return getDb()
+    .prepare(`SELECT ${TASK_COLUMNS} FROM agent_tasks ORDER BY created_at DESC`)
+    .all() as AgentTaskRow[]
+}
+
 /** Runs that belong to a background chain/group (chain stepper in a cross-chat detail view). */
 export function listAgentTasksByGroupRunId(groupRunId: string): AgentTaskRow[] {
   const id = groupRunId.trim()
@@ -615,17 +711,26 @@ export function deleteOrphanedAgentTasks(): number {
   return result.changes
 }
 
-export function countRunningAgentTasks(hostSessionId?: string): number {
+export function countRunningAgentTasks(hostSessionId?: string, freshWithinMs?: number): number {
+  // `freshWithinMs` makes the count zombie-aware: a `running` row quiet longer than
+  // that window is not counted (the orphan reconcile will finalize it shortly). Without
+  // the window the plain DB count is returned — every historical caller.
+  const freshCutoff =
+    typeof freshWithinMs === 'number' && Number.isFinite(freshWithinMs) && freshWithinMs >= 0 ?
+      Date.now() - freshWithinMs
+    : null
+  const conds = [`status = 'running'`]
+  const params: Array<string | number> = []
+  if (freshCutoff !== null) {
+    conds.push('updated_at >= ?')
+    params.push(freshCutoff)
+  }
   if (hostSessionId) {
-    const row = getDb()
-      .prepare(
-        `SELECT COUNT(*) as c FROM agent_tasks WHERE status = 'running' AND host_session_id = ?`,
-      )
-      .get(hostSessionId) as { c: number }
-    return row.c
+    conds.push('host_session_id = ?')
+    params.push(hostSessionId)
   }
   const row = getDb()
-    .prepare(`SELECT COUNT(*) as c FROM agent_tasks WHERE status = 'running'`)
-    .get() as { c: number }
+    .prepare(`SELECT COUNT(*) as c FROM agent_tasks WHERE ${conds.join(' AND ')}`)
+    .get(...params) as { c: number }
   return row.c
 }

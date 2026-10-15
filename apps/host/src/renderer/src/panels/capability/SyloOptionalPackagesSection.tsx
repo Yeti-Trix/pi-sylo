@@ -26,8 +26,11 @@ import {
 } from '../ui-classes'
 
 export function SyloOptionalPackagesSection({
+  active,
   onSaved,
 }: {
+  /** True only when the Optional packages rail tab is selected — hidden on every other tab, like the other cap sections. */
+  active: boolean
   onSaved: (restartNote: string) => void
 }): React.ReactElement {
   const [pref, setPref] = useState<Record<string, boolean>>({})
@@ -90,7 +93,7 @@ export function SyloOptionalPackagesSection({
   const enabledCount = SYLO_OPTIONAL_PACKAGES.filter((p) => pref[p.id] === true).length
 
   return (
-    <section className={capSection}>
+    <section className={cn(capSection, 'flex flex-col', !active && 'hidden')}>
       <div className={capPaneHead}>
         <h2 className={capSectionSummaryTitle}>Sylo built-in packages</h2>
         <span className={capCount}>

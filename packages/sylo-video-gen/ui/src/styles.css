@@ -1,0 +1,1102 @@
+/*
+ * Videos route — token-ported palette matching the host's canonical Sylo UI
+ * theme (apps/host/src/renderer/src/styles.css @theme). Same deliberate
+ * mapping sylo-image-gen's ui/src/styles.css documents (§8 step 9 of that
+ * build); tokens use the vg prefix per the §8.1 scaffold:
+ *   --color-surface    → host bg-secondary  #161616 (route iframe surface)
+ *   --color-surface-2  → host bg-tertiary   #232323 (raised cards/tabs/drawer)
+ *   --color-border     → host border        #2a2a2a
+ *   --color-text       → host text-primary  #ededed
+ *   --color-text-muted → host text-secondary #9b9b9b
+ *   --color-text-faint → host text-muted    #6b6b6b (smallest captions only)
+ *   --color-accent     → host accent        #d4d4d4 (NEUTRAL GRAY — the host
+ *                          deliberately has no blue, "Cursor-style restyle";
+ *                          text on accent fills is host bg-primary #101010)
+ *   --vg-danger/-ok/-nc → host danger #f16a50 / success #3dd68c / warning #e3b341
+ * Component styles are the imagegen components ported 1:1 (screens are
+ * structural twins) + video-specific classes: card/thumb media wrappers with
+ * the duration overlay, the player block, the strength slider row, and the
+ * §4.3 render-ledger card.
+ */
+:root {
+  color-scheme: dark;
+  --color-surface: #161616;
+  --color-surface-2: #232323;
+  --color-border: #2a2a2a;
+  --color-text: #ededed;
+  --color-text-muted: #9b9b9b;
+  --color-text-faint: #6b6b6b;
+  --color-accent: #d4d4d4;
+  --color-accent-muted: #525252;
+  --vg-danger: #f16a50;
+  --vg-ok: #3dd68c;
+  --vg-nc: #e3b341;
+  font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+  color: var(--color-text);
+  background: var(--color-surface);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--color-surface);
+}
+
+.vg-app {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 20px 16px 40px;
+}
+
+/* ── header + tabs ─────────────────────────────────────────────────────────── */
+
+.vg-head h1 {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 600;
+}
+
+.vg-sub {
+  margin: 4px 0 10px;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+}
+
+.vg-tabs {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: 0;
+}
+
+.vg-tab {
+  padding: 7px 14px;
+  border: 1px solid var(--color-border);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.vg-tab-active {
+  background: var(--color-surface-2);
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+/* ── panels + fields ───────────────────────────────────────────────────────── */
+
+.vg-panel {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface-2);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.vg-panel-title {
+  margin: 4px 0 0;
+  font-size: 0.98rem;
+  font-weight: 600;
+}
+
+.vg-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.vg-grow {
+  flex: 1 1 auto;
+}
+
+.vg-label {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+.vg-hint {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--color-text-faint);
+}
+
+.vg-hint-inline {
+  color: var(--color-text-faint);
+  font-size: 0.72rem;
+  font-weight: 400;
+  margin-left: 6px;
+}
+
+.vg-hint-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.vg-row {
+  display: flex;
+  gap: 14px;
+  align-items: flex-end;
+}
+
+.vg-row-wrap {
+  flex-wrap: wrap;
+}
+
+.vg-recents {
+  list-style: none;
+  margin: 0;
+  padding: 6px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.vg-textarea {
+  width: 100%;
+  min-height: 96px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  resize: vertical;
+}
+
+.vg-select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.vg-select-inline {
+  width: auto;
+  min-width: 160px;
+}
+
+.vg-input {
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.vg-input-num {
+  width: 130px;
+  font-variant-numeric: tabular-nums;
+}
+
+.vg-input-date {
+  padding: 5px 8px;
+  font-size: 0.76rem;
+  width: auto;
+}
+
+.vg-slider {
+  width: 100%;
+  max-width: 320px;
+  accent-color: var(--color-accent);
+}
+
+.vg-seed-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.vg-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.vg-check-card {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+/* ── buttons ───────────────────────────────────────────────────────────────── */
+
+.vg-btn {
+  padding: 8px 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-accent);
+  color: #101010;
+  font-weight: 600;
+  cursor: pointer;
+  font: inherit;
+}
+
+.vg-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.vg-btn-secondary {
+  padding: 7px 13px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-weight: 500;
+  cursor: pointer;
+  font: inherit;
+}
+
+.vg-btn-secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.vg-btn-ghost {
+  padding: 2px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-accent);
+  font-size: 0.8rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.vg-btn-ghost:hover {
+  background: rgba(212, 212, 212, 0.12);
+}
+
+.vg-btn-danger,
+.vg-btn-danger-ghost {
+  padding: 7px 13px;
+  border: 1px solid rgba(241, 106, 80, 0.5);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--vg-danger);
+  cursor: pointer;
+  font: inherit;
+}
+
+.vg-btn-danger {
+  background: rgba(241, 106, 80, 0.15);
+  font-weight: 600;
+}
+
+.vg-btn-danger-ghost:hover {
+  background: rgba(241, 106, 80, 0.12);
+}
+
+.vg-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.vg-warn-inline {
+  color: var(--vg-nc);
+}
+
+/* ── segmented + chips ─────────────────────────────────────────────────────── */
+
+.vg-segmented {
+  display: inline-flex;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.vg-seg {
+  padding: 7px 13px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.vg-seg + .vg-seg {
+  border-left: 1px solid var(--color-border);
+}
+
+.vg-seg-active {
+  background: var(--color-accent);
+  color: #101010;
+  font-weight: 600;
+}
+
+.vg-chips {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.vg-chips-wrap {
+  flex-wrap: wrap;
+}
+
+.vg-chip {
+  padding: 5px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 0.78rem;
+  cursor: pointer;
+  font: inherit;
+}
+
+.vg-chip:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.vg-chip-active {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: #101010;
+  font-weight: 600;
+}
+
+.vg-filter-dates {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  margin-left: 8px;
+  min-width: 0;
+}
+
+/* ── job card + banner ─────────────────────────────────────────────────────── */
+
+.vg-jobcard {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+
+.vg-jobbody {
+  flex: 1;
+  min-width: 0;
+}
+
+.vg-jobhead {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+}
+
+.vg-jobmeta {
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.vg-jobprompt {
+  margin: 4px 0 0;
+  font-size: 0.8rem;
+  color: var(--color-text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vg-jobdot {
+  width: 10px;
+  height: 10px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--color-text-muted);
+  flex: none;
+}
+
+.vg-jobdot[data-status='done'],
+.vg-jobdot[data-status='recovered'] {
+  background: var(--vg-ok);
+}
+
+.vg-jobdot[data-status='error'] {
+  background: var(--vg-danger);
+}
+
+.vg-jobdot[data-status='still_rendering'] {
+  background: var(--vg-nc);
+}
+
+.vg-spinner {
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: vg-spin 0.9s linear infinite;
+  flex: none;
+}
+
+@keyframes vg-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.vg-banner {
+  padding: 9px 12px;
+  border: 1px solid rgba(227, 179, 65, 0.4);
+  border-radius: 8px;
+  background: rgba(227, 179, 65, 0.1);
+  color: var(--color-text);
+  font-size: 0.82rem;
+}
+
+/* ── result strip (video thumbs — hover-play, no audio in v1) ──────────────── */
+
+.vg-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.vg-thumb {
+  margin: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  overflow: hidden;
+}
+
+.vg-thumb-media {
+  position: relative;
+  background: #101010;
+}
+
+.vg-thumb-media video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  background: #101010;
+  cursor: pointer;
+}
+
+.vg-duration {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.65);
+  color: var(--color-text);
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.vg-thumb-cap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+}
+
+.vg-thumb-meta {
+  font-size: 0.72rem;
+  color: var(--color-text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.vg-thumb-actions {
+  display: flex;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+
+.vg-iconbtn {
+  padding: 3px 7px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.vg-iconbtn:hover {
+  background: rgba(212, 212, 212, 0.15);
+}
+
+.vg-iconbtn-danger {
+  color: var(--vg-danger);
+}
+
+.vg-iconbtn-danger:hover {
+  background: rgba(241, 106, 80, 0.15);
+}
+
+.vg-iconbtn-go {
+  color: var(--vg-ok);
+  font-weight: 600;
+}
+
+.vg-iconbtn-go:hover {
+  background: rgba(61, 214, 140, 0.15);
+}
+
+/* ── library grid (16:9 video cards + duration badge) ──────────────────────── */
+
+.vg-lib-toolbar {
+  display: flex;
+  gap: 8px;
+}
+
+.vg-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 12px;
+}
+
+.vg-card {
+  margin: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface);
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.vg-card:hover {
+  border-color: var(--color-accent-muted);
+}
+
+.vg-card-media {
+  position: relative;
+  background: #101010;
+}
+
+.vg-card-media video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  background: #101010;
+}
+
+.vg-card-fav {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  color: var(--vg-nc);
+  font-size: 0.85rem;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+}
+
+.vg-card-cap {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 0;
+}
+
+.vg-card-meta {
+  font-size: 0.72rem;
+  color: var(--color-text-faint);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.vg-card-actions {
+  flex: none;
+}
+
+.vg-card-prompt {
+  padding: 0 8px 8px;
+  font-size: 0.74rem;
+  color: var(--color-text-faint);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.vg-card-confirm {
+  cursor: default;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  min-height: 120px;
+}
+
+.vg-confirm-text {
+  margin: 0 8px;
+  font-size: 0.8rem;
+}
+
+.vg-confirm-row {
+  display: flex;
+  gap: 6px;
+  padding: 0 8px 4px;
+}
+
+.vg-loadmore {
+  display: flex;
+  justify-content: center;
+}
+
+.vg-empty {
+  margin: 8px 0;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+}
+
+.vg-ledger {
+  border-top: 1px solid var(--color-border);
+  padding-top: 10px;
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── §4.3 render-ledger card (the v1 queue/jobs card on Generate) ──────────── */
+
+.vg-ledgercard {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.vg-ledgerhead {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+}
+
+.vg-ledgeractions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+
+.vg-jobsledger {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.vg-ledgerrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 0.76rem;
+  color: var(--color-text-muted);
+  min-width: 0;
+}
+
+.vg-ledgerrow:hover {
+  background: rgba(212, 212, 212, 0.08);
+}
+
+.vg-ledgerrow-open {
+  cursor: pointer;
+}
+
+.vg-ledgerrow .vg-jobdot {
+  margin-top: 0;
+  width: 8px;
+  height: 8px;
+}
+
+.vg-ledgermeta {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-faint);
+}
+
+.vg-ledgerprompt {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text);
+}
+
+.vg-ledgerstatus {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+}
+
+.vg-replay {
+  border-top: 1px dashed var(--color-border);
+  padding-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+/* ── detail drawer ─────────────────────────────────────────────────────────── */
+
+.vg-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 40;
+}
+
+.vg-drawer {
+  width: min(480px, 92vw);
+  height: 100%;
+  overflow: auto;
+  background: var(--color-surface-2);
+  border-left: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+}
+
+.vg-drawer-head {
+  position: sticky;
+  top: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--color-surface-2);
+  border-bottom: 1px solid var(--color-border);
+  z-index: 1;
+}
+
+.vg-drawer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px 24px;
+}
+
+.vg-detail-videowrap {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: zoom-in;
+  background: #101010;
+}
+
+.vg-detail-videowrap video {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 300px;
+  background: #101010;
+}
+
+.vg-drawer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.vg-fav-on {
+  color: var(--vg-nc);
+  border-color: var(--vg-nc);
+}
+
+.vg-kv {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 3px 10px;
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.vg-kv dt {
+  color: var(--color-text-muted);
+}
+
+.vg-kv dd {
+  margin: 0;
+}
+
+.vg-kv-inline dd {
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.vg-lineage {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.vg-lineageline {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+
+.vg-prompttext {
+  margin: 0 0 4px;
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--color-surface);
+}
+
+/* ── settings ──────────────────────────────────────────────────────────────── */
+
+.vg-url-row {
+  display: flex;
+  gap: 8px;
+}
+
+.vg-healthcard {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--color-surface);
+}
+
+.vg-healthcard[data-ok='true'] {
+  border-color: rgba(61, 214, 140, 0.4);
+}
+
+.vg-nowrap-off {
+  white-space: pre-wrap;
+}
+
+.vg-install {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--color-surface);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vg-install-steps {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 0.82rem;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.vg-install-steps code {
+  color: var(--color-accent);
+}
+
+.vg-models {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+.vg-models th,
+.vg-models td {
+  border: 1px solid var(--color-border);
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.vg-models th {
+  color: var(--color-text-muted);
+  font-weight: 600;
+  background: var(--color-surface-2);
+}
+
+.vg-models summary {
+  cursor: pointer;
+}
+
+.vg-models-files {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.vg-models-files code {
+  font-size: 0.7rem;
+  color: var(--color-accent);
+  word-break: break-all;
+}
+
+.vg-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.vg-badge-ok {
+  border-color: rgba(61, 214, 140, 0.6);
+  color: var(--vg-ok);
+}
+
+.vg-badge-nc {
+  border-color: rgba(227, 179, 65, 0.6);
+  color: var(--vg-nc);
+}
+
+/* ── status texts ─────────────────────────────────────────────────────────── */
+
+.vg-error {
+  margin: 0;
+  color: var(--vg-danger);
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+}
+
+.vg-warn {
+  margin: 0;
+  color: var(--vg-nc);
+  font-size: 0.82rem;
+}
+
+.vg-toast {
+  margin: 0;
+  color: var(--vg-ok);
+  font-size: 0.8rem;
+}
+
+.vg-toast-drawer {
+  position: sticky;
+  bottom: 0;
+  padding: 8px 14px;
+  background: var(--color-surface-2);
+}
+
+code {
+  font-size: 0.78rem;
+}
+
+button {
+  font: inherit;
+}
+
+/* ── §5.6b In-progress strip (JobProgress.tsx, added live 2026-10-13) ────── */
+.vg-progress-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0 2px;
+}
+
+.vg-progress-card {
+  border: 1px solid var(--color-accent-muted);
+  border-radius: 10px;
+  background: var(--color-surface);
+  padding: 10px 12px;
+}
+
+.vg-progress-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.vg-progress-badge {
+  color: var(--vg-ok);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.vg-progress-badge.vg-progress-queued {
+  color: var(--color-text-muted);
+}
+
+.vg-progress-meta {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+
+.vg-progress-stats {
+  margin-top: 4px;
+  font-size: 0.78rem;
+  color: var(--color-text);
+}
+
+.vg-progress-bar {
+  margin-top: 6px;
+  height: 4px;
+  border-radius: 3px;
+  background: var(--color-surface-2);
+  overflow: hidden;
+}
+
+.vg-progress-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--color-accent);
+  transition: width 1s linear;
+}
+
+.vg-progress-prompt {
+  margin-top: 6px;
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

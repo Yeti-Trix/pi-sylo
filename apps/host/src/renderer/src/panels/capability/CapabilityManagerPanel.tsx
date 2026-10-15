@@ -1309,8 +1309,9 @@ export function CapabilityManagerPanel({
           </div>
         </section>
 
-        {/* --- Sylo optional packages --- */}
+        {/* --- Sylo optional packages --- shows only on the Optional packages tab. */}
         <SyloOptionalPackagesSection
+          active={activeCat === 'optional'}
           onSaved={(note) => {
             if (note) setExcludeAgentNotice(note)
             onRefresh()

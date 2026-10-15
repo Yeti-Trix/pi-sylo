@@ -213,7 +213,9 @@ export function App(): React.ReactElement {
   activeIdRef.current = activeId
   workspaceIdRef.current = workspaceId
 
-  const showTabBar = !activeId
+  // Bottom navigation (tab bar) now shows on EVERY authenticated view — chat
+  // list, an open conversation, plugin tabs, system — so you can jump straight
+  // from a chat to Nutrition/System without backing out to the list first.
 
   const activeConversation = useMemo(
     () => conversations.find((c) => c.id === activeId) ?? null,
@@ -863,15 +865,13 @@ export function App(): React.ReactElement {
             className="min-h-0 w-full flex-1 border-0 bg-bg-primary"
           />
         </div>
-        {showTabBar ?
-          <BottomTabBar
-            active={companionTab}
-            onChange={(tab) => {
-              setCompanionTab(tab)
-            }}
-            pluginTabs={pluginTabs}
-          />
-        : null}
+        <BottomTabBar
+          active={companionTab}
+          onChange={(tab) => {
+            setCompanionTab(tab)
+          }}
+          pluginTabs={pluginTabs}
+        />
       </div>
     )
   }
@@ -958,15 +958,13 @@ export function App(): React.ReactElement {
             : null}
           </div>
         </div>
-        {showTabBar ?
-          <BottomTabBar
-            active={companionTab}
-            onChange={(tab) => {
-              setCompanionTab(tab)
-            }}
-            pluginTabs={pluginTabs}
-          />
-        : null}
+        <BottomTabBar
+          active={companionTab}
+          onChange={(tab) => {
+            setCompanionTab(tab)
+          }}
+          pluginTabs={pluginTabs}
+        />
       </div>
     )
   }
@@ -1129,9 +1127,7 @@ export function App(): React.ReactElement {
             </button>
           </footer>
         ) : null}
-                {showTabBar ?
-          <BottomTabBar active={companionTab} onChange={setCompanionTab} pluginTabs={pluginTabs} />
-        : null}
+        <BottomTabBar active={companionTab} onChange={setCompanionTab} pluginTabs={pluginTabs} />
         {deleteTarget ? (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6">
             <div className="w-full max-w-sm rounded-2xl border border-border bg-bg-secondary p-5">
@@ -1225,6 +1221,11 @@ export function App(): React.ReactElement {
             <p className="truncate text-xs text-danger">{brokerHint}</p>
           : null}
         </div>
+        <CompanionModelBar
+          conversation={activeConversation ?? undefined}
+          brokerReady={brokerReady}
+          onChanged={() => { if (workspaceId) void loadConversations(workspaceId, { silent: true }) }}
+        />
         <button type="button" className="rounded-lg px-2 py-2 text-sm text-text-secondary" onClick={() => void handleAbort()}>
           Stop
         </button>
@@ -1254,16 +1255,7 @@ export function App(): React.ReactElement {
         ))}
       </div>
 
-      <footer className="shrink-0 border-t border-border bg-bg-secondary p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-        {activeId ? (
-          <div className="mb-2">
-            <CompanionModelBar
-              conversation={activeConversation ?? undefined}
-              brokerReady={brokerReady}
-              onChanged={() => { if (workspaceId) void loadConversations(workspaceId, { silent: true }) }}
-            />
-          </div>
-        ) : null}
+      <footer className="shrink-0 border-t border-border bg-bg-secondary p-3">
         {chatAttachments.length > 0 ?
           <div className="mb-2 flex flex-wrap gap-2">
             {chatAttachments.map((a) => (
@@ -1366,38 +1358,68 @@ export function App(): React.ReactElement {
                     <textarea
             className="max-h-40 min-h-[44px] flex-1 resize-none rounded-xl border border-border bg-bg-primary px-3 py-2 text-base text-text-primary outline-none focus:border-accent"
             rows={1}
-            placeholder={agentActive ? 'Send now - interrupts the current tool...' : 'Message Sylo...'}
+            enterKeyHint="send"
+            placeholder={agentActive ? 'Queue a follow-up…' : 'Message Sylo…'}
             value={composer}
             onChange={(e) => setComposer(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
-                void (agentActive ? handleSendNow() : handleSend())
+                // Same contract as the desktop composer: while a turn runs,
+                // Enter queues the follow-up (bolt icon = explicit interrupt).
+                const immediate = e.ctrlKey || e.metaKey
+                if (agentActive && immediate) void handleSendNow()
+                else if (agentActive) handleQueue()
+                else void handleSend()
               }
             }}
           />
-          {agentActive ? (
+          {agentActive && (composer.trim() || chatAttachments.length > 0) ? (
             <button
               type="button"
-              className="rounded-xl border border-border bg-bg-primary px-3 py-2 font-medium text-text-secondary disabled:opacity-40"
-              disabled={busy || attachBusy || (!composer.trim() && chatAttachments.length === 0)}
-                              onClick={handleQueue}
-              title="Queue this message to run after the current turn finishes"
+              className="flex size-11 shrink-0 items-center justify-center rounded-xl text-accent active:bg-bg-primary disabled:opacity-40"
+              disabled={busy || attachBusy}
+              onClick={() => void handleSendNow()}
+              title="Send now — interrupts the agent after the current tool"
+              aria-label="Send now (interrupt)"
             >
-              Queue
+              <svg
+                viewBox="0 0 24 24"
+                fill="currentColor"
+                className="size-5"
+                aria-hidden="true"
+              >
+                <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" />
+              </svg>
             </button>
           ) : null}
           <button
             type="button"
-            className="rounded-xl bg-accent px-4 py-2 font-medium text-bg-primary disabled:opacity-40"
+            className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-accent text-bg-primary disabled:opacity-40"
             disabled={busy || attachBusy || (!composer.trim() && chatAttachments.length === 0)}
-            onClick={() => void (agentActive ? handleSendNow() : handleSend())}
-            title={agentActive ? 'Send now - interrupt after the current tool' : 'Send message'}
+            onClick={() => void (agentActive ? handleQueue() : handleSend())}
+            title={agentActive ? 'Queue — runs after the current turn finishes' : 'Send (⏎)'}
+            aria-label={agentActive ? 'Queue follow-up' : 'Send'}
           >
-            {agentActive ? 'Send now' : 'Send'}
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="size-5"
+              aria-hidden="true"
+            >
+              {/* Same corner-down-left (⏎) glyph as the desktop send button. */}
+              <polyline points="9 10 4 15 9 20" />
+              <path d="M20 4v7a4 4 0 0 1-4 4H4" />
+            </svg>
           </button>
         </div>
       </footer>
+      {/* Bottom nav also inside a chat — same as every other view. */}
+      <BottomTabBar active={companionTab} onChange={setCompanionTab} pluginTabs={pluginTabs} />
     </div>
   )
 }

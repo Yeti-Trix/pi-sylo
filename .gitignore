@@ -66,3 +66,8 @@ apps/host/test-fixtures/skill-surface/widgets/*
 # Windows NUL-device redirect accidents (bash creates a real file named NUL)
 NUL
 *.wav.tmp
+
+# Per-workspace media libraries (sylo-image-gen / sylo-video-gen) — operator
+# personal generated content, tens of MB of binaries; local-only by default.
+.sylo/images/
+.sylo/videos/

@@ -173,6 +173,21 @@ export type BrokerOutMessage =
       listId: string
       snapshot: unknown
     }
+  | {
+      /** sylo-image-gen (§4.2/§8 step 7): agent-side image-library mutation →
+       *  main fans `imagegen:library-changed` to the route windows. */
+      type: 'sylo-image-gen:changed'
+      workspaceKey: string
+      reason?: string
+    }
+  | {
+      /** sylo-video-gen (§4.5/§8 step 7): agent-side video-library mutation →
+       *  main (videogen-host's fan consumer CLONE, §5.5) fans
+       *  `videogen:library-changed` to the route windows. */
+      type: 'sylo-video-gen:changed'
+      workspaceKey: string
+      reason?: string
+    }
     | BrokerCapabilitiesResult
   | { type: 'thinking_levels_result'; requestId: string; ok: true; levels?: string[]; resolvedModel?: { provider: string; modelId: string } | null }
   | { type: 'thinking_levels_result'; requestId: string; ok: false; error?: string }
@@ -298,6 +313,10 @@ export interface BrokerConfig {
   ttsConfigPath?: string
   /** Absolute path to sylo-think-tank config JSON for the broker child (optional). */
   thinkTankConfigPath?: string
+  /** Absolute path to sylo-image-gen config JSON for the broker child (optional). */
+  imagegenConfigPath?: string
+  /** Absolute path to sylo-video-gen config JSON for the broker child (optional). */
+  videogenConfigPath?: string
   /** Settings → image model for think-tank seat vision fallback (Ollama id). */
   imageModelId?: string
   imageModelProvider?: string
@@ -416,6 +435,8 @@ export class BrokerSupervisor {
       webAccessConfigPath: cfg.webAccessConfigPath,
       ttsConfigPath: cfg.ttsConfigPath,
       thinkTankConfigPath: cfg.thinkTankConfigPath,
+      imagegenConfigPath: cfg.imagegenConfigPath,
+      videogenConfigPath: cfg.videogenConfigPath,
       imageModelId: cfg.imageModelId,
       imageModelProvider: cfg.imageModelProvider,
       ollamaBaseOrigin: cfg.ollamaBaseOrigin,
@@ -489,6 +510,16 @@ export class BrokerSupervisor {
         ...(this.cfg.ttsConfigPath ? { SYLO_TTS_CONFIG: this.cfg.ttsConfigPath } : {}),
         ...(this.cfg.thinkTankConfigPath ?
           { SYLO_THINK_TANK_CONFIG: this.cfg.thinkTankConfigPath }
+        : {}),
+        ...(this.cfg.imagegenConfigPath ?
+          { SYLO_IMAGEGEN_CONFIG: this.cfg.imagegenConfigPath }
+        : {}),
+        // sylo-video-gen (plan §5.1, §8 step 7): host-owned config path → the
+        // extension's config chain (extensions/config.ts), injected ONLY when
+        // the package is enabled (videogenConfigEnvPath gate). Same shape as
+        // the imagegen/tts/think-tank injections above.
+        ...(this.cfg.videogenConfigPath ?
+          { SYLO_VIDEOGEN_CONFIG: this.cfg.videogenConfigPath }
         : {}),
         ...(this.cfg.imageModelId ? { SYLO_IMAGE_MODEL_ID: this.cfg.imageModelId } : {}),
         ...(this.cfg.imageModelProvider ?

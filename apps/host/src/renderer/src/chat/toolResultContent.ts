@@ -2,7 +2,7 @@
  * Parse Pi tool results persisted in workflow telemetry (`resultSummary`).
  */
 
-export type ToolResultImageSource = 'web' | 'document'
+export type ToolResultImageSource = 'web' | 'document' | 'generated' | 'generated-video'
 
 export type ToolResultImage = {
   mimeType: string
@@ -32,6 +32,16 @@ const IMAGE_CAPTION_RE =
 /** Matches captions for PDF page/region renders (schematic reader, etc.). */
 const DOCUMENT_IMAGE_CAPTION_RE = /^pdf (?:page|region) preview/i
 
+/** Matches sylo-image-gen's generate caption ("Generated image — …") — §3.4:
+ *  local generated files must not fall through to the web/'untrusted' class. */
+const GENERATED_IMAGE_CAPTION_RE = /^generated image/i
+
+/** Matches sylo-video-gen's generate caption ("Generated video — …") — plan
+ *  §3.4/§8 step 7 twin: the ≤512 px poster preview rides the same image-block
+ *  channel, keyed to the 'generated-video' class so local video provenance
+ *  keeps the same trusted-local treatment instead of the web/untrusted class. */
+const GENERATED_VIDEO_CAPTION_RE = /^generated video/i
+
 const DOCUMENT_RENDER_TOOLS = new Set([
   'render_schematic_page',
   'render_schematic_region',
@@ -52,6 +62,8 @@ function captionDocumentPath(caption: string): string | undefined {
 }
 
 function classifyImageCaption(caption: string): ToolResultImageSource {
+  if (GENERATED_VIDEO_CAPTION_RE.test(caption)) return 'generated-video'
+  if (GENERATED_IMAGE_CAPTION_RE.test(caption)) return 'generated'
   if (IMAGE_CAPTION_RE.test(caption)) return 'web'
   if (DOCUMENT_IMAGE_CAPTION_RE.test(caption)) return 'document'
   if (captionSourceUrl(caption)) return 'web'
@@ -90,6 +102,23 @@ export function toolResultImageGalleryCopy(
     return {
       heading: 'PDF page preview',
       footnote: 'Rendered from your uploaded PDF while the assistant analyzes that page.',
+    }
+  }
+  const allGenerated = sources.every((s) => s === 'generated')
+  if (allGenerated) {
+    return {
+      heading: 'Generated images',
+      footnote: 'Created locally by sylo-image-gen; provenance and remix live in the image library.',
+    }
+  }
+  // Generated-video posters (plan §3.4, §8 step 7): grouped separately, with a
+  // footnote pointing at the video library (the poster is the chat preview;
+  // playback + provenance live in the Videos route).
+  const allGeneratedVideo = sources.every((s) => s === 'generated-video')
+  if (allGeneratedVideo) {
+    return {
+      heading: 'Generated videos',
+      footnote: 'Poster preview — the clips play in the Videos library (provenance + remix there).',
     }
   }
   if (allWeb) {
@@ -131,7 +160,7 @@ function parseContentBlocks(content: unknown[]): ParsedToolResult {
     if (b.type === 'text' && typeof b.text === 'string') {
       const t = b.text.trim()
       if (!t) continue
-      if (IMAGE_CAPTION_RE.test(t) || DOCUMENT_IMAGE_CAPTION_RE.test(t)) {
+      if (IMAGE_CAPTION_RE.test(t) || DOCUMENT_IMAGE_CAPTION_RE.test(t) || GENERATED_IMAGE_CAPTION_RE.test(t) || GENERATED_VIDEO_CAPTION_RE.test(t)) {
         pendingCaption = t
         continue
       }
