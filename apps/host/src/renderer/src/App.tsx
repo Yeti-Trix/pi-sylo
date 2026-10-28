@@ -197,6 +197,7 @@ import {
   workspaceTableRowActive,
     workspaceTableWrap,
   restartRequiredBadge,
+  updateAvailableBadge,
 } from './panels/ui-classes'
 import { coerceRestartBadge, emptyRestartBadge, type RestartBadgeState } from '../../shared/restart-badge'
 import { cn } from './lib/cn'
@@ -4804,8 +4805,30 @@ export function App(): React.ReactElement {
             ' · stays until you restart Sylo'
           }
         >
-          <span aria-hidden="true">⟳</span>
+                    <span aria-hidden="true">⟳</span>
           <span>Restart Required</span>
+        </div>
+      ) : null}
+      {/* "Update Available" badge (issue #46): fixed bottom-left, red, persistent
+          while the installed Sylo is behind the public release — independent of
+          the dismissible top banner. Click runs the update check and shows the
+          result in the same dialogs the Help menu uses. The check is read-only
+          (public package.json version compare) — it never writes workspaces. */}
+      {updateStatus?.isUpdateAvailable && updateStatus.latestVersion ? (
+        <div
+          className={updateAvailableBadge}
+          role="status"
+          title={
+            `Sylo ${updateStatus.latestVersion} published — you have ${updateStatus.currentVersion}` +
+            (updateStatus.checkedAt ? ` · last checked ${new Date(updateStatus.checkedAt).toLocaleString()}` : '') +
+            ' · click to check again'
+          }
+          onClick={() => {
+            void window.sylo.updates.checkWithUi()
+          }}
+        >
+          <span aria-hidden="true">⬇</span>
+          <span>Update Available</span>
         </div>
       ) : null}
       <aside className={cn(sidebar, sidebarCollapsed && sidebarAsideCollapsed)}>

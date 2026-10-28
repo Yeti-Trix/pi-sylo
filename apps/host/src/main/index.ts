@@ -6851,6 +6851,11 @@ function registerIpc(): void {
   ipcMain.handle('updates:status', () => getAppUpdateStatus())
   ipcMain.handle('restart-badge:status', () => getRestartBadge())
   ipcMain.handle('updates:checkNow', () => checkForAppUpdate())
+  // Badge click (issue #46): same check, same dialogs the Help menu shows.
+  ipcMain.handle('updates:checkWithDialog', async () => {
+    await checkForAppUpdateViaMenu()
+    return getAppUpdateStatus()
+  })
   ipcMain.handle('proposals:list', () => listProposals())
   ipcMain.handle('proposals:apply', (_e, root: string, relPath: string, editedBody?: string) =>
     applyProposal(root, relPath, editedBody),

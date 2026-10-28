@@ -1844,6 +1844,7 @@ contextBridge.exposeInMainWorld('sylo', {
     updates: {
     status: () => ipcRenderer.invoke('updates:status') as Promise<AppUpdateStatus>,
     checkNow: () => ipcRenderer.invoke('updates:checkNow') as Promise<AppUpdateStatus>,
+    checkWithUi: () => ipcRenderer.invoke('updates:checkWithDialog') as Promise<AppUpdateStatus>,
     onChanged: (cb: (payload: AppUpdateStatus) => void) => {
       const ch = (_e: unknown, payload: AppUpdateStatus) => cb(payload)
       ipcRenderer.on('app:update-status', ch)

@@ -651,6 +651,14 @@ export const showAppsStrip =
 export const restartRequiredBadge =
   'fixed bottom-3 right-3 z-50 flex select-none items-center gap-1.5 rounded-lg border border-[rgb(241_106_80/0.45)] bg-[rgb(241_106_80/0.14)] px-3 py-1.5 text-[0.8rem] font-semibold text-[rgb(241_106_80)] shadow-[0_4px_16px_rgb(0_0_0/0.45)] backdrop-blur-[4px]'
 
+/** "Update Available" badge (issue #46): fixed dock at the window's bottom-left,
+ *  red on dark, persistent while the installed Sylo is behind the public
+ *  release. Not dismissible (the top banner stays separately dismissible); a
+ *  click runs the same check the Help menu shows. Mirrors restartRequiredBadge
+ *  (#44) on the opposite corner. */
+export const updateAvailableBadge =
+  'fixed bottom-3 left-3 z-50 flex cursor-pointer select-none items-center gap-1.5 rounded-lg border border-[rgb(241_106_80/0.45)] bg-[rgb(241_106_80/0.14)] px-3 py-1.5 text-[0.8rem] font-semibold text-[rgb(241_106_80)] shadow-[0_4px_16px_rgb(0_0_0/0.45)] backdrop-blur-[4px] transition-colors duration-[120ms] hover:bg-[rgb(241_106_80/0.24)]'
+
 export const showAppsStripLabel =
   'font-mono text-[0.66rem] leading-none tracking-[0.18em] [writing-mode:vertical-rl]'
 

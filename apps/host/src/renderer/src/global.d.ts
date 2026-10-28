@@ -1645,6 +1645,7 @@ declare global {
       updates: {
         status: () => Promise<import('../shared/app-update-types.js').AppUpdateStatus>
         checkNow: () => Promise<import('../shared/app-update-types.js').AppUpdateStatus>
+        checkWithUi: () => Promise<import('../shared/app-update-types.js').AppUpdateStatus>
         onChanged: (
           cb: (payload: import('../shared/app-update-types.js').AppUpdateStatus) => void,
         ) => () => void
