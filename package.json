@@ -46,7 +46,7 @@
     "@tootallnate/once": "^3.0.1"
   },
   "devDependencies": {
-    "electron": "^41.10.7",
+    "electron": "^45.1.0",
     "electron-builder": "^26.15.3",
     "patch-package": "^8.0.1"
   }
