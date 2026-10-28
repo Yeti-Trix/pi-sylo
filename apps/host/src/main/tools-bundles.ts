@@ -3,7 +3,8 @@
 //
 // Some extracted packages still have host main-process handlers that reach
 // into their package dirs (LogicForge parse rules + download allowlist,
-// FieldBrain config/scripts, OneNote scripts). Those handlers resolve the
+// OneNote scripts — FieldBrain moved to its own pi.sylo host plugin in the
+// sylo-fieldbrain repo, 2026-10-28). Those handlers resolve the
 // package through this module so the bundle can live outside the sylo-dev
 // repo. Resolution order per bundle:
 //   1. env override (SYLO_TOOLS_CONTROLS_DIR / SYLO_TOOLS_ONENOTE_DIR)

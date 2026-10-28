@@ -1,11 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import {
-  isSyloOptionalPackageEnabled,
-  type SyloOptionalPackage,
-} from '../shared/sylo-optional-packages.js'
-
 export const WEB_ACCESS_CONFIG_KEY = 'web-access'
 
 export const DEFAULT_WEB_ACCESS_CONFIG: Record<string, unknown> = {
@@ -153,12 +148,15 @@ export function ensureWebAccessConfigSchema(agentDir: string): void {
   writeFileSync(schemaPath, JSON.stringify(schema, null, 2), 'utf8')
 }
 
-export function webAccessConfigEnvPath(
-  userDataPath: string,
-  pref: Record<string, boolean>,
-  pkg: SyloOptionalPackage | undefined,
-): string | undefined {
-  if (!pkg || !isSyloOptionalPackageEnabled(pref, pkg.id)) return undefined
+/**
+ * Env value for the broker's SYLO_WEB_ACCESS_CONFIG: always resolves the config
+ * file (writing defaults when missing). Registry-independent since issue #39's
+ * final pass — the extension lives in an operator-local personal repo
+ * (~/Documents/GitHub/sylo-web-access), so the old findSyloOptionalPackage gate
+ * no longer applies; the broker reads this path whenever the extension is
+ * loaded, however it was installed.
+ */
+export function webAccessConfigEnvPath(userDataPath: string): string {
   const path = webAccessConfigPath(userDataPath)
   if (!existsSync(path)) {
     writeWebAccessConfig(userDataPath, DEFAULT_WEB_ACCESS_CONFIG)

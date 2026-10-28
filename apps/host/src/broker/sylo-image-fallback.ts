@@ -178,7 +178,7 @@ async function analyzeImageViaOllama(opts: {
 
 /**
  * When the main chat model is text-only, describe tool-result images via Settings → image model.
- * Think-tank seats use the same hook in sylo-think-tank (seat subprocess only); this covers main chat.
+ * Think-tank-style seat subprocesses used the same hook (removed); this covers main chat.
  */
 export default function syloImageFallback(pi: ExtensionAPI): void {
   pi.on('tool_result', (event, ctx) => {

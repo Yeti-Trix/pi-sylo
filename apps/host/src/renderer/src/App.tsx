@@ -78,24 +78,7 @@ import { RulesPanel } from './panels/rules/RulesPanel'
 import { useSubagentTasks } from './panels/tasks/useSubagentTasks'
 import { SubagentRunsStrip } from './components/subagent/SubagentRunsStrip'
 import { lookupSubagentBatchMessage, subagentPillDomId } from './components/subagent/subagentBatchTargets'
-import {
-  applyThinkTankLifecycleEvent,
-  type ThinkTankLiveSession,
-} from './components/think-tank/ThinkTankSessionCard'
-import {
-  applyThinkTankBubbleEvent,
-  type ThinkTankBubbleRow,
-} from './components/think-tank/thinkTankBubbleState'
-import {
-  mergeThinkTankTurnsForExport,
-  thinkTankUiBubblesFromDb,
-} from './components/think-tank/mergeThinkTankExportTurns'
-import { buildChatTimeline, type ChatTimelineRow } from './components/think-tank/buildChatTimeline'
-import {
-  ThinkTankSessionBlock,
-  type ThinkTankSessionUiState,
-} from './components/think-tank/ThinkTankSessionBlock'
-import { thinkTankSessionViewsFromDb } from './components/think-tank/thinkTankSessionViewsFromDb'
+import { buildChatTimeline, type ChatTimelineRow } from './chat/chatTimeline'
 import {
   banner,
   bannerMuted,
@@ -212,8 +195,10 @@ import {
   workspaceTableColEdit,
   workspaceTablePath,
   workspaceTableRowActive,
-  workspaceTableWrap,
+    workspaceTableWrap,
+  restartRequiredBadge,
 } from './panels/ui-classes'
+import { coerceRestartBadge, emptyRestartBadge, type RestartBadgeState } from '../../shared/restart-badge'
 import { cn } from './lib/cn'
 import {
   logicforgeParseRulesGet,
@@ -235,21 +220,6 @@ import {
   syloWorkflowsList,
 } from './lib/sylo-workflows-bridge'
 import {
-  fieldbrainConfigGet,
-  fieldbrainConfigSave,
-  fieldbrainDbCheck,
-  fieldbrainDbMigrate,
-  fieldbrainDocumentList,
-  fieldbrainBrainList,
-  fieldbrainProjectList,
-  fieldbrainProjectCreate,
-  fieldbrainDbBootstrap,
-  fieldbrainPgvectorEnable,
-  fieldbrainPgvectorGuide,
-  fieldbrainPgvectorInstallFromFolder,
-  fieldbrainLogList,
-} from './lib/fieldbrain-bridge'
-import {
   onenoteAuthComplete,
   onenoteAuthLogout,
   onenoteAuthStart,
@@ -262,7 +232,6 @@ import {
   onenoteSettingsSave,
 } from './lib/onenote-bridge'
 import {
-  normalizeSkillRouteBridgeOp,
   refreshPersonalBridgeOps,
   type SkillRouteBridgeOp,
 } from './skill-surface/bridge'
@@ -669,8 +638,6 @@ type WorkspaceRow = {
 }
 /** Stable empty slice for memoized message rows with no live workflow events. */
 const EMPTY_WORKFLOW: WorkflowStampedEntry[] = []
-const EMPTY_THINK_TANK_BUBBLES: ThinkTankBubbleRow[] = []
-const EMPTY_THINK_TANK_SESSION_VIEWS: ReturnType<typeof thinkTankSessionViewsFromDb> = []
 
 type Msg = ChatMessageRowModel & { conversation_id: string }
 
@@ -749,8 +716,11 @@ export function App(): React.ReactElement {
   const tabRef = useRef<Tab>(tab)
   tabRef.current = tab
   const [safeMode, setSafeMode] = useState(false)
-  const [updateStatus, setUpdateStatus] = useState<AppUpdateStatus | null>(null)
+    const [updateStatus, setUpdateStatus] = useState<AppUpdateStatus | null>(null)
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null)
+  /** Agent-raised "Restart Required" badge (issue #44): app-global, pulled at mount,
+   *  pushed by main on changes; clears at the next launch. */
+  const [restartBadge, setRestartBadge] = useState<RestartBadgeState>(emptyRestartBadge())
   const [conversations, setConversations] = useState<Conv[]>([])
   /** Archived chats (retention v2): hidden from the main list, retrievable via the sidebar's Archived section. */
   const [archivedConversations, setArchivedConversations] = useState<
@@ -1064,11 +1034,6 @@ export function App(): React.ReactElement {
   } = useSubagentTasks(activeId ?? null)
   const subagentRunningCount = subagentRunning.length
   const [subagentNotice, setSubagentNotice] = useState<string | null>(null)
-  const [thinkTankByConv, setThinkTankByConv] = useState<Record<string, ThinkTankLiveSession>>({})
-  const thinkTankByConvRef = useRef(thinkTankByConv)
-  useEffect(() => {
-    thinkTankByConvRef.current = thinkTankByConv
-  }, [thinkTankByConv])
   // Personal-bundle route-bridge ops — seed the bridge allowlist from the
   // installed plugin (no-op when absent). Must happen before personal UI
   // iframes post their first bridge messages.
@@ -1094,26 +1059,29 @@ export function App(): React.ReactElement {
         // bridge unavailable — no banner
       }
     })()
-    const off = window.sylo.updates.onChanged((s) => setUpdateStatus(s))
+        const off = window.sylo.updates.onChanged((s) => setUpdateStatus(s))
     return () => {
       disposed = true
       off()
     }
   }, [])
-  const [thinkTankBubblesByConv, setThinkTankBubblesByConv] = useState<Record<string, ThinkTankBubbleRow[]>>({})
-  const [thinkTankSessionsByConv, setThinkTankSessionsByConv] = useState<
-    Record<string, ReturnType<typeof thinkTankSessionViewsFromDb>>
-  >({})
-  const [thinkTankUiBySession, setThinkTankUiBySession] = useState<
-    Record<string, ThinkTankSessionUiState>
-  >({})
-  const activeThinkTankBubbles = activeId ?
-    (thinkTankBubblesByConv[activeId] ?? EMPTY_THINK_TANK_BUBBLES)
-  : EMPTY_THINK_TANK_BUBBLES
-  const activeThinkTankSession = activeId ? thinkTankByConv[activeId] : undefined
-  const activeThinkTankSessionViews = activeId ?
-    (thinkTankSessionsByConv[activeId] ?? EMPTY_THINK_TANK_SESSION_VIEWS)
-  : EMPTY_THINK_TANK_SESSION_VIEWS
+  // Restart Required badge: initial pull + live push (issue #44).
+  useEffect(() => {
+    let disposed = false
+    void (async () => {
+      try {
+        const b = await window.sylo.restartBadge.status()
+        if (!disposed) setRestartBadge(coerceRestartBadge(b))
+      } catch {
+        // bridge unavailable — no badge
+      }
+    })()
+    const off = window.sylo.restartBadge.onChanged((b) => setRestartBadge(coerceRestartBadge(b)))
+    return () => {
+      disposed = true
+      off()
+    }
+  }, [])
   const [compactNowBusyId, setCompactNowBusyId] = useState<string | null>(null)
   /** Wall-clock moment the current manual compaction was requested (optimistic card). */
   const [compactNowTs, setCompactNowTs] = useState(0)
@@ -1156,9 +1124,6 @@ export function App(): React.ReactElement {
   const chatTimeline = useMemo(() => {
     const base = buildChatTimeline({
       messages,
-      bubbles: activeThinkTankBubbles,
-      sessions: activeThinkTankSessionViews,
-      liveSession: activeThinkTankSession,
     })
     // Optimistic user bubble while the host prepares the turn (see
     // `optimisticUserByConv`). Superseded rows are pruned by refreshMessages;
@@ -1227,9 +1192,6 @@ export function App(): React.ReactElement {
     return rows
   }, [
     messages,
-    activeThinkTankBubbles,
-    activeThinkTankSessionViews,
-    activeThinkTankSession,
     activeId,
     optimisticUserByConv,
     compactNowBusyId,
@@ -1437,6 +1399,16 @@ export function App(): React.ReactElement {
     clientX: number
     clientY: number
   } | null>(null)
+  // Sidebar workspace-section cap: show the latest N chats, "Load more" expands.
+  const [expandedWsIds, setExpandedWsIds] = useState<Set<string>>(() => new Set())
+  const toggleWsExpanded = useCallback((wid: string) => {
+    setExpandedWsIds((prev) => {
+      const n = new Set(prev)
+      if (n.has(wid)) n.delete(wid)
+      else n.add(wid)
+      return n
+    })
+  }, [])
   const [pinContextMenu, setPinContextMenu] = useState<{
     key: string
     title: string
@@ -2020,21 +1992,6 @@ export function App(): React.ReactElement {
         if (row.role === 'assistant' && row.status !== 'streaming') delete next[row.id]
       }
       return next
-    })
-  }, [activeId])
-
-  useEffect(() => {
-    if (!activeId) return
-    void window.sylo.thinkTank.listForConversation(activeId).then((sessions) => {
-      const rows = sessions as Array<Record<string, unknown>>
-      setThinkTankSessionsByConv((prev) => ({ ...prev, [activeId]: thinkTankSessionViewsFromDb(rows) }))
-      const fromDb = thinkTankUiBubblesFromDb(rows as Parameters<typeof thinkTankUiBubblesFromDb>[0])
-      if (fromDb.length === 0) return
-      setThinkTankBubblesByConv((prev) => {
-        const existing = prev[activeId] ?? []
-        if (existing.length > 0) return prev
-        return { ...prev, [activeId]: fromDb }
-      })
     })
   }, [activeId])
 
@@ -2774,13 +2731,9 @@ export function App(): React.ReactElement {
     if (chatTimeline.length > prev && stickToBottomRef.current) {
       scrollChatToEnd()
     }
-    if (activeThinkTankBubbles.length > 0 && stickToBottomRef.current) {
-      scrollChatToEnd()
-    }
     prevMessagesLenRef.current = chatTimeline.length
   }, [
     chatTimeline.length,
-    activeThinkTankBubbles.length,
     activeId,
     lastLoadedMessageKey,
     canvasOpen,
@@ -3207,123 +3160,6 @@ export function App(): React.ReactElement {
     }, 6000)
   }, [subagentRunning, reloadSubagentTasks])
 
-  useEffect(() => {
-    const unsub = window.sylo.thinkTank.onLifecycle((raw) => {
-      const payload = raw as Record<string, unknown> & { conversationId?: string | null }
-      let convId = typeof payload.conversationId === 'string' ? payload.conversationId : undefined
-      if (!convId) {
-        const sessionId = String(payload.sessionId ?? '')
-        if (sessionId) {
-          convId = Object.keys(thinkTankByConvRef.current).find(
-            (id) => thinkTankByConvRef.current[id]?.sessionId === sessionId,
-          )
-        }
-      }
-      if (!convId) return
-      if (payload.type === 'session_start') {
-        const sessionId = String(payload.sessionId ?? '')
-        if (sessionId) {
-          setThinkTankSessionsByConv((prev) => {
-            const list = prev[convId] ?? []
-            if (list.some((s) => s.sessionId === sessionId)) return prev
-            return {
-              ...prev,
-              [convId]: [
-                ...list,
-                {
-                  sessionId,
-                  topic: String(payload.topic ?? '(think tank)'),
-                  status: 'debating',
-                  sourceMessageId:
-                    typeof payload.sourceMessageId === 'string' ? payload.sourceMessageId : null,
-                  createdAt: Date.now(),
-                },
-              ],
-            }
-          })
-        }
-      }
-      if (payload.type === 'phase' || payload.type === 'complete' || payload.type === 'error') {
-        const sessionId = String(payload.sessionId ?? '')
-        const phaseStatus =
-          payload.type === 'complete' ? 'complete'
-          : payload.type === 'error' ?
-            /stopped by operator|run aborted/i.test(String(payload.message ?? '')) ?
-              'cancelled'
-            : 'error'
-          : String(payload.phase ?? '')
-        if (sessionId && phaseStatus) {
-          setThinkTankSessionsByConv((prev) => {
-            const list = prev[convId] ?? []
-            const idx = list.findIndex((s) => s.sessionId === sessionId)
-            if (idx < 0) return prev
-            const next = [...list]
-            next[idx] = { ...next[idx]!, status: phaseStatus }
-            return { ...prev, [convId]: next }
-          })
-        }
-      }
-      setThinkTankByConv((prev) => {
-        const next = applyThinkTankLifecycleEvent(prev[convId], payload)
-        if (!next) return prev
-        return { ...prev, [convId]: next }
-      })
-      setThinkTankBubblesByConv((prev) => ({
-        ...prev,
-        [convId]: applyThinkTankBubbleEvent(prev[convId], payload),
-      }))
-      if (payload.type === 'turn_workflow') {
-        const messageId = String(payload.messageId ?? '')
-        if (!messageId) return
-        const ts = typeof payload.ts === 'number' ? payload.ts : Date.now()
-        setLiveWorkflow((prev) => ({
-          ...prev,
-          [messageId]: [...(prev[messageId] ?? []), { ts, event: payload.event }],
-        }))
-      }
-      if (payload.type === 'turn') {
-        const messageId = String(payload.messageId ?? '')
-        if (!messageId) return
-        setLiveWorkflow((prev) => {
-          if (!(messageId in prev)) return prev
-          const next = { ...prev }
-          delete next[messageId]
-          return next
-        })
-      }
-    })
-    return unsub
-  }, [])
-
-  const handleThinkTankAbort = useCallback(async (sessionId: string) => {
-    const r = await window.sylo.thinkTank.abort(sessionId)
-    if (!r.ok) window.alert(r.error)
-  }, [])
-
-  const handleThinkTankInject = useCallback(async (text: string) => {
-    const sessionId = activeThinkTankSession?.sessionId
-    if (!sessionId) return false
-    const r = await window.sylo.thinkTank.inject(sessionId, text)
-    if (!r.ok) {
-      window.alert(r.error)
-      return false
-    }
-    return true
-  }, [activeThinkTankSession?.sessionId])
-
-  const handleThinkTankUiChange = useCallback((sessionId: string, ui: ThinkTankSessionUiState) => {
-    setThinkTankUiBySession((prev) => ({ ...prev, [sessionId]: ui }))
-  }, [])
-
-  const handleOpenThinkTankRoute = useCallback(() => {
-    const hit = skillRoutes.find(
-      (r) => r.routeId === 'think-tank' || r.title.toLowerCase() === 'think tank',
-    )
-    if (!hit) return
-    setActiveSkillRoute(hit)
-    setTab('skill-route')
-  }, [skillRoutes])
-
   const handleOpenLogicForgeIoReview = useCallback(
     async (runDirRaw: string) => {
       let runDir = runDirRaw.trim()
@@ -3518,13 +3354,13 @@ export function App(): React.ReactElement {
         // it on the timeline. If it has a checkpoint, route through the
         // revert-confirm modal instead of silently truncating chat history.
         const idx = chatTimeline.findIndex(
-          (row) => row.kind === 'message' && row.message.id === messageId,
+          (row) => row.message.id === messageId,
         )
         let nextAssistantId: string | null = null
         if (idx >= 0) {
           for (let i = idx + 1; i < chatTimeline.length; i++) {
             const row = chatTimeline[i]!
-            if (row.kind === 'message' && row.message.role === 'assistant') {
+            if (row.message.role === 'assistant') {
               nextAssistantId = row.message.id
               break
             }
@@ -3644,7 +3480,7 @@ export function App(): React.ReactElement {
   const lastAssistantRowId = useMemo(() => {
     for (let i = chatTimeline.length - 1; i >= 0; i--) {
       const row = chatTimeline[i]!
-      if (row.kind === 'message' && row.message.role === 'assistant') return row.message.id
+      if (row.message.role === 'assistant') return row.message.id
     }
     return null
   }, [chatTimeline])
@@ -3678,7 +3514,7 @@ export function App(): React.ReactElement {
     const lastAssistantIdx = (() => {
       for (let i = rows.length - 1; i >= 0; i--) {
         const row = rows[i]!
-        if (row.kind === 'message' && row.message.role === 'assistant') return i
+        if (row.message.role === 'assistant') return i
       }
       return -1
     })()
@@ -3686,9 +3522,8 @@ export function App(): React.ReactElement {
     // preceding message row = the plan notice?
     for (let i = lastAssistantIdx - 1; i >= 0; i--) {
       const row = rows[i]!
-      if (row.kind !== 'message') continue
       if (row.message.role === 'system' && row.message.content.trim() === PLAN_MODE_NOTICE) {
-        return (rows[lastAssistantIdx]! as { message: { id: string } }).message.id
+        return rows[lastAssistantIdx]!.message.id
       }
       return null // another message row sits between the notice and the reply
     }
@@ -3710,64 +3545,39 @@ export function App(): React.ReactElement {
 
   const renderChatTimelineRow = useCallback(
     (row: ChatTimelineRow) => {
-      if (row.kind === 'message') {
-        const m = row.message as Msg
-        return (
-          <ChatConversationMessageRow
-            m={m}
-            liveDeltaForId={liveDelta[m.id] ?? ''}
-            liveWorkflowForMessage={liveWorkflow[m.id] ?? EMPTY_WORKFLOW}
-            segmentOverrides={segmentOverrides}
-            onSegmentToggle={handleSegmentToggle}
-            subagentTasks={subagentTasks}
-            onSubagentNotice={handleSubagentNotice}
-            onOpenLogicForgeIoReview={(runDir) => void handleOpenLogicForgeIoReview(runDir)}
-            workspaceId={sidebarWorkspaceId}
-            canUndoTurn={m.role === 'assistant' && undoableTurnIds.has(m.id)}
-            onUndoTurn={() => void openUndoTurnModal(m.id)}
-            onEditMessage={m.role === 'user' ? (t, atts) => startEditAndResend(m.id, t, atts) : undefined}
-            canRetryTurn={m.role === 'assistant' && m.id === lastAssistantRowId}
-            onRetryTurn={m.role === 'assistant' && m.id === lastAssistantRowId ? handleRetryLastReply : undefined}
-            turnChanges={m.role === 'assistant' ? turnChangesById[m.id] : undefined}
-            onReviewDiff={m.role === 'assistant' && turnChangesById[m.id] ? () => handleReviewDiff(m.id) : undefined}
-            planApprovable={m.role === 'assistant' && m.id === planApprovableReplyId}
-            onApprovePlan={() => handleApprovePlan(m.id)}
-            turnPause={activeTurnPause}
-          />
-        )
-      }
+      const m = row.message as Msg
       return (
-        <ThinkTankSessionBlock
-          sessionId={row.sessionId}
-          topic={row.topic}
-          status={row.status}
-          bubbles={row.bubbles}
-          liveSession={row.liveSession}
-          uiState={thinkTankUiBySession[row.sessionId]}
-          onUiChange={handleThinkTankUiChange}
-          liveWorkflow={liveWorkflow}
+        <ChatConversationMessageRow
+          m={m}
+          liveDeltaForId={liveDelta[m.id] ?? ''}
+          liveWorkflowForMessage={liveWorkflow[m.id] ?? EMPTY_WORKFLOW}
           segmentOverrides={segmentOverrides}
           onSegmentToggle={handleSegmentToggle}
           subagentTasks={subagentTasks}
           onSubagentNotice={handleSubagentNotice}
-          onOpenThinkTankRoute={handleOpenThinkTankRoute}
-          onAbort={(id) => void handleThinkTankAbort(id)}
+          onOpenLogicForgeIoReview={(runDir) => void handleOpenLogicForgeIoReview(runDir)}
           workspaceId={sidebarWorkspaceId}
+          canUndoTurn={m.role === 'assistant' && undoableTurnIds.has(m.id)}
+          onUndoTurn={() => void openUndoTurnModal(m.id)}
+          onEditMessage={m.role === 'user' ? (t, atts) => startEditAndResend(m.id, t, atts) : undefined}
+          canRetryTurn={m.role === 'assistant' && m.id === lastAssistantRowId}
+          onRetryTurn={m.role === 'assistant' && m.id === lastAssistantRowId ? handleRetryLastReply : undefined}
+          turnChanges={m.role === 'assistant' ? turnChangesById[m.id] : undefined}
+          onReviewDiff={m.role === 'assistant' && turnChangesById[m.id] ? () => handleReviewDiff(m.id) : undefined}
+          planApprovable={m.role === 'assistant' && m.id === planApprovableReplyId}
+          onApprovePlan={() => handleApprovePlan(m.id)}
+          turnPause={activeTurnPause}
         />
       )
     },
     [
       handleOpenLogicForgeIoReview,
       handleSubagentNotice,
-      handleOpenThinkTankRoute,
       handleSegmentToggle,
-      handleThinkTankUiChange,
-      handleThinkTankAbort,
       liveDelta,
       liveWorkflow,
       subagentTasks,
       segmentOverrides,
-      thinkTankUiBySession,
       sidebarWorkspaceId,
       undoableTurnIds,
       activeTurnPause,
@@ -3775,25 +3585,12 @@ export function App(): React.ReactElement {
     ],
   )
 
-  const thinkTankLive =
-    activeThinkTankSession?.status === 'debating' || activeThinkTankSession?.status === 'final_reports'
-
-  const thinkTankInjectMode = activeThinkTankSession?.status === 'debating'
-
-  const thinkTankLocksComposer = activeThinkTankSession?.status === 'final_reports'
-
-  const showComposerStop = activeSending || thinkTankLive
-  const thinkTankAbortSessionId =
-    thinkTankLive ? activeThinkTankSession?.sessionId : undefined
+  const showComposerStop = activeSending
 
   const stopActiveTurn = useCallback(async () => {
-    if (!activeId || safeMode || (!activeSending && !thinkTankLive)) return
-    if (thinkTankAbortSessionId) {
-      await window.sylo.thinkTank.abort(thinkTankAbortSessionId)
-      return
-    }
+    if (!activeId || safeMode || !activeSending) return
     await window.sylo.chat.abort(activeId)
-  }, [activeId, activeSending, thinkTankLive, thinkTankAbortSessionId, safeMode])
+  }, [activeId, activeSending, safeMode])
 
   const branchConversation = async (convId: string) => {
     if (branchingConvId || safeMode || !agentReady) return
@@ -3828,30 +3625,6 @@ export function App(): React.ReactElement {
           const delta = liveDelta[m.id] ?? ''
           return delta ? { ...m, content: m.content + delta } : m
         })
-        const dbThinkTankSessions = await window.sylo.thinkTank.listForConversation(convId)
-        const uiThinkTankBubbles = isActive ? (thinkTankBubblesByConv[convId] ?? []) : []
-        const uiSessionById: Record<string, { topic: string; status: string }> = {}
-        const liveThinkTank = thinkTankByConv[convId]
-        if (liveThinkTank) {
-          uiSessionById[liveThinkTank.sessionId] = {
-            topic: liveThinkTank.topic,
-            status: liveThinkTank.status,
-          }
-        }
-        for (const session of dbThinkTankSessions) {
-          const sid = String(session.id ?? '')
-          if (!sid || uiSessionById[sid]) continue
-          uiSessionById[sid] = {
-            topic: String(session.topic ?? ''),
-            status: String(session.status ?? 'debating'),
-          }
-        }
-        const { turns: thinkTankTurns, reports: thinkTankReports } = mergeThinkTankTurnsForExport({
-          dbSessions: dbThinkTankSessions,
-          uiBubbles: uiThinkTankBubbles,
-          liveWorkflow: isActive ? liveWorkflow : {},
-          uiSessionById,
-        })
         const md = buildConversationMarkdown({
           conversation: {
             id: convId,
@@ -3866,8 +3639,6 @@ export function App(): React.ReactElement {
             : null,
           messages: messagesWithLive,
           liveTelemetryByMessageId: isActive ? liveWorkflow : undefined,
-          thinkTankTurns,
-          thinkTankReports,
           agentModel:
             brokerStatus.resolvedModel ?
               {
@@ -3911,7 +3682,7 @@ export function App(): React.ReactElement {
         window.alert(`Could not export conversation: ${e instanceof Error ? e.message : String(e)}`)
       }
     },
-    [activeId, conversations, thinkTankBubblesByConv, thinkTankByConv, liveDelta, liveWorkflow, workspaces],
+    [activeId, conversations, liveDelta, liveWorkflow, workspaces],
   )
 
   const prefillChatPrompt = useCallback((text: string) => {
@@ -3922,7 +3693,7 @@ export function App(): React.ReactElement {
 
   const prefillNewChatPrompt = useCallback(
     async (text: string) => {
-      const wid = sidebarWorkspaceId.trim()
+            const wid = sidebarWorkspaceId.trim()
       if (!wid) throw new Error('no_workspace_selected')
       pendingComposerPrefillRef.current = text
       const reuseId = await window.sylo.conversations.findLatestEmpty(wid)
@@ -3970,7 +3741,7 @@ export function App(): React.ReactElement {
     setPeekOpenWs((prev) => {
       if (!prev.has(id)) return prev
       const next = new Set(prev)
-      next.delete(id)
+            next.delete(id)
       return next
     })
     setTab('chat')
@@ -4027,7 +3798,7 @@ export function App(): React.ReactElement {
   }
 
   const commitRenameConversation = async () => {
-    if (!renameConvModal) return
+        if (!renameConvModal) return
     await window.sylo.conversations.setTitle(renameConvModal.id, renameConvModal.draft.trim())
     setRenameConvModal(null)
     await refreshConversations()
@@ -4271,8 +4042,7 @@ export function App(): React.ReactElement {
     const bridgeTargetRoute = routePopoutKey ? popoutRoute : activeSkillRoute
 
   const handleSkillRouteBridge = useCallback(
-    async (op: SkillRouteBridgeOp, payload: unknown, routeOverride?: Pick<SkillRouteRow, 'skillFolderName' | 'routeId'>) => {
-      op = normalizeSkillRouteBridgeOp(op)
+        async (op: SkillRouteBridgeOp, payload: unknown, routeOverride?: Pick<SkillRouteRow, 'skillFolderName' | 'routeId'>) => {
       // RouteOverride: docked canvas route tabs pin their OWN route row (see
       // `skillRouteBridgeFor` below) — the default target resolves whatever
       // full-area/pop-out route is active, which is wrong while several
@@ -4447,52 +4217,6 @@ export function App(): React.ReactElement {
           id: String(p?.id ?? ''),
           agent_dir: diagnostics.resolvedPiAgentDir,
         })
-      }
-      if (op === 'fieldbrainConfigGet') {
-        return await fieldbrainConfigGet()
-      }
-      if (op === 'fieldbrainConfigSave') {
-        const p = payload as Record<string, unknown>
-        return await fieldbrainConfigSave(p ?? {})
-      }
-      if (op === 'fieldbrainDbCheck') {
-        return await fieldbrainDbCheck()
-      }
-      if (op === 'fieldbrainDbMigrate') {
-        return await fieldbrainDbMigrate()
-      }
-      if (op === 'fieldbrainLogList') {
-        return await fieldbrainLogList()
-      }
-      if (op === 'fieldbrainDocumentList') {
-        const p = payload as Record<string, unknown> | undefined
-        return await fieldbrainDocumentList(p ?? {})
-      }
-      if (op === 'fieldbrainBrainList') {
-        const p = payload as Record<string, unknown>
-        return await fieldbrainBrainList(p ?? {})
-      }
-      if (op === 'fieldbrainProjectList') {
-        return await fieldbrainProjectList()
-      }
-      if (op === 'fieldbrainProjectCreate') {
-        const p = payload as Record<string, unknown>
-        return await fieldbrainProjectCreate(p ?? {})
-      }
-      if (op === 'fieldbrainDbBootstrap') {
-        const p = payload as Record<string, unknown>
-        return await fieldbrainDbBootstrap(p as import('./lib/fieldbrain-bridge').FieldBrainBootstrapPayload)
-      }
-      if (op === 'fieldbrainPgvectorGuide') {
-        return await fieldbrainPgvectorGuide()
-      }
-      if (op === 'fieldbrainPgvectorInstallFromFolder') {
-        const p = payload as Record<string, unknown>
-        return await fieldbrainPgvectorInstallFromFolder(p as import('./lib/fieldbrain-bridge').FieldBrainPgvectorInstallPayload)
-      }
-      if (op === 'fieldbrainPgvectorEnable') {
-        const p = payload as Record<string, unknown>
-        return await fieldbrainPgvectorEnable(p as import('./lib/fieldbrain-bridge').FieldBrainBootstrapPayload)
       }
       if (op === 'onenoteAuthStatus') {
         return await onenoteAuthStatus()
@@ -4883,31 +4607,6 @@ export function App(): React.ReactElement {
         if (!reveal.ok) throw new Error(reveal.error)
         return reveal
       }
-      if (op === 'thinkTankConfigGet') {
-        return await window.sylo.thinkTank.configGet()
-      }
-      if (op === 'thinkTankConfigSave') {
-        const p = payload as { values?: Record<string, unknown> }
-        if (!p?.values || typeof p.values !== 'object') throw new Error('bad_values')
-        const r = await window.sylo.thinkTank.configSave(p.values)
-        if (!r.ok) throw new Error(r.error)
-        return r
-      }
-      if (op === 'thinkTankSessionGet') {
-        const p = payload as { sessionId?: string }
-        const sessionId = typeof p?.sessionId === 'string' ? p.sessionId.trim() : ''
-        if (!sessionId) return null
-        return await window.sylo.thinkTank.sessionGet(sessionId)
-      }
-      if (op === 'thinkTankPickReport') {
-        const p = payload as { sessionId?: string; reportId?: string }
-        const sessionId = typeof p?.sessionId === 'string' ? p.sessionId : ''
-        const reportId = typeof p?.reportId === 'string' ? p.reportId : ''
-        if (!sessionId || !reportId) throw new Error('bad_args')
-        const r = await window.sylo.thinkTank.pickReport(sessionId, reportId)
-        if (!r.ok) throw new Error(r.error)
-        return r
-      }
       if (op === 'requestAgentAction') {
         const p = payload as {
           prompt?: string
@@ -5081,7 +4780,7 @@ export function App(): React.ReactElement {
           : `${sidebarWidth}px minmax(0, 1fr)`,
       }}
       onDragOver={(e) => e.preventDefault()}
-      onDrop={async (e) => {
+            onDrop={async (e) => {
         e.preventDefault()
         const f = e.dataTransfer.files[0] as (File & { path?: string }) | undefined
         if (f?.path) {
@@ -5091,6 +4790,24 @@ export function App(): React.ReactElement {
         }
       }}
     >
+      {/* Agent-raised "Restart Required" badge (issue #44): fixed bottom-right over
+          every tab; tooltip carries the reason + origin. Not dismissible — it clears
+          at the next launch (the restart it asks for). */}
+      {restartBadge.required ? (
+        <div
+          className={restartRequiredBadge}
+          role="status"
+          title={
+            `Pending restart: ${restartBadge.reason}` +
+            (restartBadge.source ? ` (raised from ${restartBadge.source})` : '') +
+            (restartBadge.raisedAt ? ` · raised ${new Date(restartBadge.raisedAt).toLocaleString()}` : '') +
+            ' · stays until you restart Sylo'
+          }
+        >
+          <span aria-hidden="true">⟳</span>
+          <span>Restart Required</span>
+        </div>
+      ) : null}
       <aside className={cn(sidebar, sidebarCollapsed && sidebarAsideCollapsed)}>
         {sidebarCollapsed ?
           <button
@@ -5233,7 +4950,15 @@ export function App(): React.ReactElement {
             const wsConvs = wsActive
               ? conversations.filter((c) => !searching || (c.title || '').toLowerCase().includes(q))
               : []
+            const displayRows: Conv[] = wsActive
+              ? wsConvs
+              : (peekConvsByWs[ws.id] ?? [])
             const hintHere = dropHint?.id === ws.id && dragWsId !== ws.id
+            // Sidebar list cap: show the latest 5 chats, "Load more" expands the
+            // section (per-section, session-scoped). Search always shows all hits.
+            const WS_ROW_CAP = 5
+            const rowsCapped = !searching && !expandedWsIds.has(ws.id) && displayRows.length > WS_ROW_CAP
+            const visibleRows = rowsCapped ? displayRows.slice(0, WS_ROW_CAP) : displayRows
             return (
               <div key={ws.id} className="relative" data-ws-id={ws.id}>
               {hintHere && dropHint.edge === 'before' ? (
@@ -5412,13 +5137,14 @@ export function App(): React.ReactElement {
                     </svg>
                   </button>
                 </summary>
-                {(wsActive ? wsConvs : (peekConvsByWs[ws.id] ?? [])).length === 0 &&
+                {displayRows.length === 0 &&
                 (wsActive || peekOpenWs.has(ws.id)) ? (
                   <div className={sidebarConvEmpty}>
                     {wsActive && searching ? `No chats matching "${convSearch.trim()}"` : 'No chats yet'}
                   </div>
                 ) : null}
-                    {(wsActive ? wsConvs : (peekConvsByWs[ws.id] ?? [])).map((c) => {
+                            {visibleRows.map((c) => {
+
             const selected = c.id === activeId
             const activity = convActivityStatus(c.id, sendingConvIds, unreadConvIds, questionConvIds)
             // Sidebar pin: pinned rows stay above unpinned ones (main-provided order),
@@ -5610,7 +5336,21 @@ export function App(): React.ReactElement {
               ) : null}
             </div>
             )
-          })}
+                        })}
+              {!searching && displayRows.length > WS_ROW_CAP ? (
+                <button
+                  type="button"
+                  className="cursor-pointer rounded border-none bg-transparent px-3 py-1 text-left text-[0.68rem] text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+                  title={rowsCapped ? `Show all ${displayRows.length} chats in this section` : 'Collapse back to the latest 5'}
+                  onClick={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    toggleWsExpanded(ws.id)
+                  }}
+                >
+                  {rowsCapped ? `Load more (${displayRows.length - WS_ROW_CAP})` : 'Show less'}
+                </button>
+              ) : null}
               </details>
               {hintHere && dropHint.edge === 'after' ? (
                 <div className={cn(sidebarWsDropLine, 'bottom-0')} aria-hidden="true" />
@@ -5972,7 +5712,6 @@ export function App(): React.ReactElement {
                       rows={chatTimeline}
                       scrollRef={chatAreaRef}
                       renderRow={renderChatTimelineRow}
-                      thinkTankUi={thinkTankUiBySession}
                       pinToEnd={pinChatToEnd}
                       pinToEndRef={stickToBottomRef}
                     />
@@ -6062,7 +5801,7 @@ export function App(): React.ReactElement {
                           type="button"
                           className={cn(chatStopBtn, chatStopBtnCompact)}
                           disabled={safeMode || !activeId || !agentReady}
-                          title="Stop the current agent turn or think tank session"
+                          title="Stop the current agent turn"
                           onClick={() => void stopActiveTurn()}
                         >
                           Stop
@@ -6126,7 +5865,6 @@ export function App(): React.ReactElement {
                     rows={chatTimeline}
                     scrollRef={chatAreaRef}
                     renderRow={renderChatTimelineRow}
-                    thinkTankUi={thinkTankUiBySession}
                     pinToEnd={pinChatToEnd}
                     pinToEndRef={stickToBottomRef}
                   />
@@ -6212,7 +5950,7 @@ export function App(): React.ReactElement {
                         type="button"
                         className={cn(chatStopBtn, chatStopBtnCompact)}
                         disabled={safeMode || !activeId || !agentReady}
-                        title="Stop the current agent turn or think tank session"
+                        title="Stop the current agent turn"
                         onClick={() => void stopActiveTurn()}
                       >
                         Stop
@@ -6240,9 +5978,6 @@ export function App(): React.ReactElement {
               safeMode={safeMode}
               agentReady={agentReady}
               activeSending={activeSending}
-              inputLocked={thinkTankLocksComposer}
-              inputLockedHint="Think tank writing final reports — wait for seats to finish"
-              onThinkTankInject={thinkTankInjectMode ? handleThinkTankInject : undefined}
               onSendingStarted={handleSendingStarted}
               onRefreshMessages={refreshMessages}
               onDeliverQueued={deliverQueuedText}
@@ -6263,7 +5998,7 @@ export function App(): React.ReactElement {
           </>
         )}
 
-        {tab === 'rules' && (
+                {tab === 'rules' && (
           <div className={panelShell}>
             <RulesPanel
               workspaceId={sidebarWorkspaceId}
@@ -6855,7 +6590,7 @@ export function App(): React.ReactElement {
                                 setWorkspaceBackupError(
                                   workspaceBackupErrorMessage(backupSaved.error, backupSaved.detail),
                                 )
-                                await refreshWorkspaces()
+                                                                await refreshWorkspaces()
                                 await refreshPrefsDiag()
                                 return
                               }
@@ -6918,12 +6653,12 @@ export function App(): React.ReactElement {
 
               <div className={cn(workspaceModalSection, workspaceModalSectionAdd)}>
                 <h4 className={workspaceModalSectionTitle}>New workspace</h4>
-                <p className={cn(settingsCaption, 'mb-1.5')}>
-                  Creates a new folder for this workspace under{' '}
-                  <code>&lt;clone root&gt;/&lt;name&gt;</code> (next to the primary workspace folder, not inside it).
-                  You can edit the path or pick another folder with Browse… — the folder is created if it
-                  doesn&apos;t exist.
-                </p>
+                  <p className={cn(settingsCaption, 'mb-1.5')}>
+                    Creates a new folder for this workspace under{' '}
+                    <code>&lt;clone root&gt;/&lt;name&gt;</code> (next to the primary workspace folder, not inside it).
+                    You can edit the path or pick another folder with Browse… — the folder is created if it
+                    doesn&apos;t exist.
+                  </p>
                 <div className={workspaceField}>
                   <label className={workspaceFieldLabel} htmlFor="workspace-add-name">
                     Name
@@ -7039,9 +6774,11 @@ export function App(): React.ReactElement {
                         setNewWorkspaceError('')
                         try {
                           // New workspace always creates the folder (no confirm prompt).
-                          const res = await window.sylo.workspaces.create(n, piCwd, {
-                            createPiProjectDir: true,
-                          })
+                          const res = await window.sylo.workspaces.create(
+                            n,
+                            piCwd,
+                            { createPiProjectDir: true },
+                          )
                           if (!res.ok) {
                             setNewWorkspaceError(
                               res.error === 'mkdir_failed' ?
@@ -7061,9 +6798,9 @@ export function App(): React.ReactElement {
                               return
                             }
                           }
+                          setNewWorkspacePiCwdError('')
                           setNewWorkspaceName('')
                           setNewWorkspacePiCwd('')
-                          setNewWorkspacePiCwdError('')
                           setNewWorkspacePiCwdTouched(false)
                           setNewWorkspaceEnableGit(false)
                           setNewWorkspaceGitUrl('')
@@ -7914,6 +7651,7 @@ export function App(): React.ReactElement {
           document.body,
         )
       : null}
+
 
       {onboardingNameOpen ?
         createPortal(

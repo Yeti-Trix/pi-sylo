@@ -18,6 +18,8 @@ const destRoot = path.join(root, 'apps/host/test-fixtures/skill-surface')
 const staleRouteFixtures = [
   path.join(destRoot, 'routes', 'music-production'),
   path.join(destRoot, 'routes', 'council'),
+  // sylo-think-tank removed (issue #41) — its route bundle is stale like these.
+  path.join(destRoot, 'routes', 'think-tank'),
 ]
 for (const stale of staleRouteFixtures) {
   if (!fs.existsSync(stale)) continue
@@ -91,6 +93,10 @@ const skillRoots = [
 ]
 
 // First-party optional packages ship skills under packages/sylo-<name>/skills/
+// (sylo-pdf-reader / sylo-docx / sylo-spreadsheet / sylo-web-access were
+// extracted to operator-local personal repos, issue #39 — their monorepo
+// folders are deleted, so the packages/* scan below no longer sees them;
+// Pi loads their skills from the installed repos.)
 for (const ent of fs.readdirSync(path.join(root, 'packages'), { withFileTypes: true })) {
   if (!ent.isDirectory() || !ent.name.startsWith('sylo-')) continue
   const skillsBase = path.join(root, 'packages', ent.name, 'skills')

@@ -155,11 +155,9 @@ type ChatComposerProps = {
   safeMode: boolean
   agentReady: boolean
   activeSending: boolean
-  /** When set, blocks queue/steer while think tank (or similar) runs. */
+  /** When set, blocks send/queue/steer while a lock is held (nothing in-app sets it today). */
   inputLocked?: boolean
   inputLockedHint?: string
-  /** When set (debate phase), Send queues operator context for the Moderator instead of chat. */
-  onThinkTankInject?: (text: string) => Promise<boolean>
   onSendingStarted: () => void
   onRefreshMessages: () => void
   onDeliverQueued: (text: string, attachments?: { path: string; name: string }[]) => Promise<boolean>
@@ -241,7 +239,6 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
     activeSending,
     inputLocked = false,
     inputLockedHint,
-    onThinkTankInject,
     onSendingStarted,
     onRefreshMessages,
     onDeliverQueued,
@@ -775,29 +772,12 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
       // after. (The Send button is disabled with a hint meanwhile.)
       if (chatAttachments.some((a) => a.pending)) return
 
-      if (onThinkTankInject && trimmed && chatAttachments.length === 0 && mode !== 'steer') {
-        setInput('')
-        setChatAttachments([])
-        composerBusyRef.current = true
-        setComposerBusy(true)
-        try {
-          const ok = await onThinkTankInject(trimmed)
-          if (!ok) {
-            setInput(trimmed)
-          }
-        } finally {
-          composerBusyRef.current = false
-          setComposerBusy(false)
-        }
-        return
-      }
-
       // Quick commands (task 10): intercept a recognized `/command` before the
       // send queue machinery gets it (steer passes through — steering is for
       // the running turn, not session commands). /compact /clear /model run
       // App-side; ANY other /word falls through as text (Pi slash command —
       // unchanged behavior).
-      if (mode !== 'steer' && onThinkTankInject === undefined) {
+      if (mode !== 'steer') {
         const cmd = extractComposerSlashCommand(trimmed)
         if (cmd && isComposerQuickCommand(cmd.name)) {
           const usageHint =
@@ -892,7 +872,6 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
       safeMode,
       agentReady,
       inputLocked,
-      onThinkTankInject,
       input,
       chatAttachments,
       activeSending,
@@ -1327,9 +1306,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
             safeMode ?
               'Safe mode — messaging disabled'
             : inputLocked ?
-              inputLockedHint ?? 'Think tank running — wait for the current seat to finish…'
-            : onThinkTankInject ?
-              'Inject context for the Moderator (queued until their next turn)…'
+              inputLockedHint ?? 'Input is locked — wait for the current operation to finish…'
             : !activeId ?
               'Pick or create a conversation…'
             : !agentReady ?
@@ -1338,7 +1315,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
               'Queue a follow-up… (Enter = queue, Ctrl+Enter = send now)'
             : 'Message… (`@` for files/canvas/terminal/agents; drop files or paste images; `/mcp reconnect`, …)'
           }
-          disabled={safeMode || (inputLocked && !onThinkTankInject)}
+          disabled={safeMode || inputLocked}
         />
         {/* Claude-style plan-mode chip: quiet text label showing the current
             mode; clicking opens a small dropdown with the two options. */}
@@ -1407,35 +1384,25 @@ export const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(fu
           type="button"
           className={chatInputSendBtn}
           title={
-            onThinkTankInject ?
-              'Queue inject for the Moderator (⏎)'
-            : activeSending ?
+            activeSending ?
               'Send now — runs at the next tool call (Enter queues · Ctrl+Enter sends immediately)'
             : 'Send (⏎)'
           }
           aria-label={
-            onThinkTankInject ?
-              'Queue inject for the Moderator'
-            : activeSending ?
+            activeSending ?
               'Send now'
             : 'Send'
           }
           disabled={
             safeMode ||
-            (inputLocked && !onThinkTankInject) ||
+            inputLocked ||
             !activeId ||
             !agentReady ||
             composerBusy ||
             (!input.trim() && chatAttachments.length === 0) ||
             chatAttachments.some((a) => a.pending)
           }
-          onClick={() =>
-            void (
-              onThinkTankInject ?
-                submitComposer('queue')
-              : submitComposer(activeSending ? 'steer' : 'send')
-            )
-          }
+          onClick={() => void submitComposer(activeSending ? 'steer' : 'send')}
         >
                     <svg
             viewBox="0 0 24 24"

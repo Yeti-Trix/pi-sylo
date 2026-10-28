@@ -7,6 +7,7 @@ export type SyloBuiltinExtensionKind =
   | 'ask-question'
   | 'tools-guard'
   | 'compaction-anchor'
+  | 'restart-badge'
 
 export function normalizePathForBuiltinMatch(path: string): string {
   return path.replace(/\\/g, '/').toLowerCase()
@@ -33,11 +34,14 @@ export function classifySyloBuiltinExtension(path: string): SyloBuiltinExtension
   ) {
     return 'scheduler'
   }
-  if (
+    if (
     norm.includes('/packages/sylo-ask-question/') ||
     norm.endsWith('/packages/sylo-ask-question/extensions/index.ts')
   ) {
     return 'ask-question'
+  }
+  if (norm.includes('sylo-restart-badge')) {
+    return 'restart-badge'
   }
   if (norm.includes('sylo-builtin-tools-guard')) {
     return 'tools-guard'
@@ -79,10 +83,15 @@ export function syloBuiltinExtensionHint(kind: SyloBuiltinExtensionKind): string
         'Enforces Pi built-in tool toggles (section above) at execution time. ' +
         'You can disable it, but restrictions above will not be enforced while it is off.'
       )
-    case 'compaction-anchor':
+        case 'compaction-anchor':
       return (
         'After context compaction, reminds the model that the summary is background and the latest user message is the live task. ' +
         'Prevents the model from following the summary Next Steps instead of the request you just sent.'
+      )
+    case 'restart-badge':
+      return (
+        'Registers sylo_restart_badge — the agent raises a persistent red "Restart Required" badge ' +
+        '(bottom-right) after telling you a change needs an application relaunch. The badge stays until Sylo restarts.'
       )
   }
 }

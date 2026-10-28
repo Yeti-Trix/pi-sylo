@@ -1,14 +1,4 @@
 import { splitUserMessageAttachments } from './chatUserAttachments'
-import type {
-  ExportThinkTankReport,
-  ExportThinkTankTurn,
-} from './components/think-tank/mergeThinkTankExportTurns'
-import {
-  extractThinkingFromThinkTankWorkflow,
-  isThinkTankFragmentTurn,
-  splitThinkTankTopic,
-  stripThinkTankStanceFooter,
-} from './components/think-tank/thinkTankExportFormat'
 import { formatImageDeliveryForExport } from '../../shared/chat-image-delivery.js'
 import { extensionDisplayTitle } from '../../shared/capability-display-names.js'
 import {
@@ -107,10 +97,6 @@ export type BuildConversationMarkdownInput = {
   messages: ExportMessage[]
   /** Live IPC telemetry tail keyed by assistant message id (active streaming turn). */
   liveTelemetryByMessageId?: Record<string, WorkflowStampedEntry[]>
-  /** Think tank seat turns (merged DB + live UI); includes partial/stopped sessions. */
-  thinkTankTurns?: ExportThinkTankTurn[]
-  /** Final reports from think tank sessions linked to this conversation. */
-  thinkTankReports?: ExportThinkTankReport[]
   /** Broker model at export time (may differ from model used on older turns). */
   agentModel?: ExportAgentModel | null
   /** Skills, extensions, and tool registry at export time (same source as Capability manager). */
@@ -532,103 +518,6 @@ function buildUserMessageMarkdown(content: string): string {
   return lines.join('\n')
 }
 
-function buildThinkTankTurnMarkdown(turn: ExportThinkTankTurn): string {
-  const displayBody = stripThinkTankStanceFooter(turn.body)
-  const thinking = extractThinkingFromThinkTankWorkflow(turn.tool_calls_json)
-  const fragment = isThinkTankFragmentTurn(turn.body)
-
-  const header = `#### Think Tank · C${turn.cycle} · ${turn.seatLabel} · ${turn.stance.replace(/_/g, ' ')}`
-  const lines: string[] = [
-    header,
-    '',
-    `**Time:** ${formatWallTime(turn.created_at)}`,
-    `**Status:** ${turn.status}`,
-    `**Seat agent:** \`${turn.seatAgent}\` (${turn.seatId})`,
-    `**Message ID:** \`${turn.id}\``,
-  ]
-  if (turn.model) lines.push(`**Model:** \`${turn.model}\``)
-  lines.push('', '##### Debate turn', '')
-
-  if (displayBody.trim()) {
-    lines.push(mdEscapeInline(displayBody.trim()), '')
-  } else if (turn.status === 'streaming') {
-    lines.push('_Think tank seat still running or stopped before any captured output at export time._', '')
-  } else {
-    lines.push('_(empty seat reply)_', '')
-  }
-
-  if (fragment) {
-    lines.push(
-      '> _Seat output looks like a stray-token hold. Substantive argument may only exist in the reasoning trace below._',
-      '',
-    )
-  }
-
-  if (turn.debug_json) {
-    lines.push('<details>', '<summary>Seat spawn debug</summary>', '', '```json', turn.debug_json, '```', '', '</details>', '')
-  }
-
-  if (thinking.length > 0) {
-    lines.push('<details>', '<summary>Reasoning trace (not operator-facing debate text)</summary>', '')
-    lines.push('```thinking', mdEscapeInline(thinking), '```', '', '</details>', '')
-  }
-
-  return lines.join('\n').trimEnd()
-}
-
-function buildThinkTankReportMarkdown(report: ExportThinkTankReport): string {
-  const picked = report.selected ? ' · **picked**' : ''
-  const lines: string[] = [
-    `#### ${report.seatLabel}${picked}`,
-    '',
-    `- **Report ID:** \`${report.id}\``,
-    `- **Seat:** \`${report.seatId}\``,
-    `- **Time:** ${formatWallTime(report.created_at)}`,
-    '',
-    stripThinkTankStanceFooter(report.body).trim() || '_(empty report)_',
-    '',
-  ]
-  if (report.metadata_json && report.metadata_json !== '{}') {
-    lines.push('<details>', '<summary>Report validation debug</summary>', '', '```json', report.metadata_json, '```', '', '</details>', '')
-  }
-  return lines.join('\n')
-}
-
-function buildThinkTankDebateMarkdown(
-  turns: ExportThinkTankTurn[],
-  reports: ExportThinkTankReport[],
-): string {
-  if (turns.length === 0 && reports.length === 0) return ''
-  const lines: string[] = ['## Think tank debate', '']
-  let currentSession = ''
-
-  for (const turn of turns) {
-    if (turn.sessionId !== currentSession) {
-      currentSession = turn.sessionId
-      const { context, question } = splitThinkTankTopic(turn.topic.trim() || '(think tank topic)')
-      lines.push(`### Session — ${question}`, '')
-      lines.push(`- **Session ID:** \`${turn.sessionId}\``)
-      lines.push(`- **Session status:** ${turn.sessionStatus}`, '')
-      if (context) {
-        lines.push('<details>', '<summary>Workspace context passed to think tank</summary>', '', context, '', '</details>', '')
-      }
-    }
-    lines.push(buildThinkTankTurnMarkdown(turn), '---', '')
-  }
-
-  const sessionIds = [...new Set(reports.map((r) => r.sessionId))]
-  for (const sessionId of sessionIds) {
-    const sessionReports = reports.filter((r) => r.sessionId === sessionId)
-    if (sessionReports.length === 0) continue
-    lines.push(`### Final reports — session \`${sessionId}\``, '')
-    for (const report of sessionReports) {
-      lines.push(buildThinkTankReportMarkdown(report), '---', '')
-    }
-  }
-
-  return lines.join('\n').trimEnd()
-}
-
 export function buildConversationMarkdown(input: BuildConversationMarkdownInput): string {
   const exportedAt = input.exportedAt ?? new Date()
   const live = input.liveTelemetryByMessageId ?? {}
@@ -691,8 +580,10 @@ export function buildConversationMarkdown(input: BuildConversationMarkdownInput)
         '',
       )
 
-      const telemetryRows = mergedWorkflowTelemetry(msg, live)
-      const segments = buildAssistantSegments(telemetryRows)
+            const telemetryRows = mergedWorkflowTelemetry(msg, live)
+      const segments = buildAssistantSegments(telemetryRows, {
+        tailLive: msg.status === 'streaming',
+      })
       const interleaved = buildInterleavedAssistantBody(msg.content, segments, msg.created_at)
 
       lines.push('### Reply (interleaved)', '')
@@ -729,19 +620,9 @@ export function buildConversationMarkdown(input: BuildConversationMarkdownInput)
     }
   }
 
-  const thinkTankMd = buildThinkTankDebateMarkdown(
-    input.thinkTankTurns ?? [],
-    input.thinkTankReports ?? [],
-  )
-  if (thinkTankMd) {
-    lines.push(thinkTankMd, '')
-  }
-
   lines.push(
     '',
-    '_Generated by Sylo. Tool results reflect SQLite persistence (broker may truncate very large payloads). ' +
-      'Think tank debate turns show persisted seat body text; reasoning traces are collapsed when present. ' +
-      'Final reports are included when the session completed the report phase._',
+    '_Generated by Sylo. Tool results reflect SQLite persistence (broker may truncate very large payloads)._',
   )
 
   return lines.join('\n').trimEnd() + '\n'

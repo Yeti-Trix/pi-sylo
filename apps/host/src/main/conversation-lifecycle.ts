@@ -59,7 +59,7 @@ export function fullyRemoveConversation(
  * Delete a workspace and everything associated with it that lives *outside* the
  * workspace folder: all its conversations + messages, Pi session jsonl files
  * (under the agent dir), chat-owned attachments, web-access images, and TTS
- * audio, plus the per-conversation `agent_tasks` / `web_access` / `think_tank`
+ * audio, plus the per-conversation `agent_tasks` / `web_access`
  * rows. The per-workspace scheduled-prompts DB and tasks JSON live *inside* the
  * workspace folder and ride with whatever the operator did with the folder
  * (kept or deleted); their cached schedule-DB connection is evicted here.

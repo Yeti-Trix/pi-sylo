@@ -3,6 +3,7 @@ export {}
 declare global {
   type ProposalKind = 'commons' | 'workspace'
 
+
   type SweepConfig = {
     enabled: boolean
     day_of_week: number
@@ -1529,27 +1530,6 @@ declare global {
             editable: boolean
           }
         }>
-        fieldbrainConfigGet: () => Promise<{
-          ok: true
-          config: Record<string, unknown>
-          databaseConfigPath: string
-          guidedSetup: string[]
-        }>
-        fieldbrainConfigSave: (payload: Record<string, unknown>) => Promise<
-          | { ok: true; config: Record<string, unknown>; databaseConfigPath: string }
-          | { ok: false; error: string }
-        >
-        fieldbrainDbCheck: () => Promise<Record<string, unknown>>
-        fieldbrainDbMigrate: () => Promise<Record<string, unknown>>
-        fieldbrainLogList: () => Promise<Record<string, unknown>>
-        fieldbrainDocumentList: (payload?: Record<string, unknown>) => Promise<Record<string, unknown>>
-        fieldbrainBrainList: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
-        fieldbrainProjectList: () => Promise<Record<string, unknown>>
-        fieldbrainProjectCreate: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
-        fieldbrainDbBootstrap: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
-        fieldbrainPgvectorGuide: () => Promise<Record<string, unknown>>
-        fieldbrainPgvectorInstallFromFolder: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
-        fieldbrainPgvectorEnable: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
         onenoteAuthStatus: () => Promise<Record<string, unknown>>
         onenoteAuthStart: () => Promise<Record<string, unknown>>
         onenoteAuthComplete: () => Promise<Record<string, unknown>>
@@ -1657,7 +1637,11 @@ declare global {
           | { ok: false; cancelled?: true; error?: string }
         >
       }
-      relaunch: () => Promise<void>
+            relaunch: () => Promise<void>
+      restartBadge: {
+        status: () => Promise<import('../shared/restart-badge.js').RestartBadgeState>
+        onChanged: (cb: (payload: import('../shared/restart-badge.js').RestartBadgeState) => void) => () => void
+      }
       updates: {
         status: () => Promise<import('../shared/app-update-types.js').AppUpdateStatus>
         checkNow: () => Promise<import('../shared/app-update-types.js').AppUpdateStatus>
@@ -1782,29 +1766,6 @@ declare global {
           ok: true
           [key: string]: unknown
         }>
-      }
-      fieldbrain: {
-        configGet: () => Promise<{
-          ok: true
-          config: Record<string, unknown>
-          databaseConfigPath: string
-          guidedSetup: string[]
-        }>
-        configSave: (payload: Record<string, unknown>) => Promise<
-          | { ok: true; config: Record<string, unknown>; databaseConfigPath: string }
-          | { ok: false; error: string }
-        >
-        dbCheck: () => Promise<Record<string, unknown>>
-        dbMigrate: () => Promise<Record<string, unknown>>
-        logList: () => Promise<Record<string, unknown>>
-        documentList: (payload?: Record<string, unknown>) => Promise<Record<string, unknown>>
-        brainList: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
-        projectList: () => Promise<Record<string, unknown>>
-        projectCreate: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
-        dbBootstrap: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
-        pgvectorGuide: () => Promise<Record<string, unknown>>
-        pgvectorInstallFromFolder: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
-        pgvectorEnable: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
       }
       onenote: {
         authStatus: () => Promise<Record<string, unknown>>
@@ -2195,24 +2156,6 @@ declare global {
         ) => Promise<
           { ok: true; restored: number; removed: number } | { ok: false; error: string }
         >
-      }
-      thinkTank: {
-        sessionGet: (sessionId: string) => Promise<Record<string, unknown> | null>
-        listForConversation: (conversationId: string) => Promise<Array<Record<string, unknown>>>
-        configGet: () => Promise<Record<string, unknown>>
-        configSave: (
-          values: Record<string, unknown>,
-        ) => Promise<{ ok: true } | { ok: false; error: string }>
-        pickReport: (
-          sessionId: string,
-          reportId: string,
-        ) => Promise<{ ok: true; selectedReportId: string } | { ok: false; error: string }>
-        inject: (
-          sessionId: string,
-          text: string,
-        ) => Promise<{ ok: true; pendingCount: number } | { ok: false; error: string }>
-        abort: (sessionId: string) => Promise<{ ok: true } | { ok: false; error: string }>
-        onLifecycle: (cb: (payload: unknown) => void) => () => void
       }
       schedules: {
         list: (workspaceId: string) => Promise<

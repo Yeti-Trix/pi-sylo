@@ -3,7 +3,7 @@ import {
   syloBuiltinExtensionHint,
 } from './sylo-builtin-extensions.js'
 
-/** Bundled first-party Pi package — off by default; enable in Capability manager → Sylo built-in packages. */
+/** Bundled first-party Pi package — toggle in Capability manager; core packages are always on (see `core`). */
 export type SyloOptionalPackage = {
   id: string
   title: string
@@ -21,6 +21,12 @@ export type SyloOptionalPackage = {
   postEnableScriptRelPath?: string
   /** When true, package expects Sylo host UI (routes/widgets) — not required for all sylo-* names. */
   requiresSyloUi: boolean
+  /**
+   * Always-on core (issue #39): loaded and visible regardless of prefs and
+   * hidden from the Capability manager toggle list. The registry row stays —
+   * the broker still needs extensionRelPath.
+   */
+  core?: boolean
 }
 
 export const SYLO_OPTIONAL_PACKAGES: readonly SyloOptionalPackage[] = [
@@ -31,62 +37,19 @@ export const SYLO_OPTIONAL_PACKAGES: readonly SyloOptionalPackage[] = [
       'Agent-side **terminal_read** tool — read Sylo terminal pane scrollback from chat (list panes or tail one). Inert on vanilla Pi; needs a Sylo terminal pane to be open. See pi-sylo issue #7.',
     extensionRelPath: 'packages/sylo-terminal-bridge/extensions/index.ts',
     skillNames: [],
+    core: true,
     requiresSyloUi: false,
   },
-  {
-    id: 'sylo-pdf-reader',
-    title: 'PDF reader',
-    description:
-      'Search any PDF by text (optional OCR), render pages/regions as PNG for vision, and OCR crops. ' +
-      'Works on local paths and http(s) PDF URLs (datasheets, manuals, schematics). Pair with the **pdf-reader** skill.',
-    extensionRelPath: 'packages/sylo-pdf-reader/extensions/index.ts',
-    skillNames: ['pdf-reader'],
-    pythonRequirementsRelPath: 'packages/sylo-pdf-reader/scripts/requirements.txt',
-    requiresSyloUi: false,
-  },
-  {
-    id: 'sylo-docx',
-    title: 'DOCX',
-    description:
-      'Read and write Word .docx files: **read_docx** / **extract_docx_images** (structured JSON, image anchors) and ' +
-      '**render_docx** (markdown → styled .docx via Pandoc). Pair with the **docx** skill; use **template-docx-writer** for Word-template documents.',
-    extensionRelPath: 'packages/sylo-docx/extensions/index.ts',
-    skillNames: ['docx'],
-    pythonRequirementsRelPath: 'packages/sylo-docx/scripts/requirements.txt',
-    // Best-effort, non-fatal: installs Pandoc (per-user via winget) so
-    // render_docx works after enable. Read tools work without it. See
-    // scripts/post-enable.py.
-    postEnableScriptRelPath: 'packages/sylo-docx/scripts/post-enable.py',
-    requiresSyloUi: false,
-  },
+  // (sylo-pdf-reader / sylo-docx / sylo-spreadsheet / sylo-web-access registry
+  // rows removed 2026-10-27 — all four extracted to the operator's personal
+  // repos ~/Documents/GitHub/sylo-{pdf-reader,docx,spreadsheet,web-access},
+  // installed via ~/.pi/agent/settings.json `packages`. fetch-pdf's pdf-cache
+  // import was vendored into the web-access repo first so the sibling import
+  // could not dangle; monorepo package folders are deleted. Issue #39.)
   // 2026-09-02: sylo-template-docx-writer, sylo-machine-expert, sylo-codesys,
   // sylo-allen-bradley, sylo-ignition, sylo-fieldbrain moved to the operator's
   // sylo-tools-controls bundle; sylo-onenote moved to sylo-tools-onenote.
   // Installed via ~/.pi/agent/settings.json packages (see README there).
-  {
-    id: 'sylo-spreadsheet',
-    title: 'Spreadsheet',
-    description:
-      'Read .xlsx and .ods workbooks as JSON (read_spreadsheet) and create .xlsx workbooks with data and native charts (write_spreadsheet). ' +
-      'Pair with the spreadsheet skill in chat. Use Pi read for .csv.',
-    extensionRelPath: 'packages/sylo-spreadsheet/extensions/index.ts',
-    skillNames: ['spreadsheet'],
-    pythonRequirementsRelPath: 'packages/sylo-spreadsheet/scripts/requirements.txt',
-    requiresSyloUi: false,
-  },
-  {
-    id: 'sylo-web-access',
-    title: 'Web access',
-    description:
-      'Privacy-first web search + fetch (DuckDuckGo, local fetch). Results are LLM-ranked, cleaned, and returned with source URLs for the agent to cite. ' +
-      'Includes **sylo_youtube_transcript** for YouTube captions (not sylo_web_fetch). ' +
-      'Enable the web-access skill so the model knows when to search vs fetch vs transcript. Sidebar **Web access** tab: history and settings. ' +
-      'No cloud accounts, no tracking.',
-    extensionRelPath: 'packages/sylo-web-access/extensions/index.ts',
-    skillNames: ['web-access'],
-    pythonRequirementsRelPath: 'packages/sylo-web-access/scripts/requirements.txt',
-    requiresSyloUi: true,
-  },
   {
     id: 'sylo-tts',
     title: 'Speech',
@@ -113,6 +76,7 @@ export const SYLO_OPTIONAL_PACKAGES: readonly SyloOptionalPackage[] = [
       'Sidebar **Workflows** route under **Tools**: pick a workflow → Send to agent (substitutes `{workspace}`). No Python.',
     extensionRelPath: 'packages/sylo-workflows/extensions/index.ts',
     skillNames: ['sylo-workflows'],
+    core: true,
     requiresSyloUi: true,
   },
   // (sylo-fieldbrain → sylo-tools-controls bundle; sylo-onenote → sylo-tools-onenote bundle)
@@ -125,21 +89,10 @@ export const SYLO_OPTIONAL_PACKAGES: readonly SyloOptionalPackage[] = [
             'No diff-review UI. Phase 2 adds local codebase semantic search (Ollama embeddings).',
     extensionRelPath: 'packages/sylo-coder/extensions/index.ts',
     skillNames: ['sylo-coder'],
+    core: true,
     requiresSyloUi: false,
   },
-  {
-    id: 'sylo-think-tank',
-    title: 'Think Tank',
-    description:
-      'Multi-model think tank (min 2 / max 10 cycles). Tools: sylo_think_tank_run, sylo_think_tank_status, sylo_think_tank_pick (optional programmatic pick — not surfaced in UI). ' +
-      'Sessions finalize automatically when final reports are ready; the Moderator report is the decision brief. ' +
-      'Sidebar **Think Tank** route: configure seat models (same options as Settings → Model (Pi)). ' +
-      'Pair with the **think-tank** skill — trigger in chat with "Think Tank: …" or "send to think tank".',
-    extensionRelPath: 'packages/sylo-think-tank/extensions/index.ts',
-    skillNames: ['think-tank'],
-        requiresSyloUi: true,
-  },
-  {
+    {
     id: 'sylo-chat-export',
     title: 'Chat export',
     description:
@@ -148,6 +101,7 @@ export const SYLO_OPTIONAL_PACKAGES: readonly SyloOptionalPackage[] = [
       'Writes transcripts to `journal/.chat-export-*.md` and returns a manifest. Powers the operator-owned **chat-recap** / **chat-recap-all** workflows. No Python; chat-only.',
     extensionRelPath: 'packages/sylo-chat-export/extensions/index.ts',
     skillNames: ['chat-export'],
+    core: true,
     requiresSyloUi: false,
   },
   {
@@ -160,6 +114,7 @@ export const SYLO_OPTIONAL_PACKAGES: readonly SyloOptionalPackage[] = [
       'Live Canvas board (Phase 2) + sidebar dashboard (Phase 3) bind to a list by liveId. Pair with the **tasks** skill.',
     extensionRelPath: 'packages/sylo-tasks/extensions/index.ts',
     skillNames: ['tasks'],
+    core: true,
     requiresSyloUi: true,
   },
   {
@@ -198,9 +153,9 @@ const OPTIONAL_PACKAGE_IDS = new Set(SYLO_OPTIONAL_PACKAGES.map((p) => p.id))
 export function normalizeSyloOptionalPackagesPref(raw: unknown): Record<string, boolean> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
   const src = { ...(raw as Record<string, unknown>) }
-  if (src['sylo-council'] === true && src['sylo-think-tank'] !== true) {
-    src['sylo-think-tank'] = true
-  }
+    // (sylo-think-tank removed 2026-10-27, issue #41 — the legacy sylo-council
+  // pref now normalizes away through the known-id filter, same as
+  // sylo-schematic-reader / sylo-web-access.)
   // (sylo-news / sylo-reddit moved out of Sylo 2026-09-01 — now in the operator's
   // personal-tools repo, installed via `pi install git:...`, not optional packages.)
   // (sylo-health moved out 2026-09-01 too — it is the personal bundle's host
@@ -209,6 +164,12 @@ export function normalizeSyloOptionalPackagesPref(raw: unknown): Record<string, 
   if (src['sylo-schematic-reader'] === true && src['sylo-pdf-reader'] !== true) {
     src['sylo-pdf-reader'] = true
   }
+  // (sylo-pdf-reader / sylo-docx / sylo-spreadsheet / sylo-web-access left the
+  // registry 2026-10-27 — extracted to the operator's personal repos, installed
+  // via ~/.pi/agent/settings.json `packages`. Legacy prefs for those ids
+  // normalize away in the known-id filter below; the schematic-reader
+  // migration above is kept intact (C4, issue #39) — its output resolves to
+  // the no-longer-known sylo-pdf-reader id and falls through the filter.)
   const out: Record<string, boolean> = {}
   for (const [key, val] of Object.entries(src)) {
     if (!OPTIONAL_PACKAGE_IDS.has(key)) continue
@@ -221,6 +182,9 @@ export function isSyloOptionalPackageEnabled(
   pref: Record<string, boolean>,
   packageId: string,
 ): boolean {
+  // Core packages (issue #39) are always on — prefs gate only the regular
+  // toggles. (Function declarations hoist, so findSyloOptionalPackage is safe.)
+  if (findSyloOptionalPackage(packageId)?.core) return true
   return pref[packageId] === true
 }
 
@@ -231,13 +195,15 @@ export function findOptionalPackageForSkillFolder(skillFolderName: string): Sylo
   return SYLO_OPTIONAL_PACKAGES.find((p) => p.skillNames.some((s) => s.toLowerCase() === name))
 }
 
-/** False when the skill belongs to an optional package that is off in prefs. */
+/** False when the skill belongs to an optional package that is off in prefs. Core packages (issue #39) are always visible. */
 export function isSkillVisibleForOptionalPackages(
   skillFolderName: string,
   pref: Record<string, boolean>,
 ): boolean {
   const pkg = findOptionalPackageForSkillFolder(skillFolderName)
   if (!pkg) return true
+  // Core check inside isSyloOptionalPackageEnabled makes core skills always
+  // visible regardless of prefs (issue #39).
   return isSyloOptionalPackageEnabled(pref, pkg.id)
 }
 
@@ -260,7 +226,12 @@ export function syloOptionalPackageHint(pkg: SyloOptionalPackage): string {
     pkg.requiresSyloUi ?
       'Uses Sylo host UI (sidebar routes or widgets).'
     : 'Works in chat via Pi tools; no Sylo sidebar UI required.'
-  return `${pkg.description} ${ui} Enable in Capability manager to install Python deps automatically when needed.`
+  return (
+    `${pkg.description} ${ui} ` +
+    (pkg.core ?
+      'Always-on core — loads without a toggle and is hidden from the Capability manager list.'
+    : 'Enable in Capability manager to install Python deps automatically when needed.')
+  )
 }
 
 export function syloExtensionHintForPath(path: string): string | undefined {

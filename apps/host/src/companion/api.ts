@@ -41,15 +41,48 @@ export type Workspace = {
 
 const fetchOpts: RequestInit = { credentials: 'include' }
 
+/** Retry policy for network-level fetch failures (issue #38). Phone<->desktop
+ *  traffic rides a Tailscale DERP relay whenever no direct tunnel exists, and
+ *  relay rebuilds (radio/doze changes) kill every in-flight fetch — the phone
+ *  then sees a raw 'Failed to fetch'. One quick retry absorbs the blip.
+ *
+ *  Scope: GETs and /api/ask-question/submit are safe to repeat (server-side
+ *  submit is a no-op for an already-answered requestId; a GET is a GET).
+ *  send/steer/deliver-queued POSTs stay single-attempt: if the response was
+ *  lost after the server accepted the message, a retry could double-send.
+ *  Any HTTP response (any status) is a server answer, never a transient —
+ *  only fetch()-itself rejecting is retried. */
+const NET_RETRY_PATHS: readonly RegExp[] = [/^\/api\/ask-question\/submit$/]
+const NET_RETRY_DELAY_MS = 900
+
+function netRetryable(path: string, init?: RequestInit): boolean {
+  const method = (init?.method ?? (init?.body ? 'POST' : 'GET')).toUpperCase()
+  if (method === 'GET') return true
+  return NET_RETRY_PATHS.some((re) => re.test(path))
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    ...fetchOpts,
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
-  })
+  const attempts = netRetryable(path, init) ? 2 : 1
+  let res: Response | null = null
+  let netErr: unknown
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (attempt > 1) await new Promise((r) => setTimeout(r, NET_RETRY_DELAY_MS))
+    try {
+      res = await fetch(path, {
+        ...fetchOpts,
+        ...init,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(init?.headers ?? {}),
+        },
+      })
+      netErr = null
+    } catch (e) {
+      netErr = e
+    }
+    if (res !== null) break
+  }
+  if (res === null) throw netErr
   if (res.status === 401) throw new Error('unauthorized')
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string }

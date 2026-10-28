@@ -1,6 +1,9 @@
 /**
  * Host-side age GC for the shared OS-temp PDF download cache
- * (`%TEMP%/sylo-pdf-cache`). Same dir as packages/sylo-pdf-reader pdf-cache.ts.
+ * (`%TEMP%/sylo-pdf-cache`). Same dir convention as the pdf reader's
+ * extensions/pdf-cache.ts — that package now lives in the operator-local
+ * personal repo ~/Documents/GitHub/sylo-pdf-reader (issue #39), so the host
+ * keeps its own copy of the prune helper here.
  */
 import { existsSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'

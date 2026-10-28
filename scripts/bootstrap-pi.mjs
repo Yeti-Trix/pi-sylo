@@ -32,9 +32,7 @@ function ensureCopyTree(srcRel, destAbs) {
 }
 
 // @sylo/skill-surface-extension stays out of ~/.pi/agent — Sylo loads it via additionalExtensionPaths.
-
-// Seat assignment tools load via packages/sylo-think-tank/extensions/index.ts (SYLO_THINK_TANK_SEAT_RUN=1).
-// Do not copy seat-tools into ~/.pi/agent/extensions — Pi auto-loads that folder and causes duplicate tools.
+// (think-tank seat-assignment extension notes removed 2026-10-27 with the sylo-think-tank package — issue #41.)
 const staleExtPaths = [
   path.join(agent, 'extensions', 'sylo-task-overlay.ts'),
   path.join(agent, 'extensions', 'sylo-research-extension.ts'),
@@ -134,6 +132,46 @@ if (!newsRedditInstalled()) {
   console.log('Sylo bootstrap: news/reddit owners present — keeping news/reddit skills')
 }
 
+function pkgEnabledBySettingsInstall(names) {
+  // Stricter than pkgInstalled: owner must be a RESOLVABLE local-path (or real
+  // dir) entry in settings.json packages[] — a cloned-but-not-enabled repo
+  // folder must NOT count, or the purge can never run (that is the exact
+  // fieldbrain reported bug: clone exists, package not enabled, link shows).
+  try {
+    const settingsPath = path.join(agent, 'settings.json')
+    if (fs.existsSync(settingsPath)) {
+      const raw = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
+      return (raw.packages ?? []).some((p) => {
+        const str = String(p)
+        if (str.startsWith('npm:') || str.startsWith('git:')) return false
+        if (!names.includes(path.basename(str.replace(/\\/g, '/')))) return false
+        return fs.existsSync(path.resolve(path.dirname(settingsPath), str))
+      })
+    }
+  } catch { /* settings unreadable — treat as not installed */ }
+  return false
+}
+
+// Route-declaring skills in the operator's domain bundles render a sidebar link
+// whenever their folder exists under ~/.pi/agent/skills — discovered skills are
+// scanned unconditionally (main/skill-routes.ts). A copy whose owning package is
+// NOT a resolvable settings.json packages[] entry shows a dead dashboard link
+// with no backend, so purge it; installing the package reinstalls the copy via
+// Pi's package loader.
+const controlsSkillGroups = [
+  { skills: ['fieldbrain'], owners: ['sylo-fieldbrain'] },
+]
+for (const { skills, owners } of controlsSkillGroups) {
+  if (pkgEnabledBySettingsInstall(owners)) continue
+  for (const name of skills) {
+    const dir = path.join(agent, 'skills', name)
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true })
+      console.log('Sylo bootstrap: removed stale domain skill (owner package not enabled):', dir)
+    }
+  }
+}
+
 ensureCopy(
   'packages/skill-builder/skills/sylo-skill-author/SKILL.md',
   path.join(agent, 'skills', 'sylo-skill-author', 'SKILL.md'),
@@ -150,18 +188,11 @@ ensureCopy(
   'packages/extension-builder/skills/sylo-optional-package-author/SKILL.md',
   path.join(agent, 'skills', 'sylo-optional-package-author', 'SKILL.md'),
 )
-ensureCopyTree(
-  'packages/sylo-pdf-reader/skills/pdf-reader',
-  path.join(agent, 'skills', 'pdf-reader'),
-)
-ensureCopyTree(
-  'packages/sylo-spreadsheet/skills/spreadsheet',
-  path.join(agent, 'skills', 'spreadsheet'),
-)
-ensureCopyTree(
-  'packages/sylo-docx/skills/docx',
-  path.join(agent, 'skills', 'docx'),
-)
+// (sylo-pdf-reader / sylo-spreadsheet / sylo-docx / sylo-web-access skill
+// copies removed 2026-10-27 — all four extracted to the operator's personal
+// repos ~/Documents/GitHub/sylo-{pdf-reader,docx,spreadsheet,web-access};
+// Pi's package loader copies their skills from the installed packages.
+// Monorepo package folders are deleted. Issue #39.)
 // (template-docx-writer / machine-expert / ignition / logicforge / fieldbrain
 // skills moved 2026-09-02 to the operator's sylo-tools-controls bundle, and
 // onenote to sylo-tools-onenote — Pi's package loader copies bundle skills;
@@ -171,17 +202,11 @@ ensureCopyTree(
 // bundled sylo-dev skills. Stale copies left on machines without the bundle
 // are purged by the personalToolsInstalled() check above.)
 ensureCopyTree(
-  'packages/sylo-web-access/skills/web-access',
-  path.join(agent, 'skills', 'web-access'),
-)
-ensureCopyTree(
   'packages/sylo-tts/skills/tts',
   path.join(agent, 'skills', 'tts'),
 )
-ensureCopyTree(
-  'packages/sylo-think-tank/skills/think-tank',
-  path.join(agent, 'skills', 'think-tank'),
-)
+// (sylo-think-tank removed 2026-10-27, issue #41 — the installed think-tank
+// skill copy is purged in the stale list below.)
 ensureCopyTree(
   'packages/sylo-coder/skills/sylo-coder',
   path.join(agent, 'skills', 'sylo-coder'),
@@ -208,12 +233,19 @@ ensureCopyTree(
 )
 
 for (const staleSkill of [
+  // sylo-think-tank removed entirely (issue #41) — its installed skill copy,
+  // including the sidebar route bundle, is now stale like the entries below.
+  'think-tank',
   'music-production',
   'ableton-reference',
   'council',
   'financial-news',
   'schematic-reader',
   'logicscout',
+  // issue #39 final pass: web-access skill is now copied by Pi's package
+  // loader from the operator-local sylo-web-access repo — purge the bundled
+  // copy bootstrap used to install.
+  'web-access',
 ]) {
   const stalePath = path.join(agent, 'skills', staleSkill)
   if (fs.existsSync(stalePath)) {

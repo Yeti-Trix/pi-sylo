@@ -1,7 +1,6 @@
 import { measureElement, observeElementRect, useVirtualizer } from '@tanstack/react-virtual'
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef } from 'react'
-import type { ChatTimelineRow } from '../components/think-tank/buildChatTimeline'
-import type { ThinkTankSessionUiState } from '../components/think-tank/ThinkTankSessionBlock'
+import type { ChatTimelineRow } from './chatTimeline'
 import {
   CHAT_AT_END_PX,
   CHAT_VIEWPORT_REMEASURE_MAX_FRAMES,
@@ -25,7 +24,6 @@ type Props = {
   rows: ChatTimelineRow[]
   scrollRef: React.RefObject<HTMLDivElement | null>
   renderRow: (row: ChatTimelineRow) => React.ReactNode
-  thinkTankUi: Record<string, ThinkTankSessionUiState | undefined>
   /** True while the user wants the live tail. Cleared on scroll-up. */
   pinToEnd: boolean
   pinToEndRef: { current: boolean }
@@ -38,11 +36,11 @@ type Props = {
  * Scroll-only motion updates transforms in the DOM (no React reconcile).
  */
 export const ChatTimelineList = forwardRef<ChatTimelineListHandle, Props>(
-  function ChatTimelineList({ rows, scrollRef, renderRow, thinkTankUi, pinToEnd, pinToEndRef, onSettleEnd }, ref) {
+  function ChatTimelineList({ rows, scrollRef, renderRow, pinToEnd, pinToEndRef, onSettleEnd }, ref) {
     const getItemKey = useCallback((index: number) => rows[index]?.key ?? index, [rows])
     const estimateSize = useCallback(
-      (index: number) => estimateTimelineRowHeight(rows[index], thinkTankUi),
-      [rows, thinkTankUi],
+      (index: number) => estimateTimelineRowHeight(rows[index]),
+      [rows],
     )
     const measureRow = useCallback(
       (
@@ -53,10 +51,10 @@ export const ChatTimelineList = forwardRef<ChatTimelineListHandle, Props>(
         const size = measureElement(element, entry, instance)
         const index = instance.indexFromElement(element)
         const row = rows[index]
-        if (row && size > 0) rememberMeasuredTimelineRowHeight(row, thinkTankUi, size)
+        if (row && size > 0) rememberMeasuredTimelineRowHeight(row, size)
         return size
       },
-      [rows, thinkTankUi],
+      [rows],
     )
 
     const observeScrollRect = useCallback<typeof observeElementRect>((instance, cb) => {

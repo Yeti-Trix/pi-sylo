@@ -1,11 +1,5 @@
 import { splitUserMessageAttachments } from '../chatUserAttachments'
-import type { ChatTimelineRow } from '../components/think-tank/buildChatTimeline'
-import {
-  debateTurnOpen,
-  reportTurnOpen,
-  thinkTankUiForEstimate,
-  type ThinkTankSessionUiState,
-} from '../components/think-tank/ThinkTankSessionBlock'
+import type { ChatTimelineRow } from './chatTimeline'
 import type { ChatMessageRowModel } from './ConversationMessage'
 
 const MAX_ESTIMATE_CACHE = 400
@@ -67,96 +61,29 @@ function estimateChatRowHeight(m: EstimateMsg | undefined): number {
   return Math.min(2400, 56 + Math.ceil(contentLen / 72) * 22)
 }
 
-function computeTimelineRowHeight(
-  row: ChatTimelineRow,
-  thinkTankUi: Record<string, ThinkTankSessionUiState | undefined>,
-): number {
-  if (row.kind === 'message') return estimateChatRowHeight(row.message as EstimateMsg)
-  const ui = thinkTankUiForEstimate(row.sessionId, row.status, thinkTankUi)
-  let height = 100
-  const debateBubbles = row.bubbles.filter((b) => b.phase === 'debate')
-  const reportBubbles = row.bubbles.filter((b) => b.phase === 'final_report')
-  if (debateBubbles.length > 0) {
-    height += 28
-    for (const bubble of debateBubbles) {
-      const open = debateTurnOpen(ui, bubble.id, row.status)
-      height += open ?
-        estimateChatRowHeight({
-          id: bubble.id,
-          role: 'assistant',
-          content: bubble.body,
-          tool_calls_json: bubble.tool_calls_json,
-          status: bubble.status,
-          created_at: bubble.created_at,
-        }) + 48
-      : 36
-    }
-  }
-  if (reportBubbles.length > 0) {
-    height += 36
-    if (ui.reportsOpen) {
-      height += 40
-      for (const bubble of reportBubbles) {
-        const open = reportTurnOpen(ui, bubble.id, row.status)
-        height += open ?
-          estimateChatRowHeight({
-            id: bubble.id,
-            role: 'assistant',
-            content: bubble.body,
-            tool_calls_json: bubble.tool_calls_json,
-            status: bubble.status,
-            created_at: bubble.created_at,
-          })
-        : 36
-      }
-    }
-  }
-  if (
-    row.liveSession &&
-    (row.liveSession.status === 'complete' ||
-      row.liveSession.status === 'awaiting_pick' ||
-      row.liveSession.error)
-  ) {
-    height += 160
-  }
-  return Math.min(64000, height)
+function computeTimelineRowHeight(row: ChatTimelineRow): number {
+  return estimateChatRowHeight(row.message as EstimateMsg)
 }
 
-function estimateCacheKey(
-  row: ChatTimelineRow,
-  thinkTankUi: Record<string, ThinkTankSessionUiState | undefined>,
-): string {
-  if (row.kind === 'message') {
-    const m = row.message
-    return `m:v2:${m.id}:${m.content.length}:${m.tool_calls_json?.length ?? 0}:${m.status}`
-  }
-  const ui = thinkTankUi[row.sessionId]
-  const debate = ui ? Object.entries(ui.debateOpenById).sort().join(',') : ''
-  const report = ui ? Object.entries(ui.reportOpenById).sort().join(',') : ''
-  const bubbles = row.bubbles
-    .map((b) => `${b.id}:${b.body.length}:${b.tool_calls_json?.length ?? 0}:${b.status}`)
-    .join('|')
-  return `t:${row.sessionId}:${row.status}:${ui?.reportsOpen ? 1 : 0}:${debate}:${report}:${bubbles}`
+function estimateCacheKey(row: ChatTimelineRow): string {
+  const m = row.message
+  return `m:v2:${m.id}:${m.content.length}:${m.tool_calls_json?.length ?? 0}:${m.status}`
 }
 
 /** Cached height guess for the virtualizer. Measured DOM size wins once a row mounts. */
-export function estimateTimelineRowHeight(
-  row: ChatTimelineRow | undefined,
-  thinkTankUi: Record<string, ThinkTankSessionUiState | undefined>,
-): number {
+export function estimateTimelineRowHeight(row: ChatTimelineRow | undefined): number {
   if (!row) return 220
-  const key = estimateCacheKey(row, thinkTankUi)
+  const key = estimateCacheKey(row)
   const hit = estimateCache.get(key)
   if (hit !== undefined) return hit
-  return rememberEstimate(key, computeTimelineRowHeight(row, thinkTankUi))
+  return rememberEstimate(key, computeTimelineRowHeight(row))
 }
 
 /** Store the measured height so a later remount does not re-guess. */
 export function rememberMeasuredTimelineRowHeight(
   row: ChatTimelineRow,
-  thinkTankUi: Record<string, ThinkTankSessionUiState | undefined>,
   size: number,
 ): void {
   if (!(size > 0) || !Number.isFinite(size)) return
-  rememberEstimate(estimateCacheKey(row, thinkTankUi), Math.round(size))
+  rememberEstimate(estimateCacheKey(row), Math.round(size))
 }

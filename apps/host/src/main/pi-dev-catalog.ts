@@ -158,7 +158,6 @@ const SYLO_KNOWN_PACKAGE_NAMES = [
   'sylo-reddit',
   'sylo-allen-bradley',
   'sylo-codesys',
-  'sylo-fieldbrain',
   'sylo-ignition',
   'sylo-plc-comms',
   'sylo-template-docx-writer',

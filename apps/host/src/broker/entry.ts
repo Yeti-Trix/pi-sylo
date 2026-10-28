@@ -267,10 +267,9 @@ type BrokerMessageIn =
   | BrokerCancelForcedSubagent
   | BrokerCompactionUpdate
   | BrokerCompactNow
-  // Pass-through IPC messages: the broker does not consume these. Main → broker
+    // Pass-through IPC messages: the broker does not consume these. Main → broker
   // IPC fans them out to every `process.on('message')` listener (e.g. the
-  // sylo-tasks extension's edit listener, or think-tank/schedule RPC waiters).
-  | { type: 'sylo_think_tank_rpc_result' }
+  // sylo-tasks extension's edit listener, or schedule RPC waiters).
   | { type: 'sylo_schedule_rpc_result' }
   | { type: 'sylo_ask_question_result' }
   | { type: 'sylo-tasks:apply-edit' }
@@ -552,6 +551,64 @@ function currentThinkingLevel(sess: AgentSession): string | null {
 }
 
 /**
+ * Does a fresh read of ~/.pi/agent/models.json say this model is reasoning-capable?
+ *
+ * Deliberately NOT the broker's ModelRuntime snapshot: the failure this guards
+ * against is exactly a stale/damaged snapshot or a models.json that was torn mid-write
+ * (Sylo's ollama patch writer used to write non-atomically) when the session bound.
+ * Unknown model or unreadable file → false (leave the session alone).
+ */
+function freshModelsJsonSaysReasoning(provider: string, modelId: string): boolean {
+  const p = join(brokerAgentDir || join(homedir(), '.pi', 'agent'), 'models.json')
+  try {
+    const root = JSON.parse(readFileSync(p, 'utf8')) as {
+      providers?: Record<string, { models?: Array<{ id?: string; reasoning?: boolean }> }>
+    }
+    const models = root.providers?.[provider]?.models
+    if (!Array.isArray(models)) return false
+    return models.some((m) => m?.id === modelId && m.reasoning === true)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Self-heal a session stuck at thinking level `off` with no chat override behind it.
+ *
+ * Poisoned-session shape: at bind time the model failed to resolve (transient torn
+ * models.json write, registry race), Pi's sdk resolved `thinkingLevel = "off"` and
+ * APPENDED it to the session file. From then on every turn restores `"off"` from the
+ * session — even after models.json is correct — and the model's chain-of-thought
+ * streams as plain text blocks the chat pill can't collapse (operator-visible:
+ * reasoning renders inline in chat). Heals ONLY when there is no explicit per-chat
+ * override, the live level is genuinely `off`, and the fresh registry says the model
+ * supports reasoning: then re-apply Pi's settings default. Operator off-choices made
+ * in the chat model picker always arrive as explicit overrides and are never touched.
+ */
+async function healStaleThinkingOff(sess: AgentSession | undefined): Promise<void> {
+  if (!sess || currentThinkingLevel(sess) !== 'off') return
+  const m = sess.model
+  if (!m) return
+  const provider = String(m.provider ?? '')
+  const modelId = String(m.id ?? '')
+  if (!provider || !modelId) return
+  if (!freshModelsJsonSaysReasoning(provider, modelId)) return
+  const target = (piSettingsDefaultThinkingLevel ?? 'high') as Parameters<
+    typeof sess.setThinkingLevel
+  >[0]
+  try {
+    sess.setThinkingLevel(target)
+    console.warn(
+      `[sylo broker] thinking level was stuck at "off" for ${provider}/${modelId} ` +
+        `with no per-chat override (stale poisoned session after a models.json resolve miss) ` +
+        `— reset to "${target}" so reasoning renders in the thinking channel again.`,
+    )
+  } catch {
+    /* setThinkingLevel clamps internally; a throw here means leave the session alone */
+  }
+}
+
+/**
  * List Pi thought-supported thinking levels for a specific provider/model.
  * Resolves through Pi's model registry (built-ins + ~/.pi/agent/models.json)
  * so the UI dropdown never advertises levels the model can't take.
@@ -663,6 +720,17 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
 let runtime: AgentSessionRuntime | undefined
 /** Convenient alias — same object as `runtime?.session` after init. */
 let session: AgentSession | undefined
+/**
+ * Pi's own default thinking level (settings.json `defaultThinkingLevel`), captured
+ * each time the createRuntime factory runs. Used to reset a session's stale
+ * `off` level when a switch/init carries no explicit per-chat override — a broker
+ * shared across conversations must not keep the previous chat's thinking state
+ * (broker-supervisor sends `thinkingLevel: ''` to mean "Pi default", not "keep"),
+ * and it must not stay `off` when the session file was poisoned by a transient
+ * models.json resolve miss (sdk.js falls back to `"off"` when the model fails to
+ * resolve, appends it to the session file, and every later turn restores it).
+ */
+let piSettingsDefaultThinkingLevel: string | null = null
 /** Pi built-in tool policy from the last broker init (re-applied after extension reload). */
 let brokerPiBuiltinPref: PiBuiltinToolsPref = normalizePiBuiltinToolsPref(null)
 /** When true, Pi runs with no tools (plain chat — for models that reject tool payloads). */
@@ -716,10 +784,8 @@ function installSubagentTurnIdBridge(): void {
     if (
       msg &&
       typeof msg === 'object' &&
-      (msgType === 'sylo_subagent' ||
+      (        msgType === 'sylo_subagent' ||
         msgType === 'sylo_web_access' ||
-        msgType === 'sylo_think_tank' ||
-        msgType === 'sylo_think_tank_rpc' ||
         msgType === 'sylo_schedule_rpc' ||
         msgType === 'sylo_ask_question') &&
       !(msg as { turnId?: string }).turnId
@@ -1045,11 +1111,18 @@ async function handleInit(msg: BrokerInit): Promise<void> {
         extraExtensionPaths.push(compactionAnchorPath)
       }
     }
-    const canvasSketchExtensionPath = process.env.SYLO_CANVAS_SKETCH_EXTENSION
+        const canvasSketchExtensionPath = process.env.SYLO_CANVAS_SKETCH_EXTENSION
     if (canvasSketchExtensionPath && existsSync(canvasSketchExtensionPath)) {
       const norm = normalizeSyloCapabilityPath(canvasSketchExtensionPath)
       if (!norm || !disabledExtensionPathsSet.has(norm)) {
         extraExtensionPaths.push(canvasSketchExtensionPath)
+      }
+    }
+    const restartBadgePath = process.env.SYLO_RESTART_BADGE_EXTENSION
+    if (restartBadgePath && existsSync(restartBadgePath)) {
+      const norm = normalizeSyloCapabilityPath(restartBadgePath)
+      if (!norm || !disabledExtensionPathsSet.has(norm)) {
+        extraExtensionPaths.push(restartBadgePath)
       }
     }
 
@@ -1075,8 +1148,15 @@ async function handleInit(msg: BrokerInit): Promise<void> {
         modelsPath: join(effAgentDir, 'models.json'),
       })
       const reg = new ModelRegistry(mr)
-      const settingsManager = SettingsManager.create(effCwd, effAgentDir)
+            const settingsManager = SettingsManager.create(effCwd, effAgentDir)
       ensureWindowsPiShellFallback(settingsManager, effCwd)
+      // Source cwd for the sylo_restart_badge tooltip ("raised by <workspace>"). This
+      // factory re-runs on every session switch, so the env tracks the active workspace.
+      process.env.SYLO_BADGE_SOURCE_CWD = effCwd
+      // Capture Pi's own default thinking level for the stale-`off` self-heal —
+      // this factory re-runs on every session switch, so the captured value
+      // always reflects the current settings.json.
+      piSettingsDefaultThinkingLevel = settingsManager.getDefaultThinkingLevel() ?? null
       // Per-model compaction trigger (Settings → Model (Pi) → Compaction): apply the
       // host-resolved reserveTokens override before the session is created. This factory
       // re-runs on every session switch, so the override always matches the conversation's
@@ -1196,8 +1276,12 @@ async function handleInit(msg: BrokerInit): Promise<void> {
       } catch {
         /* level unsupported by this model — keep Pi default */
       }
+    } else {
+      // No per-chat override: the session must not inherit the previous chat's
+      // (or a poisoned session file's) level. Reset stale `off` to Pi default.
+      await healStaleThinkingOff(session)
     }
-        const resolvedModel = serializeResolvedModel(rt.session, agentDir)
+    const resolvedModel = serializeResolvedModel(rt.session, agentDir)
     process.send?.({ type: 'ready', resolvedModel })
         // Compute and send system prompt stats for the context-window dashboard
     await sendSystemPromptStats()
@@ -1302,6 +1386,11 @@ async function handleSwitchSession(msg: BrokerSwitchSession): Promise<void> {
       } catch {
         /* level unsupported by this model — keep Pi default */
       }
+    } else {
+      // Explicitly empty = "Pi default": a broker shared across conversations must
+      // not carry the previous chat's level — and must self-heal a session file that
+      // was poisoned to `off` by a transient model-resolve miss.
+      await healStaleThinkingOff(session)
     }
     // Report the newly bound model so the host caption updates after a
     // model-changing switch (Pi re-resolves the model on switchSession).
@@ -1982,13 +2071,7 @@ function handleMessage(msg: unknown): void {
     void handleCompactNow(m)
     return
   }
-  if (m.type === 'sylo_think_tank_rpc_result') {
-    // Main → broker IPC already fans out to all process 'message' listeners
-    // (e.g. thinkTankRpc waiters in sylo-host). Do not re-emit here — that
-    // re-enters handleMessage and blows the stack.
-    return
-  }
-  if (m.type === 'sylo_schedule_rpc_result') {
+    if (m.type === 'sylo_schedule_rpc_result') {
     return
   }
   if (m.type === 'sylo_ask_question_result') {

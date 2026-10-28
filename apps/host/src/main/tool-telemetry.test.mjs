@@ -30,8 +30,9 @@ describe('appendPersistedToolEvents', () => {
     assert.equal(entries.length, 3)
     assert.equal(entries[1].ts, 110, 'merged run keeps the opening timestamp')
     assert.equal(entries[1].event.delta, 'Let me check')
-    assert.equal(entries[1].event._textOffset, 0, 'inline placement offset survives')
+        assert.equal(entries[1].event._textOffset, 0, 'inline placement offset survives')
     assert.equal(entries[1].event._mergedDeltas, 3)
+    assert.equal(entries[1].event._endTs, 130, 'last folded delta ts survives for span math')
   })
 
   test('keeps separate thinking blocks apart', () => {
@@ -170,5 +171,19 @@ describe('toolFlushDelayMs', () => {
   test('backs off once the blob is large', () => {
     assert.equal(toolFlushDelayMs(0), 1000)
     assert.equal(toolFlushDelayMs(1024 * 1024), 5000)
+  })
+})
+
+describe('persist merge span markers (issue #42)', () => {
+  test('merged delta carries _endTs across flush boundaries; later rows keep their order', () => {
+    let entries = appendPersistedToolEvents([], [row(100, { type: 'thinking_delta', delta: 'a' })])
+    entries = appendPersistedToolEvents(entries, [row(200, { type: 'thinking_delta', delta: 'b' })])
+    assert.equal(entries[0].event.delta, 'ab')
+    assert.equal(entries[0].event._endTs, 200)
+
+    // End marker arriving after the last delta must not spawn an empty extra row.
+    entries = appendPersistedToolEvents(entries, [row(250, { type: 'thinking_end' })])
+    assert.equal(entries.length, 2)
+    assert.equal(entries[1].event.type, 'thinking_end')
   })
 })

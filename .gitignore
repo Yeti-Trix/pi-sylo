@@ -4,6 +4,9 @@ dist/
 # electron-builder buildResources — icon.png is copied from apps/host/resources
 # by scripts/stage-package.mjs on every installer build.
 /build/
+# Stale root icon leftover (live icon is apps/host/resources/icon.png) —
+# removed by the 2026-10-19 dead-file audit, don't re-track it.
+/sylo-icon.png
 # Generated build metadata (scripts/gen-build-info.mjs — regenerated on install/build)
 apps/host/src/generated/
 .DS_Store

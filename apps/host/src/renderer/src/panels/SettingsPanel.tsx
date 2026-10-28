@@ -622,7 +622,7 @@ export function SettingsPanel({
 
         {/* --- Companion ----------------------------------------------------- */}
         <div className={cn('flex flex-col gap-3.5', activeCat !== 'companion' && 'hidden')}>
-          <CompanionCard onChanged={onChanged} />
+                    <CompanionCard onChanged={onChanged} />
         </div>
 
         {/* --- Extensions ---------------------------------------------------- */}

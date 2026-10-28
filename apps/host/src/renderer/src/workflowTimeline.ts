@@ -236,11 +236,13 @@ export function pushCoalescedTelemetry(
 ): void {
   const last = rows[rows.length - 1]
   if (last && isThinkingDeltaEvent(last.event) && isThinkingDeltaEvent(entry.event)) {
+    const priorEndTs = readStampedEndTs(last.event)
     rows[rows.length - 1] = {
       ts: last.ts,
       event: {
         ...(last.event as Record<string, unknown>),
         delta: readThinkingDelta(last.event) + readThinkingDelta(entry.event),
+        _endTs: Math.max(priorEndTs ?? entry.ts, entry.ts),
       },
     }
     return
@@ -570,15 +572,40 @@ function readTextOffset(ev: unknown): number | null {
 }
 
 /**
+ * Merged thinking-delta rows (persist merge + live coalescer) carry the ts of the LAST
+ * delta folded into the run under `_endTs` — the row itself keeps the FIRST delta's ts
+ * for ordering. Without it a merged run's only end signals are its (possibly late)
+ * `thinking_end` marker or the next non-thinking event, and turns where that marker
+ * never arrives read as 0 ms (issue #42).
+ */
+function readStampedEndTs(ev: unknown): number | null {
+  if (!ev || typeof ev !== 'object') return null
+  const o = ev as Record<string, unknown>
+  return typeof o._endTs === 'number' ? o._endTs : null
+}
+
+/**
  * Walks merged telemetry in chronological order, producing inline segments for the chat bubble.
  *
  * Scheduling assumption: tool runs and reasoning streams interleave naturally, so a tool segment's
  * sort key is its `tool_execution_start` ts. Thinking blocks group contiguous `thinking_*` rows
  * (broken by any other event). A still-streaming reasoning block stays `live: true` until
  * something else is observed, so the renderer can pulse the chevron.
+ *
+ * Reasoning runs opened by a typed `thinking_start` envelope are an exception: they close on
+ * their `thinking_end` marker even when it streams late (observed: `text_start` 70 ms in, then
+ * `thinking_end` 81 s later), because the persisted blob merges deltas into ONE row keeping the
+ * first delta's ts — closing an explicit run at the interruption would pin a real 81 s thought
+ * at "Reasoning 0 ms" (issue #42). Legacy/implicit runs keep the interruption semantics.
+ *
+ * `opts.tailLive`: what to do with a still-open run at the end of the telemetry. Default `true`
+ * (streaming semantics: card stays live). Callers that know the message status pass the real
+ * value; a finished message pins the run at its last observed delta so a completed card never
+ * freezes as a phantom live spinner.
  */
 export function buildAssistantSegments(
   entries: WorkflowStampedEntry[],
+  opts: { tailLive?: boolean } = {},
 ): AssistantSegment[] {
   const sorted = entries.slice().sort((a, b) => a.ts - b.ts || 0)
   const segments: AssistantSegment[] = []
@@ -588,6 +615,8 @@ export function buildAssistantSegments(
     endTs: number
     text: string
     textOffset: number | null
+    /** Opened by a typed `thinking_start` — closes on its `thinking_end` marker, not on events. */
+    explicit: boolean
   }
   let openThink: PendingThink | null = null
   const flushThink = (live: boolean) => {
@@ -620,19 +649,44 @@ export function buildAssistantSegments(
     const t = typeof o.type === 'string' ? o.type : ''
     const offset = readTextOffset(ev)
 
-    if (isThinkingStreamEvent(ev)) {
+        if (isThinkingStreamEvent(ev)) {
+      if (t === 'thinking_start') {
+        // Dangling previous run that never saw its end marker: close it at the last
+        // observed delta (or its start, if deltas never streamed), then this start
+        // opens the next run.
+        if (openThink) flushThink(false)
+        openThink = { startTs: row.ts, endTs: row.ts, text: '', textOffset: offset, explicit: true }
+        continue
+      }
+      if (t === 'thinking_end') {
+        // Authoritative span end — even when it lands after text has started. With
+        // openThink null (stray marker) do nothing: a legacy run already closed at an
+        // interruption; re-opening an empty run here would spawn a phantom card.
+        if (openThink) {
+          openThink.endTs = Math.max(openThink.endTs, row.ts)
+          flushThink(false)
+        }
+        continue
+      }
       const delta = thinkingDeltaText(ev) ?? ''
       if (!openThink) {
-        openThink = { startTs: row.ts, endTs: row.ts, text: delta, textOffset: offset }
+        openThink = { startTs: row.ts, endTs: row.ts, text: delta, textOffset: offset, explicit: false }
       } else {
-        openThink.endTs = row.ts
+        // Merged persisted/live delta rows carry the last folded delta's ts under `_endTs`
+        // (the row itself keeps the FIRST delta's ts for ordering); unfused deltas use
+        // their own row ts.
+        openThink.endTs = Math.max(openThink.endTs, readStampedEndTs(ev) ?? row.ts)
         openThink.text += delta
         if (openThink.textOffset === null) openThink.textOffset = offset
       }
       continue
     }
 
-    flushThink(false)
+    // An interruption closes only IMPLICIT reasoning runs (legacy collapsed envelopes /
+    // start-less deltas — their span genuinely ends at the interruption). Explicit runs
+    // (typed `thinking_start`) survive text/tool events: their `thinking_end` marker is
+    // the only honest duration source once deltas merge at persist time (issue #42).
+    if (openThink && !openThink.explicit) flushThink(false)
 
     if (t === 'tool_execution_start') {
       const id = String(o.toolCallId ?? '')
@@ -727,15 +781,22 @@ export function buildAssistantSegments(
     // Unknown / text_delta / lifecycle envelopes: ignore for inline segments.
   }
 
-  flushThink(true)
+    // Tail: a run whose `thinking_end` never arrived. `tailLive` (default true = today's
+  // streaming semantics) decides whether the card stays a live pulse or pins the span
+  // measured so far — finished messages pass `status === 'streaming'` from the caller.
+  flushThink(opts.tailLive ?? true)
   // Some providers (e.g. Ollama thinking models) emit a follow-on thinking_* span with no deltas
   // (timing-only / lifecycle). Those become empty 0 ms cards next to real thoughts — drop them once
   // finished; keep empty blocks only while still `live` so the in-flight spinner can show.
-  return segments.filter((s) => {
-    if (s.kind !== 'thinking') return true
-    if (s.text.trim()) return true
-    return s.live
-  })
+  return segments
+    .filter((s) => {
+      if (s.kind !== 'thinking') return true
+      if (s.text.trim()) return true
+      return s.live
+    })
+    // Chronological by construction: an explicit run segment is pushed at its (late)
+    // `thinking_end` marker, which can come after tool rows that follow the run in wall time.
+    .sort((a, b) => a.startTs - b.startTs || 0)
 }
 
 /** Same sort order as inline chat interleaving (offset, then start time). */

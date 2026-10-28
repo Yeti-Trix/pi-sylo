@@ -89,10 +89,6 @@ import { CompactionNotice } from './CompactionNotice'
 import type { ConversationPauseSnapshot } from './askQuestionClient'
 import { compactionTriggerLabel } from '../../../shared/compaction-notice'
 import {
-  thinkTankSeatBubbleClass,
-  thinkTankSeatRoleClass,
-} from '../components/think-tank/thinkTankSeatTone'
-import {
   collectToolResultAudios,
   collectToolResultImages,
   toolImageSrc,
@@ -116,15 +112,6 @@ export type ChatMessageRowModel = {
   edited?: number | null
 }
 
-export type ThinkTankBubbleMeta = {
-  seatId: string
-  seatLabel: string
-  seatAgent: string
-  cycle: number
-  stance?: string
-  phase?: 'debate' | 'final_report'
-}
-
 type ChatMessageRowProps = {
   m: ChatMessageRowModel
   liveDeltaForId: string
@@ -136,7 +123,6 @@ type ChatMessageRowProps = {
   onSubagentNotice?: (message: string) => void
   onOpenLogicForgeIoReview?: (runDir: string) => void
   localImageUrl?: (path: string) => string | null
-  thinkTank?: ThinkTankBubbleMeta
   workspaceId?: string
   /** Agent checkpoint (per-turn undo): this assistant reply has a pre-turn
    *  snapshot, so the operator can restore the workspace to before it. */
@@ -237,12 +223,6 @@ function messageRowPropsEqual(prev: ChatMessageRowProps, next: ChatMessageRowPro
   if (prev.subagentTasks !== next.subagentTasks) return false
   if (prev.onSubagentNotice !== next.onSubagentNotice) return false
   if (prev.onOpenLogicForgeIoReview !== next.onOpenLogicForgeIoReview) return false
-  const pc = prev.thinkTank
-  const nc = next.thinkTank
-  if (pc?.seatAgent !== nc?.seatAgent || pc?.seatLabel !== nc?.seatLabel || pc?.cycle !== nc?.cycle) {
-    return false
-  }
-  if (pc?.stance !== nc?.stance) return false
   return segmentOverridesEqualForMessage(prev.segmentOverrides, next.segmentOverrides, nm.id)
 }
 
@@ -1009,7 +989,6 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
   onSubagentNotice,
   onOpenLogicForgeIoReview,
   localImageUrl,
-  thinkTank,
   workspaceId,
   canUndoTurn,
   onUndoTurn,
@@ -1026,7 +1005,10 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
     liveWorkflowForMessage.length > 0 ? { [m.id]: liveWorkflowForMessage } : {}
   const telemetryRows =
     m.role === 'assistant' ? mergedWorkflowTelemetry(m, liveWorkflowMap) : []
-  const segments = m.role === 'assistant' ? buildAssistantSegments(telemetryRows) : []
+  const segments =
+    m.role === 'assistant' ?
+      buildAssistantSegments(telemetryRows, { tailLive: m.status === 'streaming' })
+    : []
   const isStreaming = m.role === 'assistant' && m.status === 'streaming'
   const body =
     m.role === 'assistant' && !m.content && !liveDeltaForId && m.status === 'streaming' ?
@@ -1124,11 +1106,7 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
   )
 
   const roleLabel =
-    thinkTank ?
-      thinkTank.phase === 'final_report' ?
-        `Think Tank · Final · ${thinkTank.seatLabel}`
-      : `Think Tank · C${thinkTank.cycle} · ${thinkTank.seatLabel}`
-    : m.role === 'user' ? 'You'
+    m.role === 'user' ? 'You'
     : m.role === 'assistant' ? 'Assistant'
     : m.role
 
@@ -1148,11 +1126,6 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
     return <CompactionNotice content={m.content} />
   }
 
-  const stanceSuffix =
-    thinkTank?.stance && m.status === 'complete' ?
-      ` · ${thinkTank.stance.replace(/_/g, ' ')}`
-    : null
-
   return (
     <div
       className={cn(chatMsgRow, 'group', m.role === 'user' ? chatMsgRowUser : chatMsgRowAssistant)}
@@ -1165,9 +1138,7 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
         id={editing && m.role === 'user' ? 'sylo-message-edit-box' : undefined}
         className={cn(
           chatMsgBubble,
-          thinkTank ?
-            thinkTankSeatBubbleClass(thinkTank.seatId, thinkTank.seatLabel, thinkTank.seatAgent)
-          : m.role === 'user' ? chatMsgUser
+          m.role === 'user' ? chatMsgUser
           : chatMsgAssistant,
           canEditDrag && 'w-full',
           canEditDrag && editDragOver &&
@@ -1176,9 +1147,8 @@ export const ChatConversationMessageRow = memo(function ChatConversationMessageR
       >
         <div className={chatMsgHead}>
           <div className={chatMsgRoleRow}>
-            <span className={thinkTank ? thinkTankSeatRoleClass(thinkTank.seatId, thinkTank.seatLabel, thinkTank.seatAgent) : undefined}>
+            <span>
               {roleLabel}
-              {stanceSuffix}
             </span>
             {m.role === 'assistant' && isStreaming ?
               <LiveElapsedLabel

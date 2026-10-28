@@ -644,6 +644,13 @@ export const sidebarResizeBtnCollapsed = `${sidebarResizeBtn} w-full`
 export const showAppsStrip =
   'flex w-[22px] shrink-0 cursor-pointer flex-col items-center justify-center gap-2 border-l border-border bg-bg-secondary text-text-muted transition-colors duration-[120ms] hover:bg-[#1e1e1e] hover:text-text-primary'
 
+/** Agent-raised "Restart Required" badge (issue #44): fixed dock at the window's
+ *  bottom-right, visible on every tab, red on dark. Not dismissible — it clears at
+ *  the next launch (the restart it asks for). Cursor-help because the reason lives
+ *  in the tooltip. */
+export const restartRequiredBadge =
+  'fixed bottom-3 right-3 z-50 flex select-none items-center gap-1.5 rounded-lg border border-[rgb(241_106_80/0.45)] bg-[rgb(241_106_80/0.14)] px-3 py-1.5 text-[0.8rem] font-semibold text-[rgb(241_106_80)] shadow-[0_4px_16px_rgb(0_0_0/0.45)] backdrop-blur-[4px]'
+
 export const showAppsStripLabel =
   'font-mono text-[0.66rem] leading-none tracking-[0.18em] [writing-mode:vertical-rl]'
 
@@ -661,7 +668,7 @@ export const sidebarSearchInput =
   'box-border h-8 w-full shrink-0 rounded-md border border-border bg-bg-primary px-2.5 py-1.5 font-[inherit] text-[0.82rem] text-text-primary placeholder:text-text-muted focus:border-accent/55 focus:shadow-[0_0_0_3px_rgb(255_255_255/0.14)] focus:outline-none'
   /* bg-bg-primary (#101010) = inset darker field on the lighter sidebar — Cursor look */
 
-/** Workspace sections (Cursor Projects/Repositories style) */
+/** Sidebar workspace sections (Cursor Projects/Repositories style) */
 export const sidebarWsSection = 'group/ws m-0'
 
 export const sidebarWsSectionSummary =

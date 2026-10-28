@@ -8,29 +8,29 @@ import {
   syloSurfaceRelativePath,
 } from '../../out/test/sylo-surface-protocol.mjs'
 
-const THINK_TANK = '/skill-surface/routes/think-tank/think-tank/index.html'
+const IMAGE_GEN_ROUTE = '/skill-surface/routes/image-gen/image-gen/index.html'
 
 describe('resolveWidgetFetchUrl', () => {
   test('keeps http(s) origin-root paths on the dev server', () => {
     assert.equal(
-      resolveWidgetFetchUrl(THINK_TANK, 'http://127.0.0.1:9240/'),
-      'http://127.0.0.1:9240/skill-surface/routes/think-tank/think-tank/index.html',
+      resolveWidgetFetchUrl(IMAGE_GEN_ROUTE, 'http://127.0.0.1:9240/'),
+      'http://127.0.0.1:9240/skill-surface/routes/image-gen/image-gen/index.html',
     )
   })
 
   test('maps file:// renderer pages onto the skill-surface protocol', () => {
     const base = 'file:///D:/Program%20Repo/pi-sylo/apps/host/out/renderer/index.html'
     assert.equal(
-      resolveWidgetFetchUrl(THINK_TANK, base),
-      'sylo-surface://renderer/skill-surface/routes/think-tank/think-tank/index.html',
+      resolveWidgetFetchUrl(IMAGE_GEN_ROUTE, base),
+      'sylo-surface://renderer/skill-surface/routes/image-gen/image-gen/index.html',
     )
   })
 
   test('ignores a hash on the compiled renderer URL', () => {
-    const base = 'file:///D:/app/out/renderer/index.html#/think-tank'
+    const base = 'file:///D:/app/out/renderer/index.html#/image-gen'
     assert.equal(
-      resolveWidgetFetchUrl(THINK_TANK, base),
-      'sylo-surface://renderer/skill-surface/routes/think-tank/think-tank/index.html',
+      resolveWidgetFetchUrl(IMAGE_GEN_ROUTE, base),
+      'sylo-surface://renderer/skill-surface/routes/image-gen/image-gen/index.html',
     )
   })
 
@@ -50,21 +50,21 @@ describe('resolveWidgetFetchUrl', () => {
 })
 
 describe('syloSurfaceRelativePath', () => {
-  test('accepts a Think Tank fixture URL', () => {
+  test('accepts a route fixture URL', () => {
     assert.equal(
       syloSurfaceRelativePath(
-        'sylo-surface://renderer/skill-surface/routes/think-tank/think-tank/index.html',
+        'sylo-surface://renderer/skill-surface/routes/image-gen/image-gen/index.html',
       ),
-      'skill-surface/routes/think-tank/think-tank/index.html',
+      'skill-surface/routes/image-gen/image-gen/index.html',
     )
   })
 
   test('accepts a relative asset URL under the same route', () => {
-    const html = 'sylo-surface://renderer/skill-surface/routes/think-tank/think-tank/index.html'
+    const html = 'sylo-surface://renderer/skill-surface/routes/image-gen/image-gen/index.html'
     const asset = new URL('./assets/index.js', html).href
     assert.equal(
       syloSurfaceRelativePath(asset),
-      'skill-surface/routes/think-tank/think-tank/assets/index.js',
+      'skill-surface/routes/image-gen/image-gen/assets/index.js',
     )
   })
 

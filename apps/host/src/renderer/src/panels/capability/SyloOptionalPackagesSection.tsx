@@ -90,14 +90,17 @@ export function SyloOptionalPackagesSection({
     [onSaved, pref],
   )
 
-  const enabledCount = SYLO_OPTIONAL_PACKAGES.filter((p) => pref[p.id] === true).length
+  const enabledCount = SYLO_OPTIONAL_PACKAGES.filter((p) => !p.core && pref[p.id] === true).length
+  // Core packages (issue #39) are always on and hidden from the toggle list;
+  // the registry keeps their rows for the broker's extension paths.
+  const toggleablePackages = SYLO_OPTIONAL_PACKAGES.filter((p) => !p.core)
 
   return (
     <section className={cn(capSection, 'flex flex-col', !active && 'hidden')}>
       <div className={capPaneHead}>
         <h2 className={capSectionSummaryTitle}>Sylo built-in packages</h2>
         <span className={capCount}>
-          {enabledCount}/{SYLO_OPTIONAL_PACKAGES.length}
+          {enabledCount}/{toggleablePackages.length}
         </span>
       </div>
       <div className={capSectionBody}>
@@ -105,7 +108,9 @@ export function SyloOptionalPackagesSection({
           First-party <strong>sylo-*</strong> Pi packages shipped in the Sylo repo but{' '}
           <strong>off by default</strong>. Turn one <strong>On</strong> — Sylo runs{' '}
           <code>pip install</code> for its requirements when needed — then <strong>Restart broker</strong>.
-          Uses whatever <code>python</code> is on PATH (no venv managed by Sylo).
+          Uses whatever <code>python</code> is on PATH (no venv managed by Sylo).{' '}
+          <strong>Core</strong> built-ins (terminal bridge, tasks, workflows, chat export, coder) are always{' '}
+          <strong>on</strong> — no toggle, not listed here.
         </p>
         {pythonWarning ?
           <div className={cn(capBanner, capBannerWarn, 'mb-2 whitespace-pre-wrap')}>
@@ -115,11 +120,11 @@ export function SyloOptionalPackagesSection({
         {installNote ?
           <div className={cn(capBanner, capBannerWarn, 'mb-2 whitespace-pre-wrap')}>{installNote}</div>
         : null}
-        {SYLO_OPTIONAL_PACKAGES.length === 0 ?
+        {toggleablePackages.length === 0 ?
           <p className={cn(mutedText, capEmptyNote)}>No built-in packages registered yet.</p>
         : (
           <ul className={rowList}>
-                        {SYLO_OPTIONAL_PACKAGES.map((pkg) => (
+                        {toggleablePackages.map((pkg) => (
               <li key={pkg.id} className={capSkillRow}>
                 {/* Same anatomy as the Downloaded packages cards: mono spec + origin
                     badge + Enable toggle on the headline, description below. */}

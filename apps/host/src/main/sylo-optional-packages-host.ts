@@ -46,7 +46,10 @@ export function enabledOptionalExtensionPaths(
 ): string[] {
   const paths: string[] = []
   for (const pkg of SYLO_OPTIONAL_PACKAGES) {
-    if (!isSyloOptionalPackageEnabled(pref, pkg.id)) continue
+    // Core packages (issue #39) load unconditionally — the pref gates only the
+    // regular toggles. The shared helper is core-aware too; the explicit check
+    // here documents the C2 contract and guards against helper drift.
+    if (!pkg.core && !isSyloOptionalPackageEnabled(pref, pkg.id)) continue
     const abs = resolveSyloOptionalPackageExtensionPath(repoRoot, pkg)
     if (existsSync(abs)) paths.push(abs)
   }

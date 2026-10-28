@@ -61,23 +61,10 @@ export type SkillRouteBridgeOp =
   | 'logicforgeDownloadAllowlistSave'
   | 'logicforgeDownloadPlcStatus'
   | 'logicforgeTemplates'
-  | 'syloWorkflowsList'
+    | 'syloWorkflowsList'
   | 'syloWorkflowRead'
   | 'syloWorkflowSave'
   | 'syloWorkflowDelete'
-  | 'fieldbrainConfigGet'
-  | 'fieldbrainConfigSave'
-  | 'fieldbrainDbCheck'
-  | 'fieldbrainDbMigrate'
-  | 'fieldbrainLogList'
-  | 'fieldbrainDocumentList'
-  | 'fieldbrainBrainList'
-  | 'fieldbrainProjectList'
-  | 'fieldbrainProjectCreate'
-  | 'fieldbrainDbBootstrap'
-  | 'fieldbrainPgvectorGuide'
-  | 'fieldbrainPgvectorInstallFromFolder'
-  | 'fieldbrainPgvectorEnable'
   | 'onenoteAuthStatus'
   | 'onenoteAuthStart'
   | 'onenoteAuthComplete'
@@ -123,24 +110,14 @@ export type SkillRouteBridgeOp =
   | 'videoGenVideoGet'
   | 'videoGenVideoUpdate'
   | 'videoGenVideoDelete'
-  | 'videoGenRevealFile'
-    | 'thinkTankConfigGet'
-  | 'thinkTankConfigSave'
-  | 'thinkTankSessionGet'
-  | 'thinkTankPickReport'
+    | 'videoGenRevealFile'
   | 'tasksSnapshotGet'
   | 'tasksListGet'
   | 'tasksListCreate'
   | 'tasksListDelete'
-  | 'tasksTaskAdd'
+    | 'tasksTaskAdd'
   | 'tasksTaskUpdate'
   | 'tasksTaskDelete'
-  /** Legacy council route UI (pre think-tank rename). */
-  | 'councilConfigGet'
-  | 'councilConfigSave'
-  | 'councilSessionGet'
-  | 'councilSearch'
-  | 'councilPickReport'
 
 export type SkillBridgeMessageFromChild = {
   v: typeof SYLO_WIDGET_BRIDGE_V
@@ -209,23 +186,10 @@ const ROUTE_OPS: ReadonlySet<string> = new Set([
   'logicforgeDownloadAllowlistSave',
   'logicforgeDownloadPlcStatus',
   'logicforgeTemplates',
-  'syloWorkflowsList',
+    'syloWorkflowsList',
   'syloWorkflowRead',
   'syloWorkflowSave',
   'syloWorkflowDelete',
-  'fieldbrainConfigGet',
-  'fieldbrainConfigSave',
-  'fieldbrainDbCheck',
-  'fieldbrainDbMigrate',
-  'fieldbrainLogList',
-  'fieldbrainDocumentList',
-  'fieldbrainBrainList',
-  'fieldbrainProjectList',
-  'fieldbrainProjectCreate',
-  'fieldbrainDbBootstrap',
-  'fieldbrainPgvectorGuide',
-  'fieldbrainPgvectorInstallFromFolder',
-  'fieldbrainPgvectorEnable',
   'onenoteAuthStatus',
   'onenoteAuthStart',
   'onenoteAuthComplete',
@@ -272,23 +236,14 @@ const ROUTE_OPS: ReadonlySet<string> = new Set([
   'videoGenVideoGet',
   'videoGenVideoUpdate',
   'videoGenVideoDelete',
-  'videoGenRevealFile',
-    'thinkTankConfigGet',
-  'thinkTankConfigSave',
-  'thinkTankSessionGet',
-  'thinkTankPickReport',
+    'videoGenRevealFile',
   'tasksSnapshotGet',
   'tasksListGet',
   'tasksListCreate',
   'tasksListDelete',
-  'tasksTaskAdd',
+    'tasksTaskAdd',
   'tasksTaskUpdate',
   'tasksTaskDelete',
-  'councilConfigGet',
-  'councilConfigSave',
-  'councilSessionGet',
-  'councilSearch',
-  'councilPickReport',
 ])
 
 /**
@@ -303,22 +258,6 @@ export async function refreshPersonalBridgeOps(): Promise<void> {
     if (Array.isArray(ops)) for (const o of ops) personalPluginOpsSync.add(String(o))
   } catch {
     /* no personal bundle installed */
-  }
-}
-
-/** Map legacy council route RPC ops to think-tank handlers. */
-export function normalizeSkillRouteBridgeOp(op: SkillRouteBridgeOp): SkillRouteBridgeOp {
-  switch (op) {
-    case 'councilConfigGet':
-      return 'thinkTankConfigGet'
-    case 'councilConfigSave':
-      return 'thinkTankConfigSave'
-    case 'councilSessionGet':
-      return 'thinkTankSessionGet'
-    case 'councilPickReport':
-      return 'thinkTankPickReport'
-    default:
-      return op
   }
 }
 

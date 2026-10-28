@@ -1,7 +1,6 @@
 // Generic Sylo host-plugin loader — manifest-driven (`pi.sylo`), multi-plugin.
 //
-// Contract: .prd/SYLO_HOST_PLUGIN_MANIFEST.md (frozen 2026-09-10, think tank
-// 5fc8416f Phase 1 Step 0). Any installed package whose package.json declares a
+// Contract: .prd/SYLO_HOST_PLUGIN_MANIFEST.md (frozen 2026-09-10). Any installed package whose package.json declares a
 // TOP-LEVEL `pi.sylo` block gets its host plugin loaded at runtime — the host
 // never compiles package code and never gates on package names. Vanilla Pi
 // ignores `pi.sylo` entirely (it reads only the `pi` object), so a package

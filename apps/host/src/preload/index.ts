@@ -1249,26 +1249,6 @@ contextBridge.exposeInMainWorld('sylo', {
     }) => ipcRenderer.invoke('syloWorkflows:workflowSave', payload),
     syloWorkflowDelete: (payload: { id: string; agent_dir?: string }) =>
       ipcRenderer.invoke('syloWorkflows:workflowDelete', payload),
-    fieldbrainConfigGet: () => ipcRenderer.invoke('fieldbrain:configGet'),
-    fieldbrainConfigSave: (payload: Record<string, unknown>) =>
-      ipcRenderer.invoke('fieldbrain:configSave', payload),
-    fieldbrainDbCheck: () => ipcRenderer.invoke('fieldbrain:dbCheck'),
-    fieldbrainDbMigrate: () => ipcRenderer.invoke('fieldbrain:dbMigrate'),
-    fieldbrainLogList: () => ipcRenderer.invoke('fieldbrain:logList'),
-    fieldbrainDocumentList: (payload?: Record<string, unknown>) =>
-      ipcRenderer.invoke('fieldbrain:documentList', payload ?? {}),
-    fieldbrainBrainList: (payload: Record<string, unknown>) =>
-      ipcRenderer.invoke('fieldbrain:brainList', payload),
-    fieldbrainProjectList: () => ipcRenderer.invoke('fieldbrain:projectList'),
-    fieldbrainProjectCreate: (payload: Record<string, unknown>) =>
-      ipcRenderer.invoke('fieldbrain:projectCreate', payload),
-    fieldbrainDbBootstrap: (payload: Record<string, unknown>) =>
-      ipcRenderer.invoke('fieldbrain:dbBootstrap', payload),
-    fieldbrainPgvectorGuide: () => ipcRenderer.invoke('fieldbrain:pgvectorGuide'),
-    fieldbrainPgvectorInstallFromFolder: (payload: Record<string, unknown>) =>
-      ipcRenderer.invoke('fieldbrain:pgvectorInstallFromFolder', payload),
-    fieldbrainPgvectorEnable: (payload: Record<string, unknown>) =>
-      ipcRenderer.invoke('fieldbrain:pgvectorEnable', payload),
     onenoteAuthStatus: () => ipcRenderer.invoke('onenote:authStatus'),
     onenoteAuthStart: () => ipcRenderer.invoke('onenote:authStart'),
     onenoteAuthComplete: () => ipcRenderer.invoke('onenote:authComplete'),
@@ -1450,28 +1430,6 @@ contextBridge.exposeInMainWorld('sylo', {
       ipcRenderer.invoke('logicforge:downloadPlcStatus', ip),
     templates: (op: string, payload?: Record<string, unknown>) =>
       ipcRenderer.invoke('logicforge:templates', op, payload ?? {}),
-  },
-  fieldbrain: {
-    configGet: () => ipcRenderer.invoke('fieldbrain:configGet'),
-    configSave: (payload: Record<string, unknown>) =>
-      ipcRenderer.invoke('fieldbrain:configSave', payload),
-    dbCheck: () => ipcRenderer.invoke('fieldbrain:dbCheck'),
-    dbMigrate: () => ipcRenderer.invoke('fieldbrain:dbMigrate'),
-    logList: () => ipcRenderer.invoke('fieldbrain:logList'),
-    documentList: (payload?: Record<string, unknown>) =>
-      ipcRenderer.invoke('fieldbrain:documentList', payload ?? {}),
-    brainList: (payload: Record<string, unknown>) =>
-      ipcRenderer.invoke('fieldbrain:brainList', payload),
-    projectList: () => ipcRenderer.invoke('fieldbrain:projectList'),
-    projectCreate: (payload: Record<string, unknown>) =>
-      ipcRenderer.invoke('fieldbrain:projectCreate', payload),
-    dbBootstrap: (payload: Record<string, unknown>) =>
-      ipcRenderer.invoke('fieldbrain:dbBootstrap', payload),
-    pgvectorGuide: () => ipcRenderer.invoke('fieldbrain:pgvectorGuide'),
-    pgvectorInstallFromFolder: (payload: Record<string, unknown>) =>
-      ipcRenderer.invoke('fieldbrain:pgvectorInstallFromFolder', payload),
-    pgvectorEnable: (payload: Record<string, unknown>) =>
-      ipcRenderer.invoke('fieldbrain:pgvectorEnable', payload),
   },
   onenote: {
     authStatus: () => ipcRenderer.invoke('onenote:authStatus'),
@@ -1852,6 +1810,15 @@ contextBridge.exposeInMainWorld('sylo', {
       return () => ipcRenderer.removeListener('subagents:lifecycle', ch)
     },
   },
+    // ── Restart Required badge (issue #44) ──
+  restartBadge: {
+    status: () => ipcRenderer.invoke('restart-badge:status') as Promise<unknown>,
+    onChanged: (cb: (payload: unknown) => void) => {
+      const ch = (_e: unknown, payload: unknown) => cb(payload)
+      ipcRenderer.on('restart-badge:changed', ch)
+      return () => ipcRenderer.removeListener('restart-badge:changed', ch)
+    },
+  },
   // ── Agent checkpoints (per-turn undo; storage in app data only) ──
   checkpoints: {
     list: (conversationId: string) =>
@@ -1874,36 +1841,7 @@ contextBridge.exposeInMainWorld('sylo', {
         { ok: true; restored: number; removed: number } | { ok: false; error: string }
       >,
   },
-  thinkTank: {
-    sessionGet: (sessionId: string) => ipcRenderer.invoke('thinkTank:sessionGet', sessionId),
-    listForConversation: (conversationId: string) =>
-      ipcRenderer.invoke('thinkTank:listForConversation', conversationId) as Promise<
-        Array<Record<string, unknown>>
-      >,
-    configGet: () => ipcRenderer.invoke('thinkTank:configGet'),
-    configSave: (values: Record<string, unknown>) =>
-      ipcRenderer.invoke('thinkTank:configSave', values) as Promise<
-        { ok: true } | { ok: false; error: string }
-      >,
-    pickReport: (sessionId: string, reportId: string) =>
-      ipcRenderer.invoke('thinkTank:pickReport', sessionId, reportId) as Promise<
-        { ok: true; selectedReportId: string } | { ok: false; error: string }
-      >,
-    inject: (sessionId: string, text: string) =>
-      ipcRenderer.invoke('thinkTank:inject', sessionId, text) as Promise<
-        { ok: true; pendingCount: number } | { ok: false; error: string }
-      >,
-    abort: (sessionId: string) =>
-      ipcRenderer.invoke('thinkTank:abort', sessionId) as Promise<
-        { ok: true } | { ok: false; error: string }
-      >,
-    onLifecycle: (cb: (payload: unknown) => void) => {
-      const ch = (_e: unknown, payload: unknown) => cb(payload)
-      ipcRenderer.on('thinkTank:lifecycle', ch)
-      return () => ipcRenderer.removeListener('thinkTank:lifecycle', ch)
-    },
-  },
-  updates: {
+    updates: {
     status: () => ipcRenderer.invoke('updates:status') as Promise<AppUpdateStatus>,
     checkNow: () => ipcRenderer.invoke('updates:checkNow') as Promise<AppUpdateStatus>,
     onChanged: (cb: (payload: AppUpdateStatus) => void) => {

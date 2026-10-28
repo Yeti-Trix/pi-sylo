@@ -180,6 +180,14 @@ export function App(): React.ReactElement {
   const [liveWorkflow, setLiveWorkflow] = useState<Record<string, WorkflowStampedEntry[]>>({})
   const [segmentOverrides, setSegmentOverrides] = useState<Record<string, boolean>>({})
   const [composer, setComposer] = useState('')
+  // Chat windowing (perf): the DB returns the FULL conversation and the list is
+  // memo'd, but every broker refresh hands the renderer fresh row objects, re-
+  // diffing every row per event — and this chat logs hundreds of report-length
+  // rows. Render only the newest RENDER_WINDOW rows; scrolling toward the top
+  // grows the window by RENDER_STEP with a scroll-anchor so the viewport holds.
+  const RENDER_WINDOW = 10
+  const RENDER_STEP = 10
+  const [renderLimit, setRenderLimit] = useState(RENDER_WINDOW)
   const [chatAttachments, setChatAttachments] = useState<ChatAttachment[]>([])
   const [attachBusy, setAttachBusy] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -250,11 +258,13 @@ export function App(): React.ReactElement {
     })()
   }, [])
 
-  const loadWorkspaces = useCallback(async () => {
+    const loadWorkspaces = useCallback(async () => {
     const st = await fetchWorkspaces()
     setWorkspaces(st.workspaces)
-    setWorkspaceId(st.activeWorkspaceId)
-    return st.activeWorkspaceId
+    // Fall back to the first workspace when the server has no recorded active
+    // one ( Thor/Odin host after a fresh point) so New chat / chat list work.
+    setWorkspaceId(st.activeWorkspaceId || st.workspaces[0]?.id || '')
+    return st.activeWorkspaceId || st.workspaces[0]?.id || ''
   }, [])
 
   const loadConversations = useCallback(async (wid: string, opts?: { silent?: boolean }) => {
@@ -337,6 +347,12 @@ export function App(): React.ReactElement {
     await refreshPersonalManifest()
   }, [refreshBroker, loadConversations, loadMessages, refreshPersonalManifest])
 
+  // Stable identity for the memo'd rows: an inline arrow here would defeat
+  // ChatConversationMessageRow's memo on EVERY App render (every keystroke).
+  const handleSegmentToggle = useCallback((key: string, next: boolean) => {
+    setSegmentOverrides((prev) => ({ ...prev, [key]: next }))
+  }, [])
+
   const scrollChatToBottom = useCallback(() => {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
@@ -382,6 +398,7 @@ export function App(): React.ReactElement {
     setMessageQueue([])
     flushQueueLockRef.current = false
     prevAgentActiveRef.current = false
+    setRenderLimit(RENDER_WINDOW)
   }, [activeId])
 
   useEffect(() => {
@@ -548,9 +565,13 @@ export function App(): React.ReactElement {
     }
   }
 
-  const handleNewChat = async () => {
-    if (!workspaceId) return
+    const handleNewChat = async () => {
+    if (!workspaceId) {
+      setAuthError('No workspace selected — pick one from the dropdown, then retry.')
+      return
+    }
     setBusy(true)
+    setAuthError(null)
     try {
       const reuseId = await findLatestEmptyConversation(workspaceId)
       if (reuseId) {
@@ -561,6 +582,8 @@ export function App(): React.ReactElement {
       const conv = await createConversation('', workspaceId)
       await loadConversations(workspaceId)
       setActiveId(conv.id)
+    } catch (e) {
+      setAuthError(e instanceof Error ? e.message : String(e))
     } finally {
       setBusy(false)
     }
@@ -1238,18 +1261,27 @@ export function App(): React.ReactElement {
           const el = scrollRef.current
           if (!el) return
           stickToBottomRef.current = isChatAreaNearBottom(el)
+          // Grow the window toward older history as the operator nears the top,
+          // then anchor the viewport to the same content it was reading.
+          if (el.scrollTop < 480 && renderLimit < messages.length) {
+            const prevHeight = el.scrollHeight
+            const prevTop = el.scrollTop
+            setRenderLimit((r) => Math.min(r + RENDER_STEP, messages.length))
+            requestAnimationFrame(() => {
+              const anchor = scrollRef.current
+              if (anchor) anchor.scrollTop = anchor.scrollHeight - prevHeight + prevTop
+            })
+          }
         }}
       >
-        {messages.map((m) => (
+        {messages.slice(-renderLimit).map((m) => (
           <ChatConversationMessageRow
             key={m.id}
             m={m}
             liveDeltaForId={liveDelta[m.id] ?? ''}
             liveWorkflowForMessage={liveWorkflow[m.id] ?? []}
             segmentOverrides={segmentOverrides}
-            onSegmentToggle={(key, next) =>
-              setSegmentOverrides((prev) => ({ ...prev, [key]: next }))
-            }
+            onSegmentToggle={handleSegmentToggle}
             localImageUrl={companionLocalImageUrl}
           />
         ))}

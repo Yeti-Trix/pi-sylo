@@ -234,11 +234,85 @@ describe('buildAssistantSegments compaction', () => {
         summary: 'Earlier we fixed meal logging.',
       }),
     ])
-    assert.equal(segs.length, 1)
+        assert.equal(segs.length, 1)
     assert.equal(segs[0].kind, 'compaction')
     assert.equal(segs[0].live, false)
     assert.equal(segs[0].tokensBefore, 72000)
     assert.equal(segs[0].summary, 'Earlier we fixed meal logging.')
     assert.equal(segs[0].endTs, 14_500)
+  })
+})
+
+describe('buildAssistantSegments reasoning durations (issue #42)', () => {
+  // Exact shape from a real completed turn: one reasoning block whose deltas merged
+  // at persist time into one row stamped with the FIRST delta's ts, `text_start` 70 ms
+  // in, and `thinking_end` ~81 s later — after the old interruption rule had already
+  // sealed the run at 0 ms.
+  test('late thinking_end after text_start yields the real span, not 0 ms', () => {
+    const entries = [
+      row(900, { type: 'agent_start' }),
+      row(1_000, { type: 'thinking_start' }),
+      row(1_000, { type: 'thinking_delta', delta: 'deep thought', _textOffset: 0 }),
+      row(70_000, { type: 'message_update', assistantType: 'text_start' }),
+      row(82_000, { type: 'thinking_end', _textOffset: 3694 }),
+      row(82_000, { type: 'message_update', assistantType: 'text_end', _textOffset: 3694 }),
+    ]
+    const segs = buildAssistantSegments(entries, { tailLive: false })
+    const thoughts = segs.filter((s) => s.kind === 'thinking')
+    assert.equal(thoughts.length, 1, 'no phantom empty card from the late end marker')
+    assert.equal(thoughts[0].live, false)
+    assert.equal(thoughts[0].startTs, 1_000)
+    assert.equal(thoughts[0].endTs, 82_000)
+    assert.equal(thoughts[0].text, 'deep thought')
+  })
+
+  test('stamped _endTs pins the span when the thinking_end marker never arrives', () => {
+    const entries = [
+      row(1_000, { type: 'thinking_start' }),
+      row(1_000, { type: 'thinking_delta', delta: 'plan', _endTs: 2_444, _textOffset: 0 }),
+      row(3_000, { type: 'message_update', assistantType: 'text_start' }),
+    ]
+    const segs = buildAssistantSegments(entries, { tailLive: false })
+    const think = segs.find((s) => s.kind === 'thinking')
+    assert.ok(think)
+    assert.equal(think.live, false)
+    assert.equal(think.endTs, 2_444)
+  })
+
+  test('unterminated run: streaming message stays live, finished message pins at last delta', () => {
+    // Legacy already-persisted blobs have no _endTs — the honest span is unrecoverable,
+    // so a finished message degenerates to its first-delta ts (0 ms floor; accepted —
+    // the data does not exist). New turns carry _endTs from the persist/coalesce merge.
+    const entries = [
+      row(1_000, { type: 'thinking_start' }),
+      row(1_000, { type: 'thinking_delta', delta: 'plan', _textOffset: 0 }),
+      row(3_000, { type: 'message_update', assistantType: 'text_start' }),
+    ]
+    const liveSegs = buildAssistantSegments(entries, { tailLive: true })
+    const live = liveSegs.find((s) => s.kind === 'thinking')
+    assert.equal(live.live, true)
+    assert.equal(live.endTs, null)
+
+    const done = buildAssistantSegments(entries, { tailLive: false })
+    const finished = done.find((s) => s.kind === 'thinking')
+    assert.equal(finished.live, false)
+    assert.equal(finished.endTs, finished.startTs)
+  })
+
+  test('legacy implicit run still closes at the first interruption', () => {
+    // Start-less typed deltas (blob head trimmed / start marker absent) open an IMPLICIT
+    // run: it closes at the next non-thinking event as before. (Legacy collapsed
+    // `message_update` thinking envelopes carry no text and are dropped by the empty filter.)
+    const entries = [
+      row(1_000, { type: 'thinking_delta', delta: 'legacy' }),
+      row(1_500, { type: 'thinking_delta', delta: ' more' }),
+      row(2_000, { type: 'tool_execution_start', toolCallId: 't1', toolName: 'grep' }),
+    ]
+    const segs = buildAssistantSegments(entries, { tailLive: false })
+    const think = segs.find((s) => s.kind === 'thinking')
+    assert.ok(think)
+    assert.equal(think.startTs, 1_000)
+    assert.equal(think.endTs, 1_500)
+    assert.equal(think.text, 'legacy more')
   })
 })

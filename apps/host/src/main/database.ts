@@ -16,11 +16,6 @@ import {
 } from '../shared/sylo-capability-paths.js'
 import { migrateSubagentTasksSchema } from './subagent-tasks-db.js'
 import { deleteWebAccessRunsForConversation, migrateWebAccessSchema } from './web-access-db.js'
-import {
-  deleteThinkTankSessionsForConversation,
-  finalizeOrphanThinkTankSessions,
-  migrateThinkTankSchema,
-} from './think-tank-db.js'
 import { dropLegacyScheduledPromptsFromMainDb } from './workspace-db.js'
 import {
   parseSubagentPins,
@@ -253,10 +248,8 @@ export function openDatabase(userDataPath: string, syloRepoRoot?: string): Datab
   migrateSubagentTasksSchema()
   migrateWebAccessSchema()
   initOperatorEnv()
-  dropLegacyPersonalTablesFromMainDb(d)
-  migrateThinkTankSchema()
-  finalizeOrphanThinkTankSessions('Interrupted by app restart')
-    dropLegacyScheduledPromptsFromMainDb(d)
+    dropLegacyPersonalTablesFromMainDb(d)
+  dropLegacyScheduledPromptsFromMainDb(d)
   // Dev sylo workspace is no longer auto-created; the operator adds workspaces
   // manually (including the pi-sylo repo when developing Sylo itself).
   return d
@@ -1455,17 +1448,15 @@ export function deleteConversation(id: string): void {
     const children = d
       .prepare('SELECT id FROM conversations WHERE parent_conversation_id = ?')
       .all(id) as { id: string }[]
-    for (const c of children) {
+        for (const c of children) {
       deleteWebAccessRunsForConversation(c.id, d)
-      deleteThinkTankSessionsForConversation(c.id, d)
       if (tableExists(d, 'agent_tasks')) {
         d.prepare('DELETE FROM agent_tasks WHERE conversation_id = ?').run(c.id)
       }
       d.prepare('DELETE FROM messages WHERE conversation_id = ?').run(c.id)
       d.prepare('DELETE FROM conversations WHERE id = ?').run(c.id)
     }
-    deleteWebAccessRunsForConversation(id, d)
-    deleteThinkTankSessionsForConversation(id, d)
+        deleteWebAccessRunsForConversation(id, d)
     if (tableExists(d, 'agent_tasks')) {
       d.prepare('DELETE FROM agent_tasks WHERE conversation_id = ?').run(id)
     }

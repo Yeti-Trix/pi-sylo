@@ -104,6 +104,16 @@ export type BrokerOutMessage =
       workspaceKey?: string
     }
   | {
+      /** Agent-raised "Restart Required" badge (issue #44): main persists a marker in
+       *  userData/sylo-data, fans `restart-badge:changed` to the renderer, and the badge
+       *  clears at next launch only. */
+      type: 'sylo_restart_badge'
+      toolCallId?: string
+      reason: string
+      source?: string
+      ts?: number
+    }
+  | {
       type: 'sylo_subagent'
       turnId?: string
       event: Record<string, unknown>
@@ -112,21 +122,6 @@ export type BrokerOutMessage =
       type: 'sylo_web_access'
       turnId?: string
       event: Record<string, unknown>
-    }
-  | {
-      type: 'sylo_think_tank'
-      turnId?: string
-      event: Record<string, unknown>
-    }
-  | {
-      type: 'sylo_think_tank_rpc'
-      turnId?: string
-      requestId: string
-      op: string
-      sessionId?: string
-      reportId?: string
-      query?: string
-      limit?: number
     }
   | {
       /** sylo_runs_list (F2): agent asks for the workspace presence/runs snapshot. */
@@ -291,6 +286,8 @@ export interface BrokerConfig {
   imageFallbackExtension?: string
   /** Repo path to sylo-canvas-sketch (canvas_sketch tool: pull the draw-area sketch into chat). */
   canvasSketchExtension?: string
+  /** Repo path to sylo-restart-badge (sylo_restart_badge tool: agent raises the Reload-pending badge). */
+  restartBadgeExtension?: string
   /** Terminal bridge state file (SYLO_TERMINAL_BRIDGE_FILE for sylo-terminal-bridge). Null = not bridged. */
   terminalBridgeFile: string | null
   /** Repo path to sylo-compaction-anchor (restate live request after context compaction). */
@@ -311,13 +308,11 @@ export interface BrokerConfig {
   webAccessConfigPath?: string
   /** Absolute path to sylo-tts config JSON for the broker child (optional). */
   ttsConfigPath?: string
-  /** Absolute path to sylo-think-tank config JSON for the broker child (optional). */
-  thinkTankConfigPath?: string
   /** Absolute path to sylo-image-gen config JSON for the broker child (optional). */
   imagegenConfigPath?: string
   /** Absolute path to sylo-video-gen config JSON for the broker child (optional). */
   videogenConfigPath?: string
-  /** Settings → image model for think-tank seat vision fallback (Ollama id). */
+  /** Settings → image model (Ollama id) for the main-chat image fallback. */
   imageModelId?: string
   imageModelProvider?: string
   ollamaBaseOrigin?: string
@@ -434,7 +429,6 @@ export class BrokerSupervisor {
       optionalExtensionPaths: cfg.optionalExtensionPaths,
       webAccessConfigPath: cfg.webAccessConfigPath,
       ttsConfigPath: cfg.ttsConfigPath,
-      thinkTankConfigPath: cfg.thinkTankConfigPath,
       imagegenConfigPath: cfg.imagegenConfigPath,
       videogenConfigPath: cfg.videogenConfigPath,
       imageModelId: cfg.imageModelId,
@@ -508,16 +502,13 @@ export class BrokerSupervisor {
           { SYLO_WEB_ACCESS_CONFIG: this.cfg.webAccessConfigPath }
         : {}),
         ...(this.cfg.ttsConfigPath ? { SYLO_TTS_CONFIG: this.cfg.ttsConfigPath } : {}),
-        ...(this.cfg.thinkTankConfigPath ?
-          { SYLO_THINK_TANK_CONFIG: this.cfg.thinkTankConfigPath }
-        : {}),
         ...(this.cfg.imagegenConfigPath ?
           { SYLO_IMAGEGEN_CONFIG: this.cfg.imagegenConfigPath }
         : {}),
         // sylo-video-gen (plan §5.1, §8 step 7): host-owned config path → the
         // extension's config chain (extensions/config.ts), injected ONLY when
         // the package is enabled (videogenConfigEnvPath gate). Same shape as
-        // the imagegen/tts/think-tank injections above.
+        // the imagegen/tts injections above.
         ...(this.cfg.videogenConfigPath ?
           { SYLO_VIDEOGEN_CONFIG: this.cfg.videogenConfigPath }
         : {}),
@@ -537,6 +528,9 @@ export class BrokerSupervisor {
         : {}),
         ...(this.cfg.canvasSketchExtension ?
           { SYLO_CANVAS_SKETCH_EXTENSION: this.cfg.canvasSketchExtension }
+        : {}),
+        ...(this.cfg.restartBadgeExtension ?
+          { SYLO_RESTART_BADGE_EXTENSION: this.cfg.restartBadgeExtension }
         : {}),
         ...(this.cfg.canvasSketchPath ? { SYLO_CANVAS_SKETCH_PATH: this.cfg.canvasSketchPath } : {}),
         SYLO_PI_BUILTIN_TOOLS: JSON.stringify(

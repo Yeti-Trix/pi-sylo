@@ -23,7 +23,7 @@ This guide is for **you** running Sylo on your own machine — not for internal 
 | Install community packages | [Packages](#install-packages) |
 | Built-in Sylo extensions (subagents, widgets, …) | [Built-in Sylo extensions](#built-in-sylo-extensions) |
 | Subagent delegation (inline in chat) | [Subagent delegation](#subagent-delegation) |
-| Sylo optional packages (bundled, off by default) | [Sylo optional packages](#sylo-optional-packages) |
+| Sylo optional packages (5 always-on core + 4 toggles) | [Sylo optional packages](#sylo-optional-packages) |
 | Create or attach a skill | [Skills](#skills) |
 | Add tools (extensions) | [Extensions](#extensions) |
 | Sidebar HTML app | [Sidebar UI (routes)](#sidebar-ui-routes) |
@@ -192,7 +192,7 @@ Resolution order for a subagent run: **this workspace's pin → the Global SubAg
 
 ## Sylo optional packages
 
-Sylo ships extra **sylo-*** Pi packages in the repo (extension + skill + helper scripts). They are **off by default** so the agent tool list stays small. The **sylo-** name is branding; some packages use Sylo sidebar UI later, others work in chat only.
+Sylo ships extra **sylo-*** Pi packages in the repo (extension + skill + helper scripts). **5 are always-on core** — Terminal bridge, Tasks, Workflows, Chat export, Coder: they load in every chat and are hidden from the Capability manager toggle list (no on/off). The remaining **4 bundled packages are off by default** so the agent tool list stays small: **Speech, Think Tank, Image studio, Video studio**. **PDF reader, DOCX, and Spreadsheet** are no longer bundled — they live in operator **personal packages** by local path (see below). The **sylo-** name is branding; some packages use Sylo sidebar UI later, others work in chat only.
 
 **Enable one**
 
@@ -208,11 +208,11 @@ One-time from the Sylo repo (skills only):
 npm run bootstrap-pi
 ```
 
-**PDF reader:** enable **PDF reader** → restart broker → in chat, use the **pdf-reader** skill: search PDF text first, one full-page render to locate the sheet, then **region crop + OCR** for wire numbers (enable **Supports vision** on your model in Settings). Previews appear as **PDF page preview** or **PDF region preview** (from your uploaded PDF), not web article images. Region OCR needs **Tesseract** installed on the PC (Windows installer or `choco install tesseract`).
+**Personal packages — PDF reader / DOCX / Spreadsheet:** these three are extracted from the Sylo repo (issue #39) and install as **Personal packages** by local path. Install once: add `"..\\..\\Documents\\GitHub\\sylo-pdf-reader"`, `"..\\..\\Documents\\GitHub\\sylo-docx"`, and `"..\\..\\Documents\\GitHub\\sylo-spreadsheet"` to `packages` in `~/.pi/agent/settings.json` (or `pi install ..\\..\\Documents\\GitHub\\sylo-pdf-reader`), then run `pip install -r scripts/requirements.txt` from the **PDF reader** and **Spreadsheet** repo folders. **DOCX** needs **Pandoc** instead — `winget install --id JohnMacFarlane.Pandoc` (the package's `scripts/post-enable.py` does the same for bundled enables).
 
-**Spreadsheet:** enable **Spreadsheet** to read **`.xlsx`** and **`.ods`** via **`read_spreadsheet`** (`spreadsheet` skill). Returns sheet names, headers, and rows (default 200 data rows). Use Pi **`read`** for **`.csv`**. Write/export is not available yet.
-
-**DOCX:** enable **DOCX** for Word **`.docx`** read and write (`docx` skill). **`read_docx`** returns title, headings outline, and paragraphs in order with `[image: ...]` markers; **`extract_docx_images`** saves embedded pictures with caption/context anchors. **`render_docx`** converts markdown to a styled `.docx` via Pandoc (install Pandoc: `winget install --id JohnMacFarlane.Pandoc`). Read tools never edit your source file; re-render with `overwrite: true` to replace an output you created.
+- **PDF reader** (`pdf-reader` skill): in chat, search PDF text first, one full-page render to locate the sheet, then **region crop + OCR** for wire numbers (enable **Supports vision** on your model in Settings). Previews appear as **PDF page preview** or **PDF region preview** (from your uploaded PDF), not web article images. Region OCR needs **Tesseract** installed on the PC (Windows installer or `choco install tesseract`).
+- **Spreadsheet** (`spreadsheet` skill): read **`.xlsx`** and **`.ods`** via **`read_spreadsheet`** — sheet names, headers, and rows (default 200 data rows). Use Pi **`read`** for **`.csv`**.
+- **DOCX** (`docx` skill): **`read_docx`** returns title, headings outline, and paragraphs in order with `[image: ...]` markers; **`extract_docx_images`** saves embedded pictures with caption/context anchors; **`render_docx`** converts markdown to a styled `.docx` via Pandoc. Read tools never edit your source file; re-render with `overwrite: true` to replace an output you created.
 
 
 
@@ -222,7 +222,7 @@ npm run bootstrap-pi
 
 **Web access:** enable **Web access** for privacy-first search/fetch (`web-access` skill). Sylo runs **`pip install`** for Crawl4AI, ddgs, and **youtube-transcript-api** when you turn the package on (headless browser for JS-heavy pages). After `npm run bootstrap-pi`, the skill appears under **Capability manager → Skills**. Restart broker → use `sylo_web_search`, `sylo_web_fetch`, and **`sylo_youtube_transcript`** (YouTube captions — not web_fetch on watch URLs) in chat. With a **vision-capable** model, results can include source link citations plus optional preview images (F1) or viewport screenshots after headless fetch (F2). **Ollama** only accepts **PNG/JPEG** in tool results — WebP/AVIF previews are skipped automatically. Open the **Web access** sidebar tab (under **Tools**) for history, stats, and settings — including **rank/rewrite model dropdowns** (same Ollama server as **Settings → Model**; pick a smaller model for rewrite to speed up search).
 
-**Think Tank:** enable **Think Tank** (`think-tank` skill) for multi-model debate (`sylo_think_tank_run`, min 2 / max 10 cycles, three final reports; the **Moderator** report is the decision brief — no winner pick needed). Open the **Think Tank** sidebar tab (Dashboards section) → **Settings** to assign each seat a **Pi provider + model** (same options as **Settings → Model (Pi)** — Ollama dropdown from your server, or OpenAI/Anthropic/Groq model ids). Leave provider empty to use Pi defaults for that seat. Trigger from chat: `Think Tank: …` or `send to think tank …`. Config file: `%AppData%\@sylo\host\sylo-think-tank\config.json` (Windows).
+**Multi-model debate (subagents + workflow):** there is no dedicated think-tank package anymore (removed 2026-10-27). For adversarial multi-perspective research, use **Tools → Workflows → “Think tank (subagents) → Send to agent”**: the agent stages context, runs an evidence researcher and a skeptic through `subagent` runs, then a Moderator synthesis — the decision brief. Persona files live in `~/.pi/agent/agents/think-tank-*.md`; pin a different provider+model per persona in **Developer → Settings → Subagents** for genuine multi-model debates.
 
 **News / Reddit:** these ship as an example **operator tool bundle** (installed via `packages` in `~/.pi/agent/settings.json`), not as bundled optional packages — the same install pattern any community Pi package uses.
 
@@ -230,7 +230,7 @@ npm run bootstrap-pi
 
 **Research mining:** workspace skill in **Agentic Engineering** (`.pi/skills/research-mining/`). Weekly sweep mines r/LocalLLaMA + r/aiagents (+ web) for ideas that could improve Sylo, grades each candidate 0-10 against sylo-dev trackers, writes 8+ survivors to `proposals/`. Orchestrates **`sylo_reddit_***` (Reddit enabled) and **`sylo_web_***` (Web access enabled). Cadence: **Schedules** tab in that workspace (weekly). Manual trigger: `do research-mining`. Nothing becomes a feature tracker until you accept it.
 
-Later you can `npm publish` the same packages and install with `pi install npm:sylo-pdf-reader` on any Pi host.
+Later you can `npm publish` the same packages and install them with `pi install npm:<package-name>` on any Pi host.
 
 ---
 

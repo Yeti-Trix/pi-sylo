@@ -19,15 +19,32 @@ const ORIGIN = process.env.OLLAMA_ORIGIN ?? 'http://127.0.0.1:11434'
 // Tool names + descriptions come from the extension sources so the payload reflects what
 // Sylo actually registers rather than a hand-written stand-in.
 const SOURCES = [
-  'packages/sylo-pdf-reader/extensions/index.ts',
-  'packages/sylo-docx/extensions/index.ts',
-  'packages/sylo-spreadsheet/extensions/index.ts',
-  'packages/sylo-web-access/extensions/index.ts',
-  'packages/sylo-workflows/extensions/index.ts',
-  'packages/sylo-coder/extensions/index.ts',
-  'packages/sylo-think-tank/extensions/index.ts',
-  'packages/sylo-chat-export/extensions/index.ts',
+    // Bundled sylo-* packages after issue #39: 5 always-on core + 3 visible
+  // toggles. sylo-pdf-reader / sylo-docx / sylo-spreadsheet / sylo-web-access
+  // are fully extracted to operator-local personal repos (monorepo folders
+  // deleted; install via ~/.pi/agent/settings.json `packages`); sylo-think-tank
+  // removed entirely (issue #41 — replaced by subagents + saved workflow).
+  // — 5 always-on core —
+  'packages/sylo-terminal-bridge/extensions/index.ts',
   'packages/sylo-tasks/extensions/index.ts',
+  'packages/sylo-workflows/extensions/index.ts',
+  'packages/sylo-chat-export/extensions/index.ts',
+  'packages/sylo-coder/extensions/index.ts',
+    // — 3 visible toggles (off by default on new install) —
+  'packages/sylo-tts/extensions/index.ts',
+  'packages/sylo-image-gen/extensions/tools/generate.ts',
+  'packages/sylo-image-gen/extensions/tools/doctor.ts',
+  'packages/sylo-image-gen/extensions/tools/get.ts',
+  'packages/sylo-image-gen/extensions/tools/list.ts',
+  'packages/sylo-image-gen/extensions/tools/organize.ts',
+  'packages/sylo-image-gen/extensions/tools/v2-scaffold.ts',
+  'packages/sylo-video-gen/extensions/tools/generate.ts',
+  'packages/sylo-video-gen/extensions/tools/doctor.ts',
+  'packages/sylo-video-gen/extensions/tools/get.ts',
+  'packages/sylo-video-gen/extensions/tools/list.ts',
+  'packages/sylo-video-gen/extensions/tools/organize.ts',
+  'packages/sylo-video-gen/extensions/tools/v2-scaffold.ts',
+  // — host-side surfaces (always loaded) —
   'packages/skill-surface-extension/src/index.ts',
   'packages/sylo-subagents/extensions/index.ts',
   'packages/sylo-scheduler/extensions/index.ts',

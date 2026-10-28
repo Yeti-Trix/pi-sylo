@@ -158,9 +158,12 @@ export async function probeOllamaContext(
   }
 }
 
-/** Ollama tags remotely served models `:cloud`; those never occupy local VRAM. */
+/**
+ * Ollama tags remotely served models `:cloud` — and, for quantized variants, a
+ * `-cloud` tag (`deepseek-v4-flash:0731-cloud`); those never occupy local VRAM.
+ */
 export function isCloudHostedOllamaModel(modelId: string): boolean {
-  return /:cloud$/i.test(modelId.trim())
+  return /:cloud$|-cloud$/i.test(modelId.trim())
 }
 
 /**

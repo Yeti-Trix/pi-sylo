@@ -218,6 +218,35 @@ export function resolveLocalModelMaxTokens(contextWindow: number | null): number
   return Math.min(generous, contextWindow)
 }
 
+/**
+ * Hard output ceiling observed on the APIs behind Ollama's cloud-hosted models.
+ *
+ * A cloud model's provider enforces a per-reply output cap and rejects larger
+ * `max_tokens` outright — measured on beam:cloud and deepseek-v4.1-flash:cloud,
+ * which 400 every request with `max_tokens (786432) exceeds model's maximum output
+ * tokens (131072)`. The local three-quarters formula must therefore never exceed
+ * this for a cloud model, or the model is unusable. A provider that accepts more
+ * (glm-5.3-flash:cloud ran for thousands of turns at 786,432) is not shortened by
+ * the ensure path — it only ever raises — and a deliberate value from the Settings
+ * "Max tokens" field is stored verbatim.
+ */
+export const CLOUD_HOSTED_MODEL_MAX_TOKENS = 131072
+
+/**
+ * Per-reply cap for an Ollama model, cloud-aware.
+ *
+ * Local models get the generous three-quarters-of-context runaway guard (tokens
+ * are free; the cap only stops a no-stop-token loop). Cloud-hosted models are
+ * additionally bounded by `CLOUD_HOSTED_MODEL_MAX_TOKENS`: there the cap is not
+ * a guard but a request-validity constraint — above it, the provider rejects the
+ * whole request. If a cloud provider's real cap is lower than this ceiling, the
+ * first 400 names it and the operator can store the number via Settings.
+ */
+export function resolveOllamaMaxTokens(contextWindow: number | null, cloudHosted: boolean): number {
+  const local = resolveLocalModelMaxTokens(contextWindow)
+  return cloudHosted ? Math.min(local, CLOUD_HOSTED_MODEL_MAX_TOKENS) : local
+}
+
 /** Read Pi `models.json` `maxTokens` for a provider/model id (null = unset). */
 export function readModelMaxTokens(
   agentDir: string,

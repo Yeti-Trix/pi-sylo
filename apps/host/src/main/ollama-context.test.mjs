@@ -84,9 +84,17 @@ describe('resolveEffectiveOllamaContext', () => {
 })
 
 describe('isCloudHostedOllamaModel', () => {
-  test('recognizes the :cloud tag Ollama uses for remote models', () => {
+    test('recognizes the :cloud tag Ollama uses for remote models', () => {
     assert.equal(isCloudHostedOllamaModel('glm-5.3-flash:cloud'), true)
     assert.equal(isCloudHostedOllamaModel('nemotron-3-ultra:cloud'), true)
+  })
+
+  test('recognizes the -cloud tag variant for quantized remote models', () => {
+    // deepseek-v4-flash:0731-cloud is served remotely like :cloud; treating it as
+    // local clamped its 1M window to the server limit and applied the local
+    // runaway-guard cap the cloud provider then rejected.
+    assert.equal(isCloudHostedOllamaModel('deepseek-v4-flash:0731-cloud'), true)
+    assert.equal(isCloudHostedOllamaModel('qwen3-coder:480b-cloud'), true)
   })
 
   test('local models and lookalike tags stay local', () => {

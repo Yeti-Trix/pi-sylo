@@ -19,7 +19,7 @@
  *
  * The snapshot is intentionally `unknown` here to avoid a cross-package `.ts`
  * import (packages/sylo-tasks has `"type": "module"`, and direct `.ts` imports
- * from main trip TS6307 — see think-tank-config.ts). The shape is owned by the
+ * from main trip TS6307 — see sylo-image-gen config.ts). The shape is owned by the
  * package's `shared/types.ts`; main only passes it through to the renderer.
  */
 

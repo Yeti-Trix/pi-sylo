@@ -19,7 +19,7 @@ const skill = (name, filePath) => ({ name, filePath })
 const SKILLS = [
   skill('web-access', 'C:/Users/me/.pi/agent/skills/web-access/SKILL.md'),
   skill('tasks', 'C:/Users/me/.pi/agent/skills/tasks/SKILL.md'),
-  skill('think-tank', 'C:/Users/me/.pi/agent/skills/think-tank/SKILL.md'),
+  skill('image-gen', 'C:/Users/me/.pi/agent/skills/image-gen/SKILL.md'),
 ]
 
 const pinSet = (paths) => new Set(normalizeSkillPathListForPolicyJson(paths))
@@ -54,10 +54,10 @@ describe('selectPinnedSkills', () => {
   test('ignores separator style, which differs between JSON storage and Pi', () => {
     const picked = selectPinnedSkills(
       SKILLS,
-      pinSet(['C:\\Users\\me\\.pi\\agent\\skills\\think-tank']),
+      pinSet(['C:\\Users\\me\\.pi\\agent\\skills\\image-gen']),
     )
     assert.equal(picked.length, 1)
-    assert.equal(picked[0].name, 'think-tank')
+    assert.equal(picked[0].name, 'image-gen')
   })
 
   test('matching is case-sensitive, so both sides must come from Pi discovery', () => {
@@ -67,7 +67,7 @@ describe('selectPinnedSkills', () => {
     // a hand-edited pin with different casing would silently not apply.
     const picked = selectPinnedSkills(
       SKILLS,
-      pinSet(['c:\\users\\me\\.pi\\agent\\skills\\think-tank']),
+      pinSet(['c:\\users\\me\\.pi\\agent\\skills\\image-gen']),
     )
     assert.deepEqual(picked, [])
   })
@@ -77,12 +77,12 @@ describe('selectPinnedSkills', () => {
       SKILLS,
       pinSet([
         'C:/Users/me/.pi/agent/skills/tasks',
-        'C:/Users/me/.pi/agent/skills/think-tank',
+        'C:/Users/me/.pi/agent/skills/image-gen',
       ]),
     )
     assert.deepEqual(
       picked.map((s) => s.name).sort(),
-      ['tasks', 'think-tank'],
+      ['image-gen', 'tasks'],
     )
   })
 

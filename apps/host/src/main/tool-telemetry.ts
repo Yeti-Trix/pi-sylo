@@ -8,10 +8,13 @@
  * rewritten in full on every flush and shipped to the renderer on every refresh,
  * that overhead is what pushes long sessions into stalls and out-of-memory kills.
  *
- * Every consumer (inline chat segments, workflow modal, markdown export) already
+  * Every consumer (inline chat segments, workflow modal, markdown export) already
  * re-concatenates contiguous deltas, so merging them at persist time costs no
  * information. `thinking_start` / `thinking_end` still bracket each run, so block
- * start and end timestamps survive the merge.
+ * start and end timestamps survive the merge; the merged delta row also carries the
+ * LAST folded delta's ts under `_endTs` (the row keeps the FIRST delta's ts for
+ * ordering) so a run whose end marker streams late still has an honest span in the
+ * renderer (issue #42).
  */
 
 export type StampedToolEvent = { ts: number; event: Record<string, unknown> }
@@ -74,9 +77,16 @@ export function appendPersistedToolEvents(
       ts: raw.ts,
       event: condense(raw.event, 0) as Record<string, unknown>,
     }
-    const last = out[out.length - 1]
+        const last = out[out.length - 1]
     if (last && isThinkingDelta(last) && isThinkingDelta(entry)) {
       last.event.delta = truncated(deltaText(last) + deltaText(entry), MAX_THINKING_CHARS)
+      // Span end of the merged reasoning run: the row keeps the first delta's ts (ordering),
+      // so without this the renderer reads the run as instantaneous when its `thinking_end`
+      // streams late or never (issue #42).
+      last.event._endTs = Math.max(
+        typeof last.event._endTs === 'number' ? (last.event._endTs as number) : entry.ts,
+        entry.ts,
+      )
       // Lets the workflow modal still report how many raw edges were folded in.
       last.event._mergedDeltas = ((last.event._mergedDeltas as number | undefined) ?? 1) + 1
       continue

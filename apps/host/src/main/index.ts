@@ -98,6 +98,12 @@ import {
 
 import { appIconWindowOptions, SYLO_APP_USER_MODEL_ID } from './app-icon.js'
 import {
+  broadcastRestartBadge,
+  getRestartBadge,
+  initRestartBadgeStore,
+  raiseRestartBadge,
+} from './restart-badge.js'
+import {
   checkForAppUpdate,
   getAppUpdateStatus,
   startAppUpdateChecker,
@@ -234,8 +240,8 @@ import {
 import {
   readModelContextWindow,
   readModelInputConfig,
-  readModelMaxTokens,
-  resolveLocalModelMaxTokens,
+    readModelMaxTokens,
+  resolveOllamaMaxTokens,
   resolveModelInputTypes,
   writeModelContextWindow,
   writeModelInputTypes,
@@ -378,32 +384,11 @@ import {
   syloWorkflowsList,
 } from './sylo-workflows-host.js'
 import {
-  copyPgvectorFilesWindowsElevated,
-  fieldbrainDatabaseConfigPath,
-  getGuidedSetupSteps,
-  readFieldBrainConfig,
-  runFieldBrainBootstrapScript,
-  runFieldBrainScript,
-  writeFieldBrainConfig,
-  type FieldBrainConfig,
-} from './fieldbrain-config.js'
-import {
   onenoteConfigDir,
   runOneNoteScript,
   runOneNoteSettingsSave,
 } from './onenote-config.js'
 import { handleWebAccessHostEvent, webAccessStore } from './web-access-service.js'
-import { handleThinkTankHostEvent, handleThinkTankRpc, thinkTankStore, cancelThinkTankSession, queueThinkTankInjection } from './think-tank-service.js'
-import {
-  thinkTankConfigEnvPath,
-  readThinkTankConfig,
-  writeThinkTankConfig,
-} from './think-tank-config.js'
-import {
-  THINK_TANK_CANCEL_GRACE_MS,
-  THINK_TANK_CANCEL_MESSAGE,
-  type SyloThinkTankEvent,
-} from '../shared/think-tank-events.js'
 import {
   persistToolResultImages,
 } from './web-access-images.js'
@@ -517,7 +502,7 @@ import {
   openCompanionCertsFolder,
   restartCompanionServer,
   saveCompanionCredentials,
-  stopCompanionServer,
+    stopCompanionServer,
 } from './companion/manager.js'
 import {
   createScheduledPrompt,
@@ -569,6 +554,7 @@ const SYLO_IMAGE_FALLBACK_EXTENSION = join(
   'apps/host/src/broker/sylo-image-fallback.ts',
 )
 const SYLO_CANVAS_SKETCH_EXTENSION = join(SYLO_REPO_ROOT, 'apps/host/src/broker/sylo-canvas-sketch.ts')
+const SYLO_RESTART_BADGE_EXTENSION = join(SYLO_REPO_ROOT, 'apps/host/src/broker/sylo-restart-badge.ts')
 const SYLO_COMPACTION_ANCHOR_EXTENSION = join(
   SYLO_REPO_ROOT,
   'apps/host/src/broker/sylo-compaction-anchor.ts',
@@ -1113,10 +1099,18 @@ function discoverFilesystemCapabilities(
       ),
     )
   }
-  if (existsSync(SYLO_CANVAS_SKETCH_EXTENSION)) {
+    if (existsSync(SYLO_CANVAS_SKETCH_EXTENSION)) {
     extBuckets.push(
       ...tagExtensions(
         [{ name: 'sylo-canvas-sketch', path: SYLO_CANVAS_SKETCH_EXTENSION }],
+        'sylo-builtin',
+      ),
+    )
+  }
+  if (existsSync(SYLO_RESTART_BADGE_EXTENSION)) {
+    extBuckets.push(
+      ...tagExtensions(
+        [{ name: 'sylo-restart-badge', path: SYLO_RESTART_BADGE_EXTENSION }],
         'sylo-builtin',
       ),
     )
@@ -1222,7 +1216,7 @@ function registerLocalImageProtocol(): void {
     } catch {
       return new Response(null, { status: 404 })
     }
-    return net.fetch(pathToFileURL(filePath).href)
+      return net.fetch(pathToFileURL(filePath).href)
   })
 }
 
@@ -2595,25 +2589,17 @@ export function startSubagentOrphanReconcile(): void {
 }
 
 /**
- * A background subagent parked on `await_user_input` (issue #27 P3): post the
- * question card in the owning chat, then wake the orchestrator to relay it.
- * The run itself keeps polling its mailbox — the orchestrator delivers the answer
- * with `subagent_answer` on the operator's reply.
+ * A background subagent parked on `await_user_input` (issue #27 P3): wake the
+ * orchestrator to relay the question. No timeline card — the operator rejected
+ * parking notices in chat (pi-sylo-dev #40); the Subagents strip/panel shows
+ * live park state. The run itself keeps polling its mailbox — the orchestrator
+ * delivers the answer with `subagent_answer` on the operator's reply.
  */
 function handleSubagentAwaitingInput(
   conversationId: string,
   item: Extract<SyloSubagentHostEvent, { type: 'subagent_run_awaiting_input' }>,
 ): void {
   const runId = shortRunId(item.runId)
-  const lines = [
-    `⏸ **Background subagent <${item.agent}> is waiting on you** (run \`${runId}\`)`,
-    `**Question:** ${item.question}`,
-  ]
-  if (item.context_digest) lines.push(`**Where it stands:** ${item.context_digest}`)
-  if (item.what_i_tried) lines.push(`**Already tried:** ${item.what_i_tried}`)
-  lines.push('', 'Reply here and the answer goes straight back into that agent — it continues in the same session it parked.')
-  db.insertMessage(conversationId, 'system', lines.join('\n'), 'complete')
-  emitChatRefresh(conversationId, 'messages')
   const wake = [
     '[Background subagent awaiting input]',
     `Run <${item.agent}> (${runId}) parked on await_user_input and asked the operator:`,
@@ -2624,13 +2610,35 @@ function handleSubagentAwaitingInput(
   ]
     .filter((line) => line !== '')
     .join('\n')
-  dispatchAwaitingWake(conversationId, wake, 0)
+  dispatchAwaitingWake(
+    conversationId,
+    wake,
+    0,
+    `⏸ Background subagent <${item.agent}> (run \`${runId}\`) is waiting on you — relaying its question kept failing. Check the Subagents panel and answer it in chat.`,
+  )
 }
 
 const awaitingWakeTimer = new Map<string, ReturnType<typeof setTimeout>>()
 
-function dispatchAwaitingWake(conversationId: string, wake: string, attempt: number): void {
-  if (attempt > BACKGROUND_DELIVERY_MAX_RETRIES) return // card is in the timeline; operator message recovers
+function dispatchAwaitingWake(
+  conversationId: string,
+  wake: string,
+  attempt: number,
+  fallbackNote?: string,
+): void {
+  if (attempt > BACKGROUND_DELIVERY_MAX_RETRIES) {
+    // No timeline card is posted for parking anymore (#40); if delivery to the
+    // orchestrator exhausts, leave ONE terse system line so the parked question
+    // is not silently lost.
+    if (fallbackNote) {
+      try {
+        db.insertMessage(conversationId, 'system', fallbackNote, 'complete')
+      } catch {
+        /* best-effort */
+      }
+    }
+    return
+  }
   const active = findPendingTurnForConversation(conversationId)
   if (active) {
     const [turnId] = active
@@ -2642,21 +2650,26 @@ function dispatchAwaitingWake(conversationId: string, wake: string, attempt: num
   } else if (broker && brokerAgentReady && isSupervisorReady(broker)) {
     void (async () => {
       const started = await startDeliveryTurn(conversationId, wake)
-      if (!started.ok) scheduleAwaitingWakeRetry(conversationId, wake, attempt)
+      if (!started.ok) scheduleAwaitingWakeRetry(conversationId, wake, attempt, fallbackNote)
     })()
     return
   }
-  scheduleAwaitingWakeRetry(conversationId, wake, attempt)
+  scheduleAwaitingWakeRetry(conversationId, wake, attempt, fallbackNote)
 }
 
-function scheduleAwaitingWakeRetry(conversationId: string, wake: string, attempt: number): void {
+function scheduleAwaitingWakeRetry(
+  conversationId: string,
+  wake: string,
+  attempt: number,
+  fallbackNote?: string,
+): void {
   const existing = awaitingWakeTimer.get(conversationId)
   if (existing) clearTimeout(existing)
   awaitingWakeTimer.set(
     conversationId,
     setTimeout(() => {
       awaitingWakeTimer.delete(conversationId)
-      dispatchAwaitingWake(conversationId, wake, attempt + 1)
+      dispatchAwaitingWake(conversationId, wake, attempt + 1, fallbackNote)
     }, BACKGROUND_DELIVERY_RETRY_MS),
   )
 }
@@ -3534,6 +3547,9 @@ async function ensureBrokerSessionForConversation(
   }
   const planEnabled = options?.planMode === true && planModeBlock.length > 0
   const eff = effectiveModelForConversation(convId)
+  // Fill-before-cap so an undeclared window is written first and the maxTokens target
+  // (3/4 of the window) computes from the real value rather than the unknown-window floor.
+  await ensureOllamaContextWindowOnce(eff.provider, eff.modelId)
   ensureOllamaMaxTokensOnce(eff.provider, eff.modelId)
   const mfp = modelFingerprint(eff)
   if (
@@ -4425,11 +4441,17 @@ function patchOllamaBaseUrlInModelsJson(
     ollama.models = existing
   }
 
-  providers.ollama = ollama
+    providers.ollama = ollama
   root.providers = providers
   try {
     mkdirSync(dirname(modelsPath), { recursive: true })
-    writeFileSync(modelsPath, JSON.stringify(root, null, 2), 'utf8')
+    // Atomic replace: a plain writeFileSync leaves a torn JSON file mid-flight if any
+    // reader (broker ModelRuntime at session bind, pi's own loaders) reads during the
+    // write. A torn read once poisoned sessions with thinking `off` — pi resolves
+    // `"off"` when the model fails to load and the level persists in the session file.
+    const tmpPath = `${modelsPath}.tmp-${process.pid}`
+    writeFileSync(tmpPath, JSON.stringify(root, null, 2), 'utf8')
+    renameSync(tmpPath, modelsPath)
     return { ok: true }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
@@ -4520,14 +4542,33 @@ async function syncOllamaContextWindow(baseOrigin: string, modelId: string): Pro
  * some models) truncates a reasoning model mid-reply, so a too-low cap is raised as well.
  * Only ever raises — a deliberately higher value is left alone, and no write happens when
  * the stored value is already generous.
+ *
+ * Cloud-hosted models (`:cloud` / `-cloud` tags) bound the target by the provider's hard
+ * output ceiling instead (`resolveOllamaMaxTokens`): there a too-large cap is not a
+ * wasted budget but a rejected request — every turn 400s until the value is fixed
+ * (measured on beam:cloud, which reported a 131,072 maximum). A stored cloud value
+ * above the ceiling is therefore trimmed to it before the turn, whatever wrote it —
+ * an old run's three-quarters value left behind (observed: the 11:45 build never
+ * lowered, and every request kept failing) or any other overrun. The Settings path
+ * still stores what was typed; the next turn trims it back if the provider rejects
+ * it. A provider that genuinely accepts more than the ceiling (glm-5.3-flash:cloud
+ * ran for thousands of turns at 786,432) loses some per-reply headroom until the
+ * ceiling constant is raised with evidence — a throughput reduction, never a failure.
  */
 function ensureOllamaMaxTokens(modelId: string): void {
   const id = modelId.trim()
   if (!id) return
   const dir = hostAgentDir()
-  const target = resolveLocalModelMaxTokens(readModelContextWindow(dir, 'ollama', id))
+  const cloud = isCloudHostedOllamaModel(id)
+  const target = resolveOllamaMaxTokens(readModelContextWindow(dir, 'ollama', id), cloud)
   const current = readModelMaxTokens(dir, 'ollama', id)
-  if (current != null && current >= target) return
+  if (cloud) {
+    // Above the provider ceiling the request fails outright, so over-ceiling values
+    // are trimmed down to it; at or below it there is nothing to do.
+    if (current != null && current <= target) return
+  } else if (current != null && current >= target) {
+    return
+  }
   writeModelMaxTokens(dir, 'ollama', id, target)
 }
 
@@ -4548,6 +4589,50 @@ function ensureOllamaMaxTokensOnce(provider: string, modelId: string): void {
     ensureOllamaMaxTokens(id)
   } catch {
     /* a models.json write failure must not block the turn */
+  }
+}
+
+/** Ids whose missing `contextWindow` was already attempted this run — one probe per model, not one per session rebind. */
+const ollamaContextWindowFilled = new Set<string>()
+
+/**
+ * Fill a missing `contextWindow` for the Ollama model a session is about to use.
+ *
+ * Same reason the maxTokens cap cannot wait for a Settings save: the chat model bar
+ * lists whatever Ollama serves (`/api/tags`), so an operator can select a model that
+ * models.json has never heard of, and Pi then composes it with a 128,000-token
+ * assumption — compacting far early on a million-token cloud window, or over-feeding
+ * a loaded local model until Ollama silently drops the oldest tokens. Runs before
+ * the session is composed, and never overwrites an existing declaration: a hand-tuned
+ * or previously saved value stays untouched here, because a per-run rewrite would
+ * silently clobber deliberate declarations — reconciling stale values remains the
+ * Settings save path's job (`syncOllamaContextWindow`, which rewrites when
+ * declared ≠ effective).
+ *
+ * Timing works because Pi re-reads models.json in `ModelRuntime.create` at every
+ * session init, so an entry written here is picked up by that init — a previously
+ * unknown model composes with its real window, no broker restart required.
+ */
+async function ensureOllamaContextWindowOnce(provider: string, modelId: string): Promise<void> {
+  if (provider.trim() !== 'ollama') return
+  const id = modelId.trim()
+  if (!id || ollamaContextWindowFilled.has(id)) return
+  ollamaContextWindowFilled.add(id)
+  try {
+    if (readModelContextWindow(hostAgentDir(), 'ollama', id) != null) return
+    const probed = await probeOllamaContext(resolveOllamaBaseOriginForPrefs(), id)
+    if (!probed.ok) return
+    const effective = resolveEffectiveOllamaContext(
+      probed.probe,
+      ollamaContextLimitPref(),
+      isCloudHostedOllamaModel(id),
+    )
+    if (effective == null) return
+    // A concurrent Settings save may have written while the probe ran.
+    if (readModelContextWindow(hostAgentDir(), 'ollama', id) != null) return
+    writeModelContextWindow(hostAgentDir(), 'ollama', id, effective)
+  } catch {
+    /* a models.json write or probe failure must not block the session */
   }
 }
 
@@ -5055,6 +5140,12 @@ function handleBrokerOutMessage(
     })
     return
   }
+  if (msg.type === 'sylo_restart_badge') {
+    // Agent raised the "Restart Required" badge (issue #44): persist + fan to renderer.
+    raiseRestartBadge(msg.reason, msg.source, msg.ts)
+    broadcastRestartBadge(mainWindow)
+    return
+  }
   if (msg.type === 'sylo_subagent') {
     // Operator-forced runs happen before the Pi turn exists, so their turn id is
     // not in `pendingTurns` yet — fall back to the forced-run map. Background runs
@@ -5126,7 +5217,7 @@ function handleBrokerOutMessage(
   if (msg.type === 'sylo_runs_rpc') {
     // `sylo_runs_list` (F2): an agent asks what every chat's agents/subagents in its
     // workspace are doing before dispatching or editing files — one cheap query, no
-    // collisions. Same request/reply pattern as `sylo_think_tank_rpc`.
+    // collisions.
     const requestId = typeof msg.requestId === 'string' ? msg.requestId : ''
     const workspaceKey = String(msg.workspaceKey ?? '').trim()
     const replyBroker = ctx.isPrimary ? broker : ctx.overflowSlot?.supervisor
@@ -5167,61 +5258,7 @@ function handleBrokerOutMessage(
     })
     return
   }
-  if (msg.type === 'sylo_think_tank') {
-    const pending = msg.turnId ? pendingTurns.get(msg.turnId) : undefined
-    const convId = pending?.convId
-    const rawEvent = msg.event as SyloThinkTankEvent
-    const event: SyloThinkTankEvent =
-      rawEvent.type === 'session_start' ?
-        {
-          ...rawEvent,
-          sourceConversationId: rawEvent.sourceConversationId ?? convId,
-          sourceMessageId: rawEvent.sourceMessageId ?? pending?.assistantId,
-        }
-      : rawEvent
-    handleThinkTankHostEvent(convId ?? null, event)
-    mainWindow?.webContents.send('thinkTank:lifecycle', {
-      conversationId: convId ?? null,
-      turnId: msg.turnId,
-      ...(event as Record<string, unknown>),
-    })
-    return
-  }
-  if (msg.type === 'sylo_think_tank_rpc') {
-    const convId = msg.turnId ? pendingTurns.get(msg.turnId)?.convId : undefined
-    const requestId = typeof msg.requestId === 'string' ? msg.requestId : ''
-    const replyBroker = ctx.isPrimary ? broker : ctx.overflowSlot?.supervisor
-    void (async () => {
-      try {
-        const result = await handleThinkTankRpc(msg as Record<string, unknown>, app.getPath('userData'))
-        if (msg.op === 'pick' && typeof msg.sessionId === 'string' && typeof msg.reportId === 'string') {
-          mainWindow?.webContents.send('thinkTank:lifecycle', {
-            conversationId: convId ?? null,
-            turnId: msg.turnId,
-            type: 'complete',
-            sessionId: msg.sessionId,
-            selectedReportId: msg.reportId,
-          })
-        }
-        replyBroker?.sendChildMessage({
-          type: 'sylo_think_tank_rpc_result',
-          requestId,
-          ok: true,
-          result,
-        })
-      } catch (e) {
-        const error = e instanceof Error ? e.message : String(e)
-        replyBroker?.sendChildMessage({
-          type: 'sylo_think_tank_rpc_result',
-          requestId,
-          ok: false,
-          error,
-        })
-      }
-    })()
-    return
-  }
-  if (msg.type === 'sylo_ask_question') {
+    if (msg.type === 'sylo_ask_question') {
     const pendingTurn = msg.turnId ? pendingTurns.get(msg.turnId) : undefined
     const requestId = typeof msg.requestId === 'string' ? msg.requestId : ''
     const toolCallId = typeof msg.toolCallId === 'string' ? msg.toolCallId : ''
@@ -5671,8 +5708,10 @@ function buildBrokerSupervisorOptions(
       existsSync(SYLO_BUILTIN_TOOLS_GUARD_EXTENSION) ? SYLO_BUILTIN_TOOLS_GUARD_EXTENSION : undefined,
     imageFallbackExtension:
       existsSync(SYLO_IMAGE_FALLBACK_EXTENSION) ? SYLO_IMAGE_FALLBACK_EXTENSION : undefined,
-    canvasSketchExtension:
+        canvasSketchExtension:
       existsSync(SYLO_CANVAS_SKETCH_EXTENSION) ? SYLO_CANVAS_SKETCH_EXTENSION : undefined,
+    restartBadgeExtension:
+      existsSync(SYLO_RESTART_BADGE_EXTENSION) ? SYLO_RESTART_BADGE_EXTENSION : undefined,
     compactionAnchorExtension:
       existsSync(SYLO_COMPACTION_ANCHOR_EXTENSION) ? SYLO_COMPACTION_ANCHOR_EXTENSION : undefined,
     canvasSketchPath: canvasSketchImagePath(),
@@ -5684,21 +5723,17 @@ function buildBrokerSupervisorOptions(
       SYLO_REPO_ROOT,
       readSyloOptionalPackagesPref(),
     ),
-    webAccessConfigPath: webAccessConfigEnvPath(
-      app.getPath('userData'),
-      readSyloOptionalPackagesPref(),
-      findSyloOptionalPackage('sylo-web-access'),
-    ),
+    // Always passed since issue #39's final pass: sylo-web-access installs as an
+    // operator-local personal package (~/.pi/agent/settings.json), so the broker
+    // env no longer gates on a registry row — webAccessConfigEnvPath is
+    // registry-independent and resolves (creating defaults if missing).
+    webAccessConfigPath: webAccessConfigEnvPath(app.getPath('userData')),
     ttsConfigPath: ttsConfigEnvPath(
       app.getPath('userData'),
       readSyloOptionalPackagesPref(),
       findSyloOptionalPackage('sylo-tts'),
     ),
-    thinkTankConfigPath: thinkTankConfigEnvPath(
-      app.getPath('userData'),
-      readSyloOptionalPackagesPref(),
-      findSyloOptionalPackage('sylo-think-tank'),
-    ),
+    
     imagegenConfigPath: imagegenConfigEnvPath(
       app.getPath('userData'),
       readSyloOptionalPackagesPref(),
@@ -6814,6 +6849,7 @@ function registerIpc(): void {
   ipcMain.handle('prefs:get', (_e, key: string, fallback: unknown) => db.getPref(key, fallback))
   ipcMain.handle('prefs:set', (_e, key: string, value: unknown) => db.setPref(key, value))
   ipcMain.handle('updates:status', () => getAppUpdateStatus())
+  ipcMain.handle('restart-badge:status', () => getRestartBadge())
   ipcMain.handle('updates:checkNow', () => checkForAppUpdate())
   ipcMain.handle('proposals:list', () => listProposals())
   ipcMain.handle('proposals:apply', (_e, root: string, relPath: string, editedBody?: string) =>
@@ -7748,104 +7784,7 @@ function registerIpc(): void {
   })
   ipcMain.handle('webaccess:braveQuota', () => readWebAccessBraveQuota(app.getPath('userData')))
 
-  ipcMain.handle('thinkTank:sessionGet', (_e, sessionId: unknown) => {
-    if (typeof sessionId !== 'string' || !sessionId.trim()) return null
-    return thinkTankStore.getThinkTankSessionDetail(sessionId.trim())
-  })
-  ipcMain.handle('thinkTank:listForConversation', (_e, conversationId: unknown) => {
-    if (typeof conversationId !== 'string' || !conversationId.trim()) return []
-    return thinkTankStore.listThinkTankSessionsForConversation(conversationId.trim())
-  })
-  ipcMain.handle('thinkTank:configGet', () => readThinkTankConfig(app.getPath('userData')))
-  ipcMain.handle('thinkTank:configSave', (_e, values: unknown) => {
-    if (!values || typeof values !== 'object' || Array.isArray(values)) {
-      return { ok: false as const, error: 'bad_values' }
-    }
-    const wrote = writeThinkTankConfig(app.getPath('userData'), values as Record<string, unknown>)
-    if (!wrote.ok) return { ok: false as const, error: wrote.error }
-    return { ok: true as const }
-  })
-  ipcMain.handle('thinkTank:pickReport', (_e, sessionId: unknown, reportId: unknown) => {
-    if (typeof sessionId !== 'string' || typeof reportId !== 'string') {
-      return { ok: false as const, error: 'bad_args' }
-    }
-    try {
-      thinkTankStore.pickThinkTankReport(sessionId, reportId)
-      const conversationId = thinkTankStore.getThinkTankSessionConversationId(sessionId)
-      mainWindow?.webContents.send('thinkTank:lifecycle', {
-        conversationId,
-        type: 'complete',
-        sessionId,
-        selectedReportId: reportId,
-      })
-      return { ok: true as const, selectedReportId: reportId }
-    } catch (e) {
-      return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
-    }
-  })
-
-  ipcMain.handle('thinkTank:inject', (_e, sessionId: unknown, text: unknown) => {
-    if (typeof sessionId !== 'string' || !sessionId.trim()) {
-      return { ok: false as const, error: 'bad_session_id' }
-    }
-    const body = typeof text === 'string' ? text.trim() : ''
-    if (!body) return { ok: false as const, error: 'empty_message' }
-    const sid = sessionId.trim()
-    const pendingCount = queueThinkTankInjection(sid, body)
-    const conversationId = thinkTankStore.getThinkTankSessionConversationId(sid)
-    mainWindow?.webContents.send('thinkTank:lifecycle', {
-      conversationId,
-      type: 'operator_inject_queued',
-      sessionId: sid,
-      text: body,
-      pendingCount,
-    })
-    return { ok: true as const, pendingCount }
-  })
-
-  ipcMain.handle('thinkTank:abort', async (_e, sessionId: unknown) => {
-    if (typeof sessionId !== 'string' || !sessionId.trim()) {
-      return { ok: false as const, error: 'bad_session_id' }
-    }
-    const sid = sessionId.trim()
-    const conversationId = thinkTankStore.getThinkTankSessionConversationId(sid)
-    cancelThinkTankSession(sid, 'Stopped by operator')
-    if (conversationId && brokerAgentReady && broker) {
-      const active = findPendingTurnForConversation(conversationId)
-      if (active) {
-        const [turnId, pending] = active
-        const assigned = turnBrokerPool.supervisorForTurn(turnId) ?? broker
-        const abortTurn = () => {
-          if (pendingTurns.get(turnId) !== pending || pending.aborted) return
-          pending.aborted = true
-          finalizePendingTurn(turnId, pending, 'cancelled')
-          assigned?.abort()
-          void flushDeferredTurns()
-        }
-        // Cancel the run, not the turn: killing the turn destroys the in-flight
-        // `sylo_think_tank_run` call before it can return, and the model reads the resulting
-        // empty tool result as the tool being broken. Aborting stays the fallback for a run
-        // that will not wind down.
-        const pushed =
-          assigned?.sendChildMessage({
-            type: THINK_TANK_CANCEL_MESSAGE,
-            sessionId: sid,
-            reason: 'Stopped by operator',
-          }) ?? false
-        if (pushed) setTimeout(abortTurn, THINK_TANK_CANCEL_GRACE_MS)
-        else abortTurn()
-      }
-    }
-    mainWindow?.webContents.send('thinkTank:lifecycle', {
-      conversationId: conversationId ?? null,
-      type: 'error',
-      sessionId: sid,
-      message: 'Think tank stopped by operator',
-    })
-    return { ok: true as const }
-  })
-
-  ipcMain.handle('tts:listVoices', () => listTtsVoices(SYLO_REPO_ROOT))
+    ipcMain.handle('tts:listVoices', () => listTtsVoices(SYLO_REPO_ROOT))
   ipcMain.handle('tts:configGet', () => {
     ensureTtsConfigSchema(hostAgentDir())
     return readTtsConfig(app.getPath('userData'))
@@ -8291,354 +8230,6 @@ function registerIpc(): void {
     }),
   )
 
-  ipcMain.handle('fieldbrain:configGet', () => {
-    const config = readFieldBrainConfig(app.getPath('userData'))
-    return {
-      ok: true as const,
-      config,
-      databaseConfigPath: fieldbrainDatabaseConfigPath(),
-      guidedSetup: getGuidedSetupSteps(),
-    }
-  })
-  ipcMain.handle('fieldbrain:configSave', (_e, values: unknown) => {
-    if (!values || typeof values !== 'object' || Array.isArray(values)) {
-      return { ok: false as const, error: 'bad_values' }
-    }
-    const wrote = writeFieldBrainConfig(app.getPath('userData'), values as Partial<FieldBrainConfig>)
-    if (!wrote.ok) return { ok: false as const, error: wrote.error }
-    return {
-      ok: true as const,
-      config: wrote.config,
-      databaseConfigPath: fieldbrainDatabaseConfigPath(),
-    }
-  })
-  ipcMain.handle('fieldbrain:dbCheck', async () => {
-    const config = readFieldBrainConfig(app.getPath('userData'))
-    try {
-      return await runFieldBrainScript(SYLO_REPO_ROOT, 'db_check.py', ['--guided'], config)
-    } catch (e) {
-      return {
-        ok: false as const,
-        error: e instanceof Error ? e.message : String(e),
-        guided_setup: getGuidedSetupSteps(),
-      }
-    }
-  })
-  ipcMain.handle('fieldbrain:dbMigrate', async () => {
-    const config = readFieldBrainConfig(app.getPath('userData'))
-    try {
-      return await runFieldBrainScript(SYLO_REPO_ROOT, 'db_migrate.py', [], config)
-    } catch (e) {
-      return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
-    }
-  })
-  ipcMain.handle('fieldbrain:logList', async () => {
-    const config = readFieldBrainConfig(app.getPath('userData'))
-    try {
-      return await runFieldBrainScript(
-        SYLO_REPO_ROOT,
-        'fieldbrain_log_search.py',
-        ['--limit', '50'],
-        config,
-      )
-    } catch (e) {
-      return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
-    }
-  })
-  ipcMain.handle('fieldbrain:documentList', async (_e, values: unknown) => {
-    const config = readFieldBrainConfig(app.getPath('userData'))
-    const raw = values && typeof values === 'object' && !Array.isArray(values) ? (values as Record<string, unknown>) : {}
-    const projectId =
-      typeof raw.projectId === 'number'
-        ? raw.projectId
-        : typeof raw.project_id === 'number'
-          ? raw.project_id
-          : null
-    const args =
-      projectId != null
-        ? ['--scope', 'project', '--project-id', String(projectId)]
-        : ['--scope', 'global']
-    try {
-      return await runFieldBrainScript(SYLO_REPO_ROOT, 'fieldbrain_document_list.py', args, config)
-    } catch (e) {
-      return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
-    }
-  })
-  ipcMain.handle('fieldbrain:brainList', async (_e, values: unknown) => {
-    if (!values || typeof values !== 'object' || Array.isArray(values)) {
-      return { ok: false as const, error: 'bad_values' }
-    }
-    const raw = values as Record<string, unknown>
-    const projectId =
-      typeof raw.projectId === 'number'
-        ? raw.projectId
-        : typeof raw.project_id === 'number'
-          ? raw.project_id
-          : null
-    if (projectId == null) {
-      return { ok: false as const, error: 'projectId is required.' }
-    }
-    const config = readFieldBrainConfig(app.getPath('userData'))
-    try {
-      return await runFieldBrainScript(
-        SYLO_REPO_ROOT,
-        'fieldbrain_ui_brain_list.py',
-        ['--scope', 'project', '--project-id', String(projectId)],
-        config,
-      )
-    } catch (e) {
-      return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
-    }
-  })
-  ipcMain.handle('fieldbrain:projectList', async () => {
-    const config = readFieldBrainConfig(app.getPath('userData'))
-    try {
-      return await runFieldBrainScript(SYLO_REPO_ROOT, 'fieldbrain_ui_project_list.py', [], config)
-    } catch (e) {
-      return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
-    }
-  })
-  ipcMain.handle('fieldbrain:projectCreate', async (_e, values: unknown) => {
-    if (!values || typeof values !== 'object' || Array.isArray(values)) {
-      return { ok: false as const, error: 'bad_values' }
-    }
-    const raw = values as Record<string, unknown>
-    const jobNumber =
-      typeof raw.jobNumber === 'string'
-        ? raw.jobNumber.trim()
-        : typeof raw.job_number === 'string'
-          ? raw.job_number.trim()
-          : ''
-    const subProjectNumber =
-      typeof raw.subProjectNumber === 'string'
-        ? raw.subProjectNumber.trim()
-        : typeof raw.sub_project_number === 'string'
-          ? raw.sub_project_number.trim()
-          : ''
-    const legacyName = typeof raw.name === 'string' ? raw.name.trim() : ''
-
-    if (!jobNumber && !legacyName) {
-      return { ok: false as const, error: 'Project number is required (five digits, e.g. 12345).' }
-    }
-
-    const args: string[] = []
-    if (jobNumber) {
-      args.push('--job-number', jobNumber)
-      if (subProjectNumber) args.push('--sub-project-number', subProjectNumber)
-    } else {
-      args.push('--name', legacyName)
-    }
-    const config = readFieldBrainConfig(app.getPath('userData'))
-    try {
-      return await runFieldBrainScript(SYLO_REPO_ROOT, 'fieldbrain_ui_project_create.py', args, config)
-    } catch (e) {
-      return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
-    }
-  })
-  ipcMain.handle('fieldbrain:dbBootstrap', async (_e, values: unknown) => {
-    if (!values || typeof values !== 'object' || Array.isArray(values)) {
-      return { ok: false as const, error: 'bad_values' }
-    }
-    const raw = values as Record<string, unknown>
-    const adminPassword = typeof raw.adminPassword === 'string' ? raw.adminPassword : ''
-    if (!adminPassword.trim()) {
-      return { ok: false as const, error: 'Postgres superuser password is required (not saved after bootstrap).' }
-    }
-    const current = readFieldBrainConfig(app.getPath('userData'))
-    const host =
-      typeof raw.postgresHost === 'string' && raw.postgresHost.trim() ?
-        raw.postgresHost.trim()
-      : current.postgresHost
-    const port =
-      typeof raw.postgresPort === 'number' && Number.isFinite(raw.postgresPort) ?
-        Math.floor(raw.postgresPort)
-      : current.postgresPort
-    const appDatabase =
-      typeof raw.postgresDatabase === 'string' && raw.postgresDatabase.trim() ?
-        raw.postgresDatabase.trim()
-      : current.postgresDatabase
-    const appUsername =
-      typeof raw.postgresUsername === 'string' && raw.postgresUsername.trim() ?
-        raw.postgresUsername.trim()
-      : current.postgresUsername
-    const appPassword =
-      typeof raw.appPassword === 'string' && raw.appPassword.length > 0 ?
-        raw.appPassword
-      : typeof raw.postgresPassword === 'string' && raw.postgresPassword.length > 0 ?
-        raw.postgresPassword
-      : current.postgresPassword || 'fieldbrain'
-    const adminUser =
-      typeof raw.adminUsername === 'string' && raw.adminUsername.trim() ?
-        raw.adminUsername.trim()
-      : 'postgres'
-
-    const args = [
-      '--admin-user',
-      adminUser,
-      '--host',
-      host,
-      '--port',
-      String(port),
-      '--app-database',
-      appDatabase,
-      '--app-username',
-      appUsername,
-      '--app-password',
-      appPassword,
-    ]
-    try {
-      const result = await runFieldBrainBootstrapScript(SYLO_REPO_ROOT, 'db_bootstrap.py', args, adminPassword.trim())
-      if (result.ok === false) return result
-      const wrote = writeFieldBrainConfig(app.getPath('userData'), {
-        dbMode: current.dbMode,
-        postgresHost: host,
-        postgresPort: port,
-        postgresDatabase: appDatabase,
-        postgresUsername: appUsername,
-        postgresPassword: appPassword,
-        ollamaUrl: current.ollamaUrl,
-      })
-      if (!wrote.ok) {
-        return {
-          ok: false as const,
-          error: `Database created but saving FieldBrain config failed: ${wrote.error}`,
-          bootstrap: result,
-        }
-      }
-      return {
-        ...result,
-        config: wrote.config,
-        databaseConfigPath: fieldbrainDatabaseConfigPath(),
-      }
-    } catch (e) {
-      return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
-    }
-  })
-  ipcMain.handle('fieldbrain:pgvectorGuide', async () => {
-    const config = readFieldBrainConfig(app.getPath('userData'))
-    try {
-      return await runFieldBrainScript(SYLO_REPO_ROOT, 'pgvector_guide.py', [], config)
-    } catch (e) {
-      return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
-    }
-  })
-  ipcMain.handle('fieldbrain:pgvectorInstallFromFolder', async (_e, values: unknown) => {
-    if (!values || typeof values !== 'object' || Array.isArray(values)) {
-      return { ok: false as const, error: 'bad_values' }
-    }
-    const raw = values as Record<string, unknown>
-    const adminPassword = typeof raw.adminPassword === 'string' ? raw.adminPassword : ''
-    if (!adminPassword.trim()) {
-      return { ok: false as const, error: 'Postgres superuser password is required (not saved).' }
-    }
-    const sourcePath = typeof raw.sourcePath === 'string' ? raw.sourcePath.trim() : ''
-    const skipFileCopy = raw.skipFileCopy === true
-    const current = readFieldBrainConfig(app.getPath('userData'))
-    const host =
-      typeof raw.postgresHost === 'string' && raw.postgresHost.trim() ?
-        raw.postgresHost.trim()
-      : current.postgresHost
-    const port =
-      typeof raw.postgresPort === 'number' && Number.isFinite(raw.postgresPort) ?
-        Math.floor(raw.postgresPort)
-      : current.postgresPort
-    const appDatabase =
-      typeof raw.postgresDatabase === 'string' && raw.postgresDatabase.trim() ?
-        raw.postgresDatabase.trim()
-      : current.postgresDatabase
-    const adminUser =
-      typeof raw.adminUsername === 'string' && raw.adminUsername.trim() ?
-        raw.adminUsername.trim()
-      : 'postgres'
-
-    const args = [
-      '--admin-user',
-      adminUser,
-      '--host',
-      host,
-      '--port',
-      String(port),
-      '--database',
-      appDatabase,
-    ]
-    if (skipFileCopy) args.push('--skip-file-copy')
-    else if (sourcePath) args.push('--source', sourcePath)
-    else return { ok: false as const, error: 'Select the pgvector folder or zip first.' }
-
-    try {
-      let result = await runFieldBrainBootstrapScript(
-        SYLO_REPO_ROOT,
-        'pgvector_install_from_folder.py',
-        args,
-        adminPassword.trim(),
-      )
-      if (
-        result.ok === false &&
-        result.needs_elevation === true &&
-        typeof result.source_dir === 'string' &&
-        typeof result.pgroot === 'string' &&
-        process.platform === 'win32'
-      ) {
-        const elevated = await copyPgvectorFilesWindowsElevated(result.source_dir, result.pgroot)
-        if (!elevated.ok) {
-          return { ok: false as const, error: elevated.error, ...result }
-        }
-        const retryArgs = args.filter((a, i, arr) => a !== '--source' && !(i > 0 && arr[i - 1] === '--source'))
-        retryArgs.push('--skip-file-copy')
-        result = await runFieldBrainBootstrapScript(
-          SYLO_REPO_ROOT,
-          'pgvector_install_from_folder.py',
-          retryArgs,
-          adminPassword.trim(),
-        )
-      }
-      return result
-    } catch (e) {
-      return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
-    }
-  })
-  ipcMain.handle('fieldbrain:pgvectorEnable', async (_e, values: unknown) => {
-    if (!values || typeof values !== 'object' || Array.isArray(values)) {
-      return { ok: false as const, error: 'bad_values' }
-    }
-    const raw = values as Record<string, unknown>
-    const adminPassword = typeof raw.adminPassword === 'string' ? raw.adminPassword : ''
-    if (!adminPassword.trim()) {
-      return { ok: false as const, error: 'Postgres superuser password is required (not saved).' }
-    }
-    const current = readFieldBrainConfig(app.getPath('userData'))
-    const host =
-      typeof raw.postgresHost === 'string' && raw.postgresHost.trim() ?
-        raw.postgresHost.trim()
-      : current.postgresHost
-    const port =
-      typeof raw.postgresPort === 'number' && Number.isFinite(raw.postgresPort) ?
-        Math.floor(raw.postgresPort)
-      : current.postgresPort
-    const appDatabase =
-      typeof raw.postgresDatabase === 'string' && raw.postgresDatabase.trim() ?
-        raw.postgresDatabase.trim()
-      : current.postgresDatabase
-    const adminUser =
-      typeof raw.adminUsername === 'string' && raw.adminUsername.trim() ?
-        raw.adminUsername.trim()
-      : 'postgres'
-    const args = [
-      '--admin-user',
-      adminUser,
-      '--host',
-      host,
-      '--port',
-      String(port),
-      '--database',
-      appDatabase,
-    ]
-    try {
-      return await runFieldBrainBootstrapScript(SYLO_REPO_ROOT, 'pgvector_enable.py', args, adminPassword.trim())
-    } catch (e) {
-      return { ok: false as const, error: e instanceof Error ? e.message : String(e) }
-    }
-  })
 
   ipcMain.handle('onenote:authStatus', async () => {
     try {
@@ -8789,12 +8380,16 @@ function registerIpc(): void {
     }
         const agentDir = hostAgentDir()
     // The web-access schema is generated lazily; ensure it exists so the
-    // Capability manager surfaces a "Configure" button for sylo-web-access.
+    // Capability manager surfaces a "Configure" button for the web-access
+    // extension (installed as an operator-local personal package since
+    // issue #39's final pass).
         ensureWebAccessConfigSchema(agentDir)
     // web-access: resolve directly to the 'web-access' runtime config key.
     // resolveExtensionConfigKey only matches node_modules-style package paths and
-    // misses the dev-tree packages/sylo-web-access/extensions layout, so match the
-    // extension by path and hand back the schema the broker actually reads.
+    // misses package-dir extension layouts (dev-tree or personal-repo), so match
+    // the extension by path (backslashes normalized so the
+    // Documents\GitHub\sylo-web-access local-path install matches too) and hand
+    // back the schema the broker actually reads.
     if (extensionPath.replace(/\\/g, '/').includes('/sylo-web-access/extensions/')) {
       return {
         ok: true as const,
@@ -10294,6 +9889,7 @@ function registerIpc(): void {
       return saveCompanionCredentials(username, password)
     },
   )
+
 }
 
 async function pullGithubBackupWorkspacesOnStartup(): Promise<void> {
@@ -10521,30 +10117,7 @@ function createWindow(): void {
   })
 }
 
-async function maybeAutoMigrateFieldBrainDb(): Promise<void> {
-  if (!readSyloOptionalPackagesPref()['sylo-fieldbrain']) return
-  try {
-    const config = readFieldBrainConfig(app.getPath('userData'))
-    const result = await runFieldBrainScript(SYLO_REPO_ROOT, 'db_auto_migrate.py', [], config)
-    if (result.migrated === true) {
-      console.info(
-        `[fieldbrain] Database migrated to schema ${String(result.applied_schema_version ?? '?')}`,
-      )
-    }
-  } catch (e) {
-    console.warn('[fieldbrain] Auto-migrate on startup failed:', e)
-  }
-}
-
 let primaryWorkspaceFolderMissing = false
-
-// Before whenReady so startup failures land in the log too.
-installCrashHandlers(() => mainWindow ?? null)
-
-// Windows groups taskbar buttons, jump lists, and notifications by this ID. Without
-// it the window is attributed to electron.exe, so a Start Menu shortcut pinned by the
-// operator never merges with the running window.
-if (process.platform === 'win32') app.setAppUserModelId(SYLO_APP_USER_MODEL_ID)
 
 /**
  * A second instance would open the same SQLite file with two writers, spawn a second
@@ -10570,6 +10143,9 @@ app.whenReady().then(() => {
   registerSkillSurfaceProtocol()
   registerExternalLinkRouting()
   db.openDatabase(app.getPath('userData'), SYLO_REPO_ROOT)
+  // Agent-raised "Restart Required" marker (issue #44): a launch IS the restart it
+  // waited for — consume the marker so the badge starts cleared on every fresh boot.
+  initRestartBadgeStore(app.getPath('userData'))
   // Brokers are child processes of THIS host — any 'compaction in progress' banner
   // in the database at boot outlived its process (crash/kill mid-compaction) and
   // can never settle. Morph them to cancelled before any session resumes.
@@ -10691,8 +10267,6 @@ app.whenReady().then(() => {
 
   void pullGithubBackupWorkspacesOnStartup()
 
-  void maybeAutoMigrateFieldBrainDb()
-
   void restartCompanionServer()
 
   // §4.3 durable render-ledger REPLAY (the §8.5 residual, issue #34): a video
@@ -10729,8 +10303,7 @@ app.on('before-quit', () => {
     /* */
   }
   disposeAllTerminals()
-    shutdownSubagentTaskHostSession()
-  thinkTankStore.flushThinkTankTurnWorkflow()
+        shutdownSubagentTaskHostSession()
   shutdownScheduledPromptsService()
   shutdownSweepService()
   closeAllWorkspaceScheduleDbs()

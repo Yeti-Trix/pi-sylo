@@ -18,27 +18,58 @@ const baseRoute = {
   fixturePath: '/skill-surface/routes/web-access/webaccess/index.html',
 }
 
+// sylo-tts stays a visible optional-package toggle (issue #39); the pref-gating
+// tests use it instead of web-access so they keep passing after the web-access
+// extraction pass.
+const ttsRoute = { ...baseRoute, skillName: 'tts', skillFolderName: 'tts', routeId: 'tts', title: 'Speech' }
+
+// Core packages (issue #39) are always visible regardless of prefs.
+const tasksRoute = {
+  ...baseRoute,
+  skillName: 'tasks',
+  skillFolderName: 'tasks',
+  routeId: 'tasks',
+  title: 'Tasks',
+}
+
 describe('filterSkillRoutesForSidebar', () => {
+  it('shows core-package routes even with an empty pref (issue #39)', () => {
+    const out = filterSkillRoutesForSidebar([tasksRoute], {
+      optionalPackagesPref: {},
+      disabledSkillPaths: [],
+    })
+    assert.equal(out.length, 1)
+    assert.equal(out[0].routeId, 'tasks')
+  })
+
+  it('hides core-package routes only when the skill dir is excluded', () => {
+    const out = filterSkillRoutesForSidebar([tasksRoute], {
+      optionalPackagesPref: { 'sylo-tasks': false },
+      disabledSkillPaths: [tasksRoute.skillDir],
+    })
+    assert.equal(out.length, 0)
+  })
+
   it('hides routes when optional package is off', () => {
-    const out = filterSkillRoutesForSidebar([baseRoute], {
-      optionalPackagesPref: { 'sylo-web-access': false },
+    const out = filterSkillRoutesForSidebar([ttsRoute], {
+      optionalPackagesPref: { 'sylo-tts': false },
       disabledSkillPaths: [],
     })
     assert.equal(out.length, 0)
   })
 
   it('shows routes when optional package is on', () => {
-    const out = filterSkillRoutesForSidebar([baseRoute], {
-      optionalPackagesPref: { 'sylo-web-access': true },
+    const out = filterSkillRoutesForSidebar([ttsRoute], {
+      optionalPackagesPref: { 'sylo-tts': true },
       disabledSkillPaths: [],
     })
     assert.equal(out.length, 1)
-    assert.equal(out[0].routeId, 'webaccess')
+    assert.equal(out[0].routeId, 'tts')
   })
 
   it('hides routes when skill is excluded from agent', () => {
-    const out = filterSkillRoutesForSidebar([baseRoute], {
-      optionalPackagesPref: { 'sylo-web-access': true },
+    const out = filterSkillRoutesForSidebar([ttsRoute], {
+      optionalPackagesPref: { 'sylo-tts': true },
       disabledSkillPaths: ['C:\\agent\\skills\\nutrition'],
     })
     assert.equal(out.length, 0)
